@@ -652,6 +652,61 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 - 晨查任务固定带 `--morning-recheck`，与晚间一样用 worktree 自己的解释器和脚本、`WorkingDirectory` 是 worktree；它在 09:15 之前跑完，只建议、不改账簿，命令自己会在 `registration_cutoff` 之后拒绝。仍是「未启用」：用户确认 `V2-P7-006` 的登记并明确同意安装之前，不要安装。
 - 手动从别处调用时形状与生成的任务相同：`<worktree>/.venv/bin/python <worktree>/scripts/daily_selection.py --runtime-dir <RT> --repo <worktree> --registration <worktree>/<幸存者登记文件> --morning-recheck`，经 `uv run --no-sync --env-file .env` 读 `.env`，工作目录是 worktree。
 
+### 正式登记（`V2-P7-006b`）
+
+> **状态：工具已交付，登记没有发生。** 这一节写的是登记那一天**要做什么**，不是已经做过的事；
+> 在冒烟阶段 1 的 go 之后、并且用户明确说"登记"之前，不要运行 `scripts/p7_register.py` 的写入，
+> 也不要写出 `docs/research/p7-registration.json`。登记绑定 `src/`、`scripts/research/`、
+> `pyproject.toml`、`uv.lock` 与两个每日脚本的字节；登记之后再改其中任何一处，就是另一份登记
+> （新运行目录、新纪元）。以下每条命令都按顺序，写入器自己从不 `git add`、从不 commit。
+
+1. **前提**（全部成立才做）：冒烟阶段 1 的 go；本分支并入 `main`；D-1…D-6 已由用户回答并落成
+   常量（改了就重跑登记测试）；用户明确说"登记"。
+2. **在主检出**（非浅克隆、无 grafts）确认 `git status` 干净、`HEAD` 在 `main` 上。写入器会自己
+   拒绝：受绑定路径脏、`HEAD` 不在 `main`、`--smoke-commit` 不是完整 40 位或它的受绑定字节与
+   `HEAD` 不同、`--path` 不在 `docs/research/` 下或不是 `.json`、纪元不是工作日 / 晚于今天（上海
+   日期）/ 早于今天超过 16 个日历日、已有链根而未给 `--supersedes`、`--supersedes` 未提交或字节
+   不符。每条拒绝都是退出码 2，且什么都不写。
+3. **定纪元**：`--epoch` = 第一晚的**前一个交易日**（已存日历的开市日；第一晚距它最多
+   `1 + max_panel_catch_up_sessions` = 11 个会话）。纪元由用户定第一晚后决定。
+4. **空跑一次，给用户看**：
+
+   ```bash
+   uv run --no-sync python scripts/p7_register.py --epoch <纪元> \
+     --smoke-commit <冒烟阶段 1 的提交> --dry-run
+   ```
+
+   它打印登记的规范 JSON、`config_id`、将得的 sha256 与一行"未写入"，**什么都不写**。
+5. **写入**（去掉 `--dry-run`，同一组参数）：
+
+   ```bash
+   uv run --no-sync python scripts/p7_register.py --epoch <纪元> \
+     --smoke-commit <冒烟阶段 1 的提交>
+   ```
+
+   然后只提交这一个文件（提交信息含 `V2-P7-006b`，登记提交必须先于任何前向运行）。
+6. **跑登记测试**（它此时覆盖真实文件）：`uv run pytest tests/unit/test_p7_registration_chain.py`。
+   链测试会核对：恰好一个链根、每一环指向集合内、没有分叉；链根的 `config`/`criteria`/
+   `settings`/`config_id` 与写入器的构造一致。
+7. **钉 worktree 与新的运行目录**：一个运行目录只有一本账簿（D14），正式登记用**新目录**
+   （D-5，例如 `~/openalpha-p7/runtime`：新目录、新纪元，P6 的 `~/openalpha-research` 不动；
+   面板从冒烟根的面板 `cp -c -R` 克隆）。钉 worktree：
+
+   ```bash
+   uv run --no-sync python scripts/daily_selection.py --pin-worktree <新目录> \
+     --registration docs/research/p7-registration.json
+   ```
+
+8. **launchd 只打印、不安装**：`--launchd-plist` 与 `--launchd-morning-plist` 只输出文本；不要用
+   `--install`（未知参数，退出 2）。安装要用户另行明确同意，本登记不安装。
+9. **登记记录**：在 `docs/research/p7-protocol.md` §12 追加登记提交、sha256、`config_id`、纪元与
+   钉住的 commit（正文不改；旧登记若被取代只在文档里写"已被取代"，不改已提交的 JSON）。
+10. **第一晚由用户手动跑**；第 1 步对纪元做 0 次请求的精确核对。真钱闸门仍关着。
+
+受绑定代码里两处已知接缝（中断被报成第 2 步拒绝；`invoke` 捕获的 click 错误类型不对）是
+**接受的已知局限**（D-6，见协议文档 §3.6）：它们只影响中断与补救路径的退出码/分类，不改分数或
+订单；登记之后再修就是换登记。
+
 ### 已知局限（幸存者形态）
 
 1. **新年第一个交易日之前没有更名公告：名称语料一侧已经处理（`V2-P7-021`，取值暂定），登记簿一侧也已处理（`V2-P7-025`）。** 当年第一条更名公告之前，Tushare 对当年的 `namechange` 一行也不给（2012 年第一条公告是 1 月 5 日，晚于第一个交易日 1 月 4 日）。以前面板拒写空分区，第 2 步在这个目标上失败，日志钉住了这一天的 `as_of`，每次重跑问的都是同一个空窗口，这一天丢了，不是推迟了。现在 `panel build` 把当年记成零行分区（输出里有一行 `EMPTY namechange year=…`），读名称语料的读者（事实、第 3 步 doctor、第 4 步因子构建、清晨复核的通知、迟到记录核查）只在到该年 1 月 31 日（含，上海日历日）为止把它读作「尚无更名」，当年第一条真实更名到来时零行分区被整份替换；失败或截断的抓取、过了窗口的空回答、已有更名行的年、不是当年的空回答仍按名拒绝；P6 的 `--full-update` 在一月初也不再因 `namechange` 失败，而是写空分区并继续。**「两种 `no_data` 都算经核实为空」与「到 1 月 31 日」是暂定取值，用户还没有确认**（常量 `NAME_YEAR_EMPTY_THROUGH`）。**登记簿的同一缺口已由 `V2-P7-025` 在本分支上关闭（未推送、未真实运行）**：整份登记簿抓取成功、观测年没有上市/退市时，`panel build` 把该生命周期年记成零行分区（输出里有一行 `EMPTY stock_basic year=…`），所有读者（`panel doctor` 检查 `stock_basic` 时、第 4 步因子构建、周报的标签读取、事实适配器，以及一切经 `load_stock_universe` 的读取）**只在到当年 12 月 31 日（含，上海日历日）为止**把它读作「今年还没有上市或退市」，当年第一条真实事件到来时零行分区被整份替换；失败或截断的抓取、`no_data` 的整份回答、过了窗口的空回答、已有行的年在相同或更晚的观测时刻仍按名拒绝；更早的重放什么都不写。此前这一年会丢：日志钉住了这天的 `as_of`，重跑会得到同一个 `partition_missing`（重跑是推断，未实测），前向周报的标签读取也被拒（P6 已知局限第 6 条记录了同一缺口，现由同一修法关闭）。
