@@ -8,6 +8,11 @@ The measurement this module exists to invert, taken on `d234e4b` against this sa
     addresses equal? True
     decision ids equal? True
 
+`V2-P7-012` fills `prompt_versions` with the `PromptTemplate` artifact the agent sent. The
+measured block above is kept as the record of what caused the field to be declared; the
+tests below are the new state, and the two `()` expectations that remain are deterministic
+runs' -- a run with no LLM-backed agent must still record no prompt.
+
 Two runs whose only difference was which vendor model answered produced the same
 `run_manifest_id` and the same `decision_id`. That is roadmap section 9's finding -- "different
 configurations produce the same decision ID" -- reproduced in the model plane after
@@ -31,7 +36,8 @@ from typing import Any, Final
 import pytest
 
 from openalpha_cn.agents.baseline import MarketAgent
-from openalpha_cn.agents.model import StructuredSignalAgent
+from openalpha_cn.agents.model import StructuredAgentPayload, StructuredSignalAgent
+from openalpha_cn.agents.prompts import STRUCTURED_SIGNAL_PROMPT_V1, PromptTemplate
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.models.base import ModelCapabilities, ModelMetadata
 from openalpha_cn.runtime.composition import build_storage
@@ -92,7 +98,11 @@ def run_once(
     """Drive one real `run_cycle` in a fresh runtime directory, varying only the agent panel."""
     counter = {"n": 0}
 
-    def _run(*, model: str | None) -> ResearchRunResult:
+    def _run(
+        *,
+        model: str | None,
+        prompt: PromptTemplate = STRUCTURED_SIGNAL_PROMPT_V1,
+    ) -> ResearchRunResult:
         counter["n"] += 1
         item = evidence(
             kind="limit_up",
@@ -107,6 +117,7 @@ def run_once(
                     agent_id="llm-agent",
                     evidence_families=frozenset({"market_event"}),
                     provider=provider,
+                    prompt=prompt,
                 ),
             )
         storage = build_storage(runtime_dir=tmp_path / f"runtime{counter['n']}", clock=frozen_clock)
@@ -224,3 +235,58 @@ def test_the_ledger_inherits_the_new_planes_without_gaining_a_field_per_plane(
     assert "agent_versions" not in DecisionLedger.model_fields
     assert "alpha_model_versions" not in DecisionLedger.model_fields
     assert result.decision.run_manifest_id == result.manifest.run_manifest_id
+
+
+def test_an_llm_run_records_its_prompt_version_in_the_manifest_and_the_decision(
+    run_once: Callable[..., ResearchRunResult],
+) -> None:
+    """`V2-P7-012`: the prompt artifact the run used is recorded, in both planes.
+
+    Asserted by value -- the reference the template itself derives, with the response schema
+    the agent sent -- rather than by non-emptiness, because "the slot is populated" is what
+    `V2-P4-010` could already have said about a constant. The ledger mirror is asserted too:
+    a decision that named a different prompt than the manifest did would be two answers to
+    one question.
+    """
+    result = run_once(model="qwen-max-2025-01-25")
+    expected = STRUCTURED_SIGNAL_PROMPT_V1.version_ref(
+        response_schema=StructuredAgentPayload.model_json_schema(mode="validation")
+    )
+
+    assert result.manifest.prompt_versions == (expected,)
+    assert result.decision.prompt_versions == (expected,)
+    assert expected.component == f"prompt:{STRUCTURED_SIGNAL_PROMPT_V1.name}"
+
+
+def test_a_one_character_prompt_edit_moves_the_prompt_version_and_the_run_address(
+    run_once: Callable[..., ResearchRunResult],
+) -> None:
+    """The whole reason a prompt becomes an artifact: editing it is a different run.
+
+    One character, case only, so the two prompts are as close as two distinct artifacts can be
+    and every downstream answer is still byte-identical (the fixed provider ignores both). If
+    the addresses separate, the prompt version is what separated them.
+    """
+    edited = PromptTemplate(
+        name=STRUCTURED_SIGNAL_PROMPT_V1.name,
+        system=STRUCTURED_SIGNAL_PROMPT_V1.system.replace("Return", "return"),
+        user_format=STRUCTURED_SIGNAL_PROMPT_V1.user_format,
+    )
+    assert edited.system != STRUCTURED_SIGNAL_PROMPT_V1.system
+
+    original = run_once(model="qwen-max-2025-01-25")
+    changed = run_once(model="qwen-max-2025-01-25", prompt=edited)
+
+    assert original.manifest.prompt_versions != changed.manifest.prompt_versions
+    assert original.manifest.run_manifest_id != changed.manifest.run_manifest_id
+    assert original.decision.decision_id != changed.decision.decision_id
+
+
+def test_a_run_with_no_llm_agent_still_records_no_prompt(
+    run_once: Callable[..., ResearchRunResult],
+) -> None:
+    """The slot stays empty where nothing was asked -- the other half of "records which one"."""
+    result = run_once(model=None)
+
+    assert result.manifest.prompt_versions == ()
+    assert result.decision.prompt_versions == ()

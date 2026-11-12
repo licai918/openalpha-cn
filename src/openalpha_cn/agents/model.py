@@ -5,6 +5,7 @@ import json
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult
+from openalpha_cn.agents.prompts import STRUCTURED_SIGNAL_PROMPT_V1, PromptTemplate
 from openalpha_cn.domain.run import VersionRef
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.models.base import ModelProvider
@@ -34,6 +35,7 @@ class StructuredSignalAgent:
         provider: ModelProvider,
         feature_dependencies: frozenset[str] = frozenset(),
         max_attempts: int = 2,
+        prompt: PromptTemplate = STRUCTURED_SIGNAL_PROMPT_V1,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
@@ -50,6 +52,7 @@ class StructuredSignalAgent:
         self.feature_dependencies = feature_dependencies
         self.provider = provider
         self.max_attempts = max_attempts
+        self.prompt = prompt
         # V2-P4-010: read off the provider at construction, not restated by the caller.
         # `ModelMetadata` already knows which endpoint and which model this agent will call,
         # and those two strings are precisely what `RunManifest.code_commit` cannot pin --
@@ -59,9 +62,16 @@ class StructuredSignalAgent:
         # failure being closed is a manifest that names one model while the run called
         # another, which is a strictly worse version of the `"baseline/v1"` this issue removes.
         metadata = provider.metadata
+        # V2-P7-012: the prompt is a versioned artifact, and which one this agent will send is
+        # declared here so the engine can lift it into the manifest. The schema is the same
+        # `model_json_schema(mode="validation")` the call below sends, so a schema edit moves
+        # the prompt version even when the prose is untouched.
         self.provenance = AgentProvenance(
             kind="llm_backed",
             model=VersionRef(component=metadata.provider_id, version=metadata.model),
+            prompt=prompt.version_ref(
+                response_schema=StructuredAgentPayload.model_json_schema(mode="validation")
+            ),
         )
 
     def analyze(self, context: AgentContext) -> AgentResult:
@@ -85,11 +95,10 @@ class StructuredSignalAgent:
         for _attempt in range(1, self.max_attempts + 1):
             try:
                 raw = self.provider.generate_json(
-                    system=(
-                        "Return only the requested structured research payload. "
-                        "Cite only supplied evidence IDs and abstain when insufficient."
+                    system=self.prompt.system,
+                    user=self.prompt.user_format.format(
+                        payload_json=json.dumps(user_payload, ensure_ascii=False, sort_keys=True)
                     ),
-                    user=json.dumps(user_payload, ensure_ascii=False, sort_keys=True),
                     schema=schema,
                 )
                 payload = StructuredAgentPayload.model_validate(raw)

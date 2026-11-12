@@ -672,28 +672,6 @@ def _chainlin_is_still_built_only_for_doctor() -> str | None:
     return None if builders == ["cli.py"] else f"ChainLinDataProvider is now built in {builders}"
 
 
-def _the_manifest_still_records_no_prompt() -> str | None:
-    recorded: list[str] = []
-    for path in sorted(SRC.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        if "RunManifest(" not in text:
-            continue
-        for node in ast.walk(ast.parse(text, filename=str(path))):
-            if not (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "RunManifest"
-            ):
-                continue
-            recorded.extend(
-                f"{path.relative_to(SRC).as_posix()}:{node.lineno}"
-                for keyword in node.keywords
-                if keyword.arg == "prompt_versions"
-                and not (isinstance(keyword.value, ast.Tuple) and not keyword.value.elts)
-            )
-    return None if not recorded else f"a RunManifest now records prompt versions at {recorded}"
-
-
 def _validation_still_applies_no_trading_rule() -> str | None:
     reached = _imports_under(SRC / "backtest" / "validation.py", PORTFOLIO_EXECUTION)
     return None if not reached else f"backtest/validation.py now imports {reached}"
@@ -1042,6 +1020,11 @@ class RetiredClaim:
 
 
 RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
+    # `V2-P7-012` removed the entry named "a run records its prompt versions": its premise
+    # (`RunManifest`'s construction put `prompt_versions=()` on every run) is now false in the
+    # direction the entry was refuting, because a prompt is a `PromptTemplate` artifact and the
+    # engine records its content address. A retired claim that the code now supports is no
+    # longer retired; its wordings became true statements, not violations.
     RetiredClaim(
         name="the committee's parts switch on and off one by one",
         pattern=re.compile(
@@ -1790,35 +1773,6 @@ RETIRED_CLAIMS: Final[tuple[RetiredClaim, ...]] = (
         ),
         paraphrase="链邻接口出错时研究会自动降级。",
         premise=_chainlin_is_still_built_only_for_doctor,
-    ),
-    RetiredClaim(
-        name="a run records its prompt versions",
-        pattern=re.compile(
-            rf"RunManifest{_NO_COMMA_OR_DENIAL}{{0,4}}(?:记录|保存|写入|包含)"
-            rf"{_NO_COMMA_OR_DENIAL}{{0,36}}Prompt"
-            rf"|Prompt{_NO_DENIAL}{{0,40}}(?:进入|写入)\s*RunManifest"
-            rf"|每次运行保存{_NO_DENIAL}{{0,40}}Prompt"
-            r"|版本化模型与\s*Prompt|模型与\s*Prompt\s*版本"
-        ),
-        refuted_by=(
-            "RunManifest's one construction in a research run puts prompt_versions=() -- a "
-            "literal empty tuple -- on every run (runtime/engine.py:136), and the DecisionLedger "
-            "copies it (:170); nothing in src/ assigns it otherwise. The repository's own prompts "
-            "are string literals pinned by code_commit (model_view.py:2247-2250); a prompt a "
-            "caller's own code sends is recorded nowhere."
-        ),
-        retired=(
-            "`RunManifest` 记录代码、配置、Provider、模型、Prompt、随机种子和环境版本",
-            "RunManifest 记录代码、配置、Provider、模型、Prompt、随机种子和环境",
-            "模型、Prompt、代码、配置、随机种子和证据哈希都进入 RunManifest",
-            "每次运行保存代码提交、配置摘要、Provider 载荷哈希、模型和 Prompt 版本、随机种子与环境",
-            "用冻结 Provider Payload、固定随机种子、版本化模型与 Prompt、"
-            "配置摘要和内容哈希建立复现清单",
-            "四时钟、模型与 Prompt 版本、双委员会、风险和组合执行都能沿关联链回溯",
-            "RunManifest 保存模型、Prompt、代码与配置版本",
-        ),
-        paraphrase="每次运行都会留下提示词的版本。",
-        premise=_the_manifest_still_records_no_prompt,
     ),
     RetiredClaim(
         name="README counts ten key capability classes",

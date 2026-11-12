@@ -110,12 +110,20 @@ class AgentProvenance(BaseModel):
     `model` is the vendor identity for an LLM-backed agent -- `ModelMetadata.provider_id` and
     `ModelMetadata.model`, the two things `code_commit` cannot pin because they live at
     somebody else's endpoint. It is constrained in both directions below.
+
+    `prompt` is the prompt artifact's content address (`V2-P7-012`), for the other half of what
+    a run's behaviour depends on but `code_commit` cannot pin once a prompt is a value a caller
+    chooses: `PromptTemplate.version_ref` hashes the template and the response schema together.
+    Only an LLM-backed agent may carry one -- a deterministic agent naming a prompt would put a
+    version into the manifest that no model was ever asked, which is a fabricated provenance row
+    rather than a stricter declaration.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
     kind: AgentKind
     model: VersionRef | None = None
+    prompt: VersionRef | None = None
 
     @model_validator(mode="after")
     def validate_model_matches_kind(self) -> Self:
@@ -123,6 +131,8 @@ class AgentProvenance(BaseModel):
             raise ValueError("an llm_backed agent must name the vendor model it calls")
         if self.kind != "llm_backed" and self.model is not None:
             raise ValueError("only an llm_backed agent may name a vendor model")
+        if self.kind != "llm_backed" and self.prompt is not None:
+            raise ValueError("only an llm_backed agent may name a prompt artifact")
         return self
 
 
@@ -300,15 +310,19 @@ class RunManifest(BaseModel):
     unconditionally.
     """
     prompt_versions: tuple[VersionRef, ...] = ()
-    """The prompt artifacts this run used. Still `()` on every path, and correctly so.
+    """The prompt artifacts this run used, content-addressed (`V2-P7-012`).
 
-    The row records this slot as "永远为空" and it stays empty here, because the alternative
-    would be a second copy rather than a fact: the only prompt in this repository is the string
-    literal in `agents/model.py::StructuredSignalAgent.analyze`, and a string literal is pinned
-    by `code_commit`, which this manifest already carries. Filling this slot becomes a real
-    statement when a prompt becomes an artifact with a life outside the source tree -- stored,
-    edited without a commit, or selected at run time. No issue in the `010`-`021` chain makes
-    one, so this is left declared and unfilled rather than fabricated.
+    `V2-P4-010` declared this slot and left it empty for a reason that was true then: the only
+    prompt was the string literal in `agents/model.py::StructuredSignalAgent.analyze`, and a
+    string literal is pinned by `code_commit`, which this manifest already carries. `V2-P7-012`
+    changed the fact rather than the slot -- a prompt is a `PromptTemplate` artifact whose
+    `{name, system, user_format, response_schema}` is hashed into a `prompt:<name>` content
+    address, the agent declares it through `AgentProvenance.prompt`, and the engine lifts the
+    executed agents' declarations here. An edited prompt is therefore a different run even when
+    the commit is unchanged.
+
+    Empty for a run with no LLM-backed agent in it, which is a real answer rather than a
+    missing one -- the same shape `model_versions` has for the same reason.
     """
     alpha_model_versions: tuple[AlphaModelRef, ...] = ()
     """The quantitative model artifacts this run consumed. Filled by `openalpha model daily-run`.

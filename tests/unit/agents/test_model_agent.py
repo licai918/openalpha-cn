@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Any
 
@@ -55,6 +56,8 @@ class FakeModelProvider:
         self.outputs = outputs
         self.calls = 0
         self.schema: dict[str, Any] | None = None
+        self.systems: list[str] = []
+        self.users: list[str] = []
 
     def generate_json(
         self,
@@ -65,6 +68,8 @@ class FakeModelProvider:
     ) -> dict[str, Any]:
         assert system
         assert "ev_" in user
+        self.systems.append(system)
+        self.users.append(user)
         self.schema = schema
         output = self.outputs[self.calls]
         self.calls += 1
@@ -145,3 +150,58 @@ def test_structured_model_agent_fails_explicitly_after_retry_budget(
                 evidence=(item,),
             )
         )
+
+
+PREVIOUS_SYSTEM = (
+    "Return only the requested structured research payload. "
+    "Cite only supplied evidence IDs and abstain when insufficient."
+)
+
+
+def test_the_default_prompt_sends_exactly_the_previous_system_text(
+    theme_evidence, valid_output, frozen_now: datetime
+) -> None:
+    """`V2-P7-012`: versioning the prompt did not rewrite it.
+
+    The system message and the user rendering are pinned byte for byte against what this
+    agent sent before the prompt became an artifact. A store whose recorded exchanges are
+    content-addressed would treat any drift here as a new question, so "it got versioned"
+    may not quietly mean "it got edited".
+    """
+    item = theme_evidence()
+    provider = FakeModelProvider([valid_output(item)])
+    agent = StructuredSignalAgent(
+        agent_id="model-theme-agent",
+        evidence_families=frozenset({"theme"}),
+        provider=provider,
+        max_attempts=2,
+    )
+
+    agent.analyze(
+        AgentContext(
+            run_id="run_model",
+            subject="000001.SZ",
+            as_of=frozen_now,
+            evidence=(item,),
+        )
+    )
+
+    assert provider.systems == [PREVIOUS_SYSTEM]
+    assert provider.users == [
+        json.dumps(
+            {
+                "run_id": "run_model",
+                "subject": "000001.SZ",
+                "as_of": frozen_now.isoformat(),
+                "evidence": [
+                    {
+                        "evidence_id": item.evidence_id,
+                        "kind": "theme",
+                        "summary": "Synthetic theme evidence.",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    ]

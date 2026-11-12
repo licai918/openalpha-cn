@@ -8,6 +8,11 @@ by driving a real `run_cycle` (see this module's sibling
   executed agent -- an agent id in a slot named for model versions, paired with a **constant**.
 - `prompt_versions` was `()` on every path.
 
+`V2-P7-012` filled the third slot: a prompt is now a `PromptTemplate` artifact whose
+`{name, system, user_format, response_schema}` is content-addressed, the agent declares that
+reference, and the engine lifts it into the manifest. The `()` measurement above is kept as
+the precedent that caused the field to be declared early; it is no longer today's state.
+
 The constant is the part worth stating precisely, because it is why nobody noticed. A field
 whose value never varies contributes a fixed string to the canonical JSON and therefore
 nothing at all to the address; `"baseline/v1"` being factually wrong about an LLM-backed agent
@@ -51,6 +56,7 @@ DIGEST: Final[str] = "a" * 64
 ARTIFACT: Final[str] = "mdl_" + "0" * 24
 OTHER_ARTIFACT: Final[str] = "mdl_" + "1" * 24
 SOURCE_ROOT: Final[Path] = Path(openalpha_cn.__file__).resolve().parent
+PROMPT_REF: Final[VersionRef] = VersionRef(component="prompt:structured-signal/v1", version=DIGEST)
 
 
 ADDRESS_BUILDERS: Final[frozenset[str]] = frozenset({"stable_model_id", "cross_section_digest"})
@@ -162,7 +168,7 @@ def _manifest(**overrides: Any) -> RunManifest:
         "provider_payload_digests": (ArtifactDigest(name="tushare.daily", sha256=DIGEST),),
         "agent_versions": (AgentVersion(agent_id="market-agent", kind="deterministic"),),
         "model_versions": (VersionRef(component="openai-compatible", version="qwen-max"),),
-        "prompt_versions": (),
+        "prompt_versions": (PROMPT_REF,),
         "alpha_model_versions": (AlphaModelRef(name="lgbm-baseline", artifact_id=ARTIFACT),),
         "random_seed": 7,
         "environment": (VersionRef(component="python", version="3.11.14"),),
@@ -276,6 +282,42 @@ def test_the_vendor_model_reaches_the_run_address() -> None:
     )
 
     assert qwen.run_manifest_id != deepseek.run_manifest_id
+
+
+def test_a_prompt_version_reaches_the_run_address() -> None:
+    """`V2-P7-012` fills the slot `V2-P4-010` declared: which prompt artifact ran is an input.
+
+    Both halves are asserted -- occupied against empty, and two occupied slots differing only in
+    the artifact's digest -- because "a prompt was used" and "which prompt was used" are
+    different claims, and the second is the one a versioned artifact exists to make possible.
+    """
+    none = _manifest(prompt_versions=())
+    one = _manifest(prompt_versions=(PROMPT_REF,))
+    other = _manifest(
+        prompt_versions=(VersionRef(component="prompt:structured-signal/v1", version="b" * 64),)
+    )
+
+    assert len({none.run_manifest_id, one.run_manifest_id, other.run_manifest_id}) == 3
+
+
+def test_an_agent_that_is_not_llm_backed_may_not_declare_a_prompt() -> None:
+    """The prompt declaration is constrained like the vendor model beside it.
+
+    A deterministic agent naming a prompt artifact would put a version into `prompt_versions`
+    that no model was ever asked, which is a fabricated provenance row rather than a stricter
+    declaration; an LLM-backed agent may carry one because a prompt is what it actually sent.
+    """
+    reference = VersionRef(component="prompt:structured-signal/v1", version="a" * 64)
+
+    with pytest.raises(ValueError, match="only an llm_backed agent may name a prompt"):
+        AgentProvenance(kind="deterministic", prompt=reference)
+
+    declared = AgentProvenance(
+        kind="llm_backed",
+        model=VersionRef(component="openai-compatible", version="qwen"),
+        prompt=reference,
+    )
+    assert declared.prompt == reference
 
 
 # --- the quantitative plane (the third slot) --------------------------------------------

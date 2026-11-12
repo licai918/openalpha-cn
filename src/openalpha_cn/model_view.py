@@ -2448,8 +2448,11 @@ def _file_run(
 
     **The other three component planes stay empty and each is a statement.** `agent_versions` is
     empty because no agent ran; `model_versions` because no vendor model was called -- this run
-    reads a stored panel and fits stdlib arithmetic over it; `prompt_versions` because the only
-    prompt in this repository is a string literal `code_commit` already pins.
+    reads a stored panel and fits stdlib arithmetic over it; `prompt_versions` because no
+    LLM-backed agent is on this path, so no prompt artifact was sent. (`V2-P7-012` retired the
+    older justification -- prompts are versioned artifacts now, and `agents/prompts.py` holds
+    their content addresses; the slot is empty here because this run sends none, not because a
+    prompt could not be recorded.)
 
     Filed under an id derived from the prediction's own content address, so a re-run that
     reproduces a prediction finds its manifest already held and reports `unchanged` rather than
