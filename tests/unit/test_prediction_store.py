@@ -203,9 +203,12 @@ def test_the_supersedes_lineage_is_contract_only_and_no_shipped_face_can_supply_
     """`V2-P4-093`: the referent check above cannot fire in shipped code, and that is recorded.
 
     `put` refuses a `supersedes` naming nothing held, which is `V2-P4-049`'s lesson applied. The
-    acceptance measured that nothing can reach it: `run_daily` is the only caller and passes
-    three keywords, and none of the three faces above it carries a fourth -- no CLI flag, no
-    field on either request model, no SDK parameter. So
+    acceptance measured that nothing can reach it: `run_daily` is the only face that can supply a
+    batch and passes three keywords, and none of the three faces above it carries a fourth -- no
+    CLI flag, no field on either request model, no SDK parameter. The forward-registration
+    protocol's `put` moved from `scripts/daily_selection.py` into
+    `src/openalpha_cn/strategy_forward_session.py` under `V2-P7-013`, so this scan now sees it
+    too; it likewise passes `batch`, `calendar` and `zone` only and no `supersedes`. So
     `test_a_recomputation_naming_a_record_this_store_does_not_hold_is_refused` exercises a
     contract, not a path a user can walk.
 
@@ -217,7 +220,8 @@ def test_the_supersedes_lineage_is_contract_only_and_no_shipped_face_can_supply_
     reader meets it, and this test is what turns wiring one into a red rather than a surprise.
     """
     assert _prediction_put_call_sites() == {
-        ("model_view.py", frozenset({"batch", "calendar", "zone"}))
+        ("model_view.py", frozenset({"batch", "calendar", "zone"})),
+        ("strategy_forward_session.py", frozenset({"batch", "calendar", "zone"})),
     }
     assert "supersedes" in inspect.signature(FilePredictionStore.put).parameters
 
