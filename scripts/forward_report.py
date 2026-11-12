@@ -1214,7 +1214,7 @@ def _replace_whole(path: Path, text: str) -> None:
 def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _utc_now) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--runtime-dir", type=Path, required=True)
-    parser.add_argument("--registration", type=Path, default=daily_selection.DEFAULT_REGISTRATION)
+    parser.add_argument("--registration", type=Path)
     parser.add_argument("--repo", type=Path, default=daily_selection.REPOSITORY)
     parser.add_argument(
         "--as-of",
@@ -1235,6 +1235,8 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
     )
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
     arguments = parser.parse_args(argv)
+    if arguments.registration is None:
+        parser.error(daily_selection.NO_REGISTRATION_DEFAULT)
     banner = daily_selection.smoke_banner(arguments.registration)
     if banner is not None:
         print(banner, file=sys.stderr)

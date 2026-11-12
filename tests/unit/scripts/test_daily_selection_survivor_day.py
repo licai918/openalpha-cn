@@ -3308,8 +3308,8 @@ def test_a_registration_that_is_not_there_says_what_to_do_next(
     assert lines[2:] == [
         "next: --registration must name a registration committed in the checkout --repo names "
         f"({tmp_path}); a configuration is registered with scripts/research/registry.py's "
-        "register() and committed before a day can run it (the default, "
-        "docs/research/p6-registration.json, is the P6 book's)"
+        "register() and committed before a day can run it (there is no default: "
+        "docs/research/p6-registration.json is the P6 book's, whose registration is paused)"
     ]
 
 

@@ -1667,6 +1667,8 @@ def test_a_print_only_mode_refuses_an_account_record(
     arguments = [
         "--runtime-dir",
         str(tmp_path / "runtime"),
+        "--registration",
+        str(daily.DEFAULT_REGISTRATION),
         flag,
         value,
         "--account-record",
@@ -1700,6 +1702,8 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
         [
             "--runtime-dir",
             str(runtime),
+            "--registration",
+            "docs/research/p6-registration.json",
             "--launchd-plist",
             str(logs),
             "--worktree",
@@ -1836,6 +1840,8 @@ def test_the_two_launchd_jobs_cannot_be_printed_at_once(
     arguments = [
         "--runtime-dir",
         str(tmp_path / "runtime"),
+        "--registration",
+        str(daily.DEFAULT_REGISTRATION),
         "--worktree",
         str(tmp_path / "pinned"),
         "--uv",
@@ -1874,6 +1880,8 @@ def test_no_launchd_install_path_exists(
                 [
                     "--runtime-dir",
                     str(tmp_path / "runtime"),
+                    "--registration",
+                    "docs/research/p6-registration.json",
                     "--worktree",
                     str(tmp_path / "pinned"),
                     "--uv",
@@ -1888,7 +1896,16 @@ def test_no_launchd_install_path_exists(
         assert not logs.exists()
 
     with pytest.raises(SystemExit) as refused_flag:
-        daily.main(["--runtime-dir", str(tmp_path / "runtime"), "--install", str(logs)])
+        daily.main(
+            [
+                "--runtime-dir",
+                str(tmp_path / "runtime"),
+                "--registration",
+                str(daily.DEFAULT_REGISTRATION),
+                "--install",
+                str(logs),
+            ]
+        )
     assert refused_flag.value.code == 2
     assert "unrecognized arguments" in capsys.readouterr().err
 
@@ -1901,6 +1918,8 @@ def test_an_env_file_uv_would_split_is_refused_instead_of_printing_a_job_that_ca
     arguments = [
         "--runtime-dir",
         str(tmp_path / "runtime"),
+        "--registration",
+        "docs/research/p6-registration.json",
         "--launchd-plist",
         str(tmp_path / "logs"),
         "--worktree",
@@ -2094,6 +2113,8 @@ def test_the_launchd_job_loads_the_env_file_through_uv_from_a_path_with_spaces(
         [
             "--runtime-dir",
             str(spaced / "runtime"),
+            "--registration",
+            "docs/research/p6-registration.json",
             "--launchd-plist",
             str(spaced / "logs"),
             "--worktree",

@@ -146,7 +146,15 @@ def test_show_book_refuses_a_runtime_directory_with_no_book_and_creates_nothing(
     out = io.StringIO()
     err = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = daily.main(["--runtime-dir", str(runtime), "--show-book"])
+        code = daily.main(
+            [
+                "--runtime-dir",
+                str(runtime),
+                "--registration",
+                str(daily.DEFAULT_REGISTRATION),
+                "--show-book",
+            ]
+        )
 
     assert code == 1
     assert out.getvalue() == ""
@@ -255,7 +263,16 @@ def test_show_book_refuses_the_modes_it_cannot_be_combined_with(
     monkeypatch.setattr(daily, "sync_pinned_environment", refused("sync_pinned_environment"))
     err = io.StringIO()
     with contextlib.redirect_stderr(err), pytest.raises(SystemExit) as exited:
-        daily.main(["--runtime-dir", str(world.runtime), "--show-book", *others])
+        daily.main(
+            [
+                "--runtime-dir",
+                str(world.runtime),
+                "--registration",
+                str(daily.DEFAULT_REGISTRATION),
+                "--show-book",
+                *others,
+            ]
+        )
 
     assert exited.value.code == 2
     assert "--show-book cannot be combined with" in err.getvalue()
@@ -275,7 +292,15 @@ def test_a_damaged_head_snapshot_is_refused_by_name_not_read_as_an_empty_book(
     out = io.StringIO()
     err = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = daily.main(["--runtime-dir", str(runtime), "--show-book"])
+        code = daily.main(
+            [
+                "--runtime-dir",
+                str(runtime),
+                "--registration",
+                str(daily.DEFAULT_REGISTRATION),
+                "--show-book",
+            ]
+        )
 
     assert code == 1
     assert out.getvalue() == ""
@@ -602,6 +627,8 @@ def test_morning_recheck_refuses_an_account_record(tmp_path: Path) -> None:
             [
                 "--runtime-dir",
                 str(tmp_path / "runtime"),
+                "--registration",
+                str(daily.DEFAULT_REGISTRATION),
                 "--morning-recheck",
                 "--account-record",
                 str(tmp_path / "record.json"),

@@ -330,6 +330,13 @@ if TYPE_CHECKING:
 DAILY_SELECTION_SCHEMA: Final[str] = "openalpha-daily-selection/v1"
 DEFAULT_REGISTRATION: Final[Path] = REPOSITORY / "docs" / "research" / "p6-registration.json"
 REGISTRATION_IN_REPOSITORY: Final[str] = "docs/research/p6-registration.json"
+NO_REGISTRATION_DEFAULT: Final[str] = (
+    "--registration is required: it has no default, because the P6 book's registration is paused"
+)
+"""Why the command line's `--registration` has no default (`V2-P7-006a`): the survivor
+registration (`V2-P7-006b`) is run by hand for years from a pinned worktree, so a forgotten flag
+must be refused instead of running the paused P6 book. Shared with `scripts/forward_report.py`,
+whose flag is the same."""
 JOURNAL_DIRECTORY: Final[str] = "daily_selection"
 THIS_SCRIPT: Final[str] = "scripts/daily_selection.py"
 
@@ -6536,8 +6543,8 @@ def launchd_registration(worktree: Path, registration: Path) -> Path:
         raise ValueError(
             f"--registration {registration}{resolved_note} must be inside the pinned worktree "
             f"{worktree}: the scheduled run stands there and reads the registration committed "
-            "there; name it relative to --worktree (default "
-            f"{REGISTRATION_IN_REPOSITORY})"
+            f"there; name it relative to --worktree ({REGISTRATION_IN_REPOSITORY} is the P6 "
+            "book's)"
         )
     return resolved
 
@@ -6719,8 +6726,8 @@ def _missing_registration_next(repo: Path) -> str:
     return (
         "next: --registration must name a registration committed in the checkout --repo names "
         f"({repo}); a configuration is registered with scripts/research/registry.py's register() "
-        "and committed before a day can run it (the default, "
-        f"{REGISTRATION_IN_REPOSITORY}, is the P6 book's)"
+        "and committed before a day can run it (there is no default: "
+        f"{REGISTRATION_IN_REPOSITORY} is the P6 book's, whose registration is paused)"
     )
 
 
@@ -6757,7 +6764,7 @@ def _refuse_an_unread_account_record(
 def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _utc_now) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--runtime-dir", type=Path, default=None)
-    parser.add_argument("--registration", type=Path, default=DEFAULT_REGISTRATION)
+    parser.add_argument("--registration", type=Path)
     parser.add_argument("--repo", type=Path, default=REPOSITORY)
     parser.add_argument(
         "--as-of",
@@ -6851,6 +6858,8 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         "cannot be reconciled refuses the day before the book advances.",
     )
     arguments = parser.parse_args(argv)
+    if arguments.registration is None:
+        parser.error(NO_REGISTRATION_DEFAULT)
     if arguments.morning_recheck:
         for given, flag in (
             (arguments.pin_worktree, "--pin-worktree"),

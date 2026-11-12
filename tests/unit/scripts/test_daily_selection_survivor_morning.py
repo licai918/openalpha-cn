@@ -1631,6 +1631,7 @@ def test_the_flag_does_not_combine_with_the_commands_that_run_no_day(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], other: tuple[str, ...]
 ) -> None:
     arguments = ["--runtime-dir", str(tmp_path), "--morning-recheck", *other]
+    arguments += ["--registration", str(daily.DEFAULT_REGISTRATION)]
 
     with pytest.raises(SystemExit) as stopped:
         daily.main(arguments)
