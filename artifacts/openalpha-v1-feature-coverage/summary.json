@@ -1,15 +1,15 @@
 {
   "category_distribution": {
-    "agent": 9,
+    "agent": 10,
     "backtest": 28,
     "batch": 4,
     "boundary": 7,
     "decision": 9,
-    "evidence": 9,
+    "evidence": 10,
     "factor": 28,
     "interface": 9,
-    "model": 5,
-    "operations": 51,
+    "model": 6,
+    "operations": 53,
     "panel": 42,
     "product": 3,
     "provider": 8,
@@ -31,13 +31,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 206
+    "NATIVE_COMPLETE": 211
   },
   "totals": {
-    "all_features": 232,
+    "all_features": 237,
     "legacy_acceptance_rows": 26,
-    "true_completed_features": 227,
-    "true_completion_rate_pct": 97.84,
+    "true_completed_features": 232,
+    "true_completion_rate_pct": 97.89,
     "unknown": 0,
     "unreviewed": 0
   }
