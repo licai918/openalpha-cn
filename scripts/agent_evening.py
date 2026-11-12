@@ -89,6 +89,7 @@ from openalpha_cn.domain.agent_forward import (  # noqa: E402
     AGENT_RULE_FAMILY,
     coverage_set,
     primary_sample,
+    refuse_a_salt_tied_to_the_book,
     score_of,
 )
 from openalpha_cn.domain.alpha_model import PredictionBatch  # noqa: E402
@@ -1125,6 +1126,14 @@ def _run(
     runtime = Path(options.runtime_dir)
     root, admitted = _admit(options)
     step0 = _step0_registration(options, root)
+    # Plan C Review Focus 2's coupling, enforced at the only place both salts are known: C's
+    # draw salt is its own registered value, never Step 0's seed or a string carrying it. The
+    # registration writer refuses this too (plan C task 3.3); this is the forward-run half, and
+    # it runs before anything is read or written so a refused deployment leaves no trace.
+    try:
+        refuse_a_salt_tied_to_the_book(admitted.salt, book_seed=step0.registered.seed)
+    except ValueError as error:
+        raise StepFailedError("registration", str(error)) from error
     day = _step0_day(options, step0, session=session, clock=wall)
     if wall() >= day.cutoff:
         raise _late(day, session, wall())

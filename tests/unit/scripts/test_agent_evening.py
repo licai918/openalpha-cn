@@ -288,6 +288,7 @@ def _world(
     filed: bool = True,
     holdings: tuple[str, ...] | None = None,
     watch: tuple[str, ...] | None = None,
+    c_salt: str | None = None,
 ) -> World:
     """Step 0's runtime -- generated panel, filed record, complete day journal -- and C's seam."""
     # The provider in record mode names the credential's environment variable; the value is a
@@ -355,7 +356,7 @@ def _world(
         )
     c_config = {
         "kind": "agent_forward/v1",
-        "salt": f"c-evening-salt-2026-{attempt}",
+        "salt": c_salt if c_salt is not None else f"c-evening-salt-2026-{attempt}",
         "primary_size": C_PRIMARY_SIZE,
     }
     c_body = {**C_BODY, "config": c_config}
@@ -455,6 +456,29 @@ def test_refuses_when_step0_has_not_filed_the_session_and_writes_nothing(
     err = capsys.readouterr().err
     assert code != 0
     assert f"Step 0 has not filed {world.session.isoformat()}" in err
+    assert not world.runtime.exists()
+    assert not world.journal_path().exists()
+
+
+def test_a_salt_tied_to_step0s_registered_seed_is_refused_and_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review Focus 2's coupling: C's draw salt is its own value, never Step 0's seed.
+
+    The registration writer refuses this too (plan C task 3.3, not in this batch); this is the
+    forward-run half -- it runs after both registrations are read and before anything else, so a
+    deployment whose salt was copied from the book leaves no record, no evidence and no journal.
+    """
+    world = _world(tmp_path, monkeypatch, c_salt=str(SEED))
+
+    code = agent.main(world.arguments("--no-llm"), clock=lambda: world.evening)
+
+    err = capsys.readouterr().err
+    assert code == agent.AgentEveningExit.refused
+    assert "step 1 (registration) failed" in err
+    assert "Step 0's registered seed" in err
     assert not world.runtime.exists()
     assert not world.journal_path().exists()
 
