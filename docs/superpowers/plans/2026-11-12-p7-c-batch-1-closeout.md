@@ -5,7 +5,7 @@
 ## 0. 先读这几句
 
 - 本批次做的是方案 C 的三个 issue：`V2-P7-011`（面板推导的涨停 / 炸板 / 连板证据生产者）、`V2-P7-012`（DeepSeek 模型接入：Provider 配置、用量记账、提示词版本化、原始响应内容寻址存储）、`V2-P7-015`（LLM 历史污染护栏）。实施计划是任务书，**不在版本库内**：`.superpowers/sdd/c-batch-1/plan.md`（`.superpowers/` 不入库），本文是它的版本化记录。
-- 代码在分支 `feat/v2-p7-c-batch-1` 上（从 `main` 的 `5e5218e` 分出）。到本文写作时的 tip：**17 个提交**（`git log --format='%h %s' 5e5218e..<tip>`：16 个代码提交 + 1 个文档提交），45 个文件、+5,427 / −117（含本文、路线图、§9 与台账）。最终的 tip 以控制者的报告与 `git log` 为准。
+- 代码在分支 `feat/v2-p7-c-batch-1` 上（从 `main` 的 `5e5218e` 分出）。**代码提交 16 个**（`git log --format='%h %s' 5e5218e..HEAD` 里除文档提交外的全部）；代码改动 38 个文件、+5,301 / −93（`git diff --stat 5e5218e..60328b2`；其后只有一个测试改名提交 `f645950` 触及代码）。文档提交另计（本文初版、其提交清单更正与路线图/§9/台账），最终的 tip 与完整清单以控制者的报告与 `git log` 为准。
 - **未推送、未合并。** 交付的代码**没有跑过任何真实构建、因子、读数或冒烟，一次 Tushare 请求也没有发过，一次 DeepSeek（或任何 LLM）请求也没有发过**：所有测试都跑在测试时生成的夹具、已存的假记录和注入的假传输上。计划里那次 ≤5 次请求的联网探针**没有做**，等用户明确授权。
 - **没有任何 P7 登记存在，`docs/research/p7-registration.json` 没有写出，也没有任何绑定被作废**；issue 总数仍是 253（本批次只关闭三行的代码部分，不关闭任何一行）。
 - `DEEPSEEK_V4_1_FLASH` 是**占位**：model、base_url、structured_output_mode、价格都等人从 `api-docs.deepseek.com` 填，`verified_on=None`，`api_key_env="DEEPSEEK_API_KEY"` 是变量名而不是密钥。**没有一处把占位写成已核实**，也没有任何模型 id / endpoint 被当成“已核实”引用。
