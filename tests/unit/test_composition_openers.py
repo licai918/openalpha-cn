@@ -2,7 +2,8 @@
 
 The three stores this file opens alone -- the shortlist answers, the factor experiment documents
 and the run repository -- were each constructed by hand in `cli.py` at the same
-`runtime_dir`-relative literal `build_storage` uses, six call sites in all. That is hard rule 5's
+`runtime_dir`-relative literal `build_storage` uses, eight call sites in all (one experiment, two
+run repository, five shortlist). That is hard rule 5's
 second-composition-root defect waiting to happen: the literals agree today, and nothing makes them
 keep agreeing. `shortlist_store_at`/`experiment_store_at`/`run_repository_at` are the one source
 for each path, modelled on `prediction_store_at` (`V2-P7-023`) and `paper_state_store_at`
@@ -96,6 +97,27 @@ def _string_constants(path: Path) -> tuple[str, ...]:
         for node in ast.walk(tree)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     )
+
+
+def _calls_named(path: Path, name: str) -> tuple[ast.Call, ...]:
+    """Every call in `path` whose callee's own name is `name` (`f(...)` or `x.f(...)`)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        callee = function.id if isinstance(function, ast.Name) else None
+        if callee is None and isinstance(function, ast.Attribute):
+            callee = function.attr
+        if callee == name:
+            found.append(node)
+    return tuple(found)
+
+
+def _keyword_names(call: ast.Call) -> set[str]:
+    """The keyword names a call passes; a `**kwargs` entry is `None` and fails a pin by design."""
+    return {keyword.arg for keyword in call.keywords}
 
 
 # --- 1. one opener per store, identical to the hand-constructed store --------------------------
@@ -247,6 +269,43 @@ def test_cli_constructs_no_store_the_composition_root_opens() -> None:
 def test_neither_face_constructs_the_research_engine() -> None:
     assert "ResearchEngine" not in _called_names(SDK)
     assert "ResearchEngine" not in _called_names(API)
+
+
+def test_each_face_passes_exactly_the_engine_wires_its_call_site_had() -> None:
+    """The REST face passes no `agents`/`features`; the SDK passes both (plan §6's risk row).
+
+    `research_engine`'s `None` defaults keep meaning what `ResearchEngine.__init__` means by
+    them, but a call site that supplied a roster or a feature plane would silently change what
+    the face runs while the default-only tests above stayed green (review 1, finding 4). The
+    keywords are pinned exactly -- and no positional argument is allowed, which would bypass the
+    keyword-name comparison -- so an `agents=`/`features=` added to `api/app.py`, or dropped from
+    `sdk.py`, is red here.
+    """
+    api_calls = _calls_named(API, "research_engine")
+    assert len(api_calls) == 2, f"expected both api/app.py call sites, found {len(api_calls)}"
+    for call in api_calls:
+        assert call.args == [], "research_engine is keyword-only; a positional argument is a bug"
+        assert _keyword_names(call) == {
+            "repository",
+            "memory",
+            "clock",
+            "recovery_store",
+        }, (
+            "api/app.py must compose the engine with neither agents nor features; it passed "
+            f"{sorted(name or '**kwargs' for name in _keyword_names(call))}"
+        )
+
+    sdk_calls = _calls_named(SDK, "research_engine")
+    assert len(sdk_calls) == 1, f"expected the one sdk.py call site, found {len(sdk_calls)}"
+    assert sdk_calls[0].args == []
+    assert _keyword_names(sdk_calls[0]) == {
+        "repository",
+        "memory",
+        "clock",
+        "recovery_store",
+        "agents",
+        "features",
+    }, "sdk.py must thread its agents and features through research_engine"
 
 
 def test_the_daily_selection_script_opens_the_panel_through_the_panel_view() -> None:

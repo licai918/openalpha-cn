@@ -14,7 +14,9 @@ architecture sentences the audit's section 4 R2 states and the plan's section 1 
   `.superpowers/sdd/plan.md` section 0 (registration modules do not open their own storage), and
   `runtime.engine` because a module that can reach the engine can run a cycle rather than file a
   record.
-* **the agent layer reaches no paper book** -- `openalpha_cn.agents` may not reach `backtest`,
+* **the agent layer reaches no paper book** -- `openalpha_cn.agents` may not reach the eight
+  paper-book `backtest.*` modules (`paper`, `paper_evening`, `paper_reconciliation`,
+  `paper_settlement`, `paper_state`, `paper_step`, `portfolio`, `portfolio_policy`), nor
   `storage.paper_state`, `storage.portfolio`, `domain.portfolio`, `domain.survivor_book`,
   `domain.survivor_orders`, `strategy_survivor_book` or `strategy_survivor_paper_report`. ADR-0005
   decision 2 is that the daily agent family "does not trade", and this is the family
@@ -87,7 +89,14 @@ what this sentence is about.
 
 AGENT_FORBIDDEN_PAPER_BOOK: Final[frozenset[str]] = frozenset(
     {
-        "openalpha_cn.backtest",
+        "openalpha_cn.backtest.paper",
+        "openalpha_cn.backtest.paper_evening",
+        "openalpha_cn.backtest.paper_reconciliation",
+        "openalpha_cn.backtest.paper_settlement",
+        "openalpha_cn.backtest.paper_state",
+        "openalpha_cn.backtest.paper_step",
+        "openalpha_cn.backtest.portfolio",
+        "openalpha_cn.backtest.portfolio_policy",
         "openalpha_cn.domain.portfolio",
         "openalpha_cn.domain.survivor_book",
         "openalpha_cn.domain.survivor_orders",
@@ -99,12 +108,18 @@ AGENT_FORBIDDEN_PAPER_BOOK: Final[frozenset[str]] = frozenset(
 )
 """Every module where the paper book is declared, stored or iterated.
 
-`openalpha_cn.backtest` whole, not `backtest.paper`: the package is where a simulation is
-assembled, and the agent family has no business in any of it. The two `domain` modules are the
-data contracts behind the survivor book and its orders; the two `storage` modules are where a
-paper portfolio is persisted; and the two `strategy_survivor*` modules are the strategies that
-read or report a paper book. `strategy_forward_session` is absent on purpose -- plan C's
-registration step files through it.
+The eight `backtest.*` modules, not `openalpha_cn.backtest` whole (review 1, finding 1). A
+package-wide ban would forbid the very seam this contract says it lets through:
+`strategy_forward_session` reaches ten non-paper `backtest.*` modules through
+`strategy_registration -> strategy_view` (measured with grimp on `39baeb5`), so an `agent_*`
+module importing it would break the package-wide ban while the claim "the agent family files
+through `strategy_forward_session`" is still the plan's reason that module is not on this list.
+These eight are exactly where a paper book is declared, stored, stepped, settled, reported or
+iterated -- none of them is reached by `strategy_forward_session` today, also measured. The two
+`domain` modules are the data contracts behind the survivor book and its orders; the two
+`storage` modules are where a paper portfolio is persisted; and the two `strategy_survivor*`
+modules are the strategies that read or report a paper book. `strategy_forward_session` is absent
+on purpose -- plan C's registration step files through it.
 """
 
 
@@ -220,6 +235,34 @@ def test_the_forward_contract_forbids_every_face_the_registration_path_must_not_
     )
 
 
+def test_the_forward_contract_name_does_not_promise_more_than_it_enforces() -> None:
+    """The `name` says `shortlist view`, not `view`, and names the runtime composition.
+
+    The contract forbids `shortlist_view`/`shortlist_compare` among the views -- it does **not**
+    forbid `strategy_view`, `model_view` or `panel_view`, which eight of its thirteen sources
+    reach (measured with grimp on `39baeb5`), nor the non-paper `backtest.*` modules all thirteen
+    reach. A name saying "no view" would be the same overclaim `V2-P4-035` fixed for
+    `ranking-creates-no-portfolio-order`; this pins the narrower wording review 1 asked for.
+    """
+    name = _contract(FORWARD_CONTRACT_ID).get("name")
+    assert isinstance(name, str)
+    lowered = name.lower()
+    assert "face" in lowered, f"{FORWARD_CONTRACT_ID}'s name is {name!r}; it has to name the faces"
+    assert "shortlist view" in lowered, (
+        f"{FORWARD_CONTRACT_ID}'s name is {name!r}; the two views it forbids are the shortlist "
+        "ones, so the name has to say so rather than claim every view"
+    )
+    assert "runtime composition" in lowered, (
+        f"{FORWARD_CONTRACT_ID}'s name is {name!r}; decision D3's forbidden "
+        "`openalpha_cn.runtime.composition` is part of what the contract enforces"
+    )
+    assert re.search(r"\bno view\b", name, flags=re.IGNORECASE) is None, (
+        f"{FORWARD_CONTRACT_ID}'s name is {name!r} and claims 'no view'. Eight of the thirteen "
+        "sources reach `strategy_view`, `model_view` and `panel_view`; only `shortlist_view` and "
+        "`shortlist_compare` are forbidden"
+    )
+
+
 def test_the_backtest_contract_forbids_every_strategy_module_on_disk() -> None:
     """R2 also closes the four names the current list is missing, plus the new module.
 
@@ -270,13 +313,18 @@ def test_the_agent_contract_covers_the_agent_layer_and_reserves_the_agent_namesp
     )
 
 
-def test_the_agent_contract_forbids_the_paper_book_and_lets_the_forward_session_through() -> None:
-    """The forbidden set is the paper-book half, and `strategy_forward_session` is not in it.
+def test_the_agent_contract_forbids_the_paper_book_and_lets_the_forward_session_through(
+    tmp_path: Path,
+) -> None:
+    """The forbidden set is the paper-book half, and the forward session really passes.
 
-    The second assertion is the load-bearing one and the one a later "tidy-up" is most likely to
-    get wrong: plan C's step files predictions **through** `strategy_forward_session`, so putting
-    it on this list would forbid the very protocol the agent family is supposed to use. The agent
-    contract is about trading, not about registering.
+    The membership assertions are the first half. The second half is a live probe and the
+    load-bearing one (review 1, finding 1): plan C's step files predictions **through**
+    `strategy_forward_session`, so an `agent_*` module importing it has to stay KEPT. A
+    membership check alone cannot see the difference -- `strategy_forward_session` reaches ten
+    non-paper `backtest.*` modules, so a package-wide `openalpha_cn.backtest` ban would break
+    this probe while every list assertion stayed green. The probe is planted in a copy, never in
+    the checkout, and the same copy is asserted to pass before it is planted.
     """
     forbidden = _forbidden_modules(AGENT_CONTRACT_ID)
     missing = sorted(AGENT_FORBIDDEN_PAPER_BOOK - forbidden)
@@ -289,6 +337,29 @@ def test_the_agent_contract_forbids_the_paper_book_and_lets_the_forward_session_
         "registration step files its predictions through that module. It declares a record; it "
         "does not trade, and the forward contract is what keeps it off the faces"
     )
+
+    package = copy_package(tmp_path)
+    kept = lint_copy(package, AGENT_CONTRACT_ID)
+    assert kept.exit_code == 0, (
+        f"the unmodified copy must pass {AGENT_CONTRACT_ID} before the forward probe can mean "
+        f"anything: {kept.report}"
+    )
+
+    (package / "agents" / "_forward_probe.py").write_text(
+        '"""Temporary probe module for a layering test."""\n\n'
+        "from openalpha_cn import strategy_forward_session\n\n"
+        '__all__ = ["strategy_forward_session"]\n',
+        encoding="utf-8",
+    )
+    allowed = lint_copy(package, AGENT_CONTRACT_ID)
+
+    assert allowed.exit_code == 0, (
+        f"an agent module importing openalpha_cn.strategy_forward_session must be allowed by "
+        f"{AGENT_CONTRACT_ID} -- plan C's step files through it. Refused: {allowed.report}"
+    )
+    assert "openalpha_cn.agents._forward_probe -> openalpha_cn.strategy_forward_session" not in (
+        allowed.report
+    ), allowed.report
 
 
 def test_the_agent_contract_name_does_not_promise_more_than_it_enforces() -> None:
@@ -316,7 +387,7 @@ def test_the_agent_contract_name_does_not_promise_more_than_it_enforces() -> Non
 def test_the_agent_contract_rejects_a_probe_in_the_agents_package_reaching_the_paper_book(
     tmp_path: Path,
 ) -> None:
-    """The unmodified copy passes; one `backtest.paper` import inside `agents/` turns it red.
+    """The unmodified copy passes; one `backtest.paper_step` import inside `agents/` turns it red.
 
     `agents` is a package source, so a new module under it is covered on arrival -- this is the
     probe shape that works for an enumerated *package* source. The refusal has to name the probe's
@@ -333,18 +404,18 @@ def test_the_agent_contract_rejects_a_probe_in_the_agents_package_reaching_the_p
 
     (package / "agents" / "_probe.py").write_text(
         '"""Temporary probe module for a layering test."""\n\n'
-        "from openalpha_cn.backtest.paper import PaperPortfolio\n\n"
-        '__all__ = ["PaperPortfolio"]\n',
+        "from openalpha_cn.backtest.paper_step import PaperStepPlan\n\n"
+        '__all__ = ["PaperStepPlan"]\n',
         encoding="utf-8",
     )
     refused = lint_copy(package, AGENT_CONTRACT_ID)
 
     assert refused.exit_code == 1, (
-        f"lint-imports should reject agents/_probe.py -> openalpha_cn.backtest.paper under "
+        f"lint-imports should reject agents/_probe.py -> openalpha_cn.backtest.paper_step under "
         f"{AGENT_CONTRACT_ID}; if it does not, an agent can reach the paper book: {refused.report}"
     )
     assert "openalpha_cn.agents._probe" in refused.report, refused.report
-    assert "openalpha_cn.backtest.paper" in refused.report, refused.report
+    assert "openalpha_cn.backtest.paper_step" in refused.report, refused.report
 
 
 def test_the_forward_contract_rejects_a_planted_edge_from_a_listed_registration_module(

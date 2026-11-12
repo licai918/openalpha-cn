@@ -243,7 +243,7 @@ def test_prediction_block_is_the_thirteen_key_journal_stage(tmp_path: Path) -> N
 
     block = forward.prediction_block(record, outcome, provenance="digest-of-the-provenance")
 
-    assert set(block) == {
+    assert list(block) == [
         "registered",
         "record_id",
         "family",
@@ -257,7 +257,7 @@ def test_prediction_block_is_the_thirteen_key_journal_stage(tmp_path: Path) -> N
         "abstained",
         "batch_digest",
         "provenance",
-    }
+    ]
     assert block["registered"] is True
     assert block["record_id"] == record.record_id
     assert block["family"] == record.batch.artifact.declaration.family
