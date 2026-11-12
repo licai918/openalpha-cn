@@ -3010,3 +3010,23 @@ def test_a_newer_restatement_replaces_the_older_record(
     (new,) = _restated_records(tmp_path)
     assert new == dataclasses.replace(old, bar_close=1.15, valuation_close=1.1)
     assert _stored_factor(tmp_path, RETURN_PATH_CODE, RESTATE_PAGE) == 1.15
+
+
+def test_a_history_that_serves_nothing_for_a_stored_security_is_a_withdrawal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored year holds the security and the whole-year answer holds nothing: that is the
+    upstream withdrawing rows it once served (`V2-P6-016`'s path), never a restatement -- the
+    refusal says so and names the rebuild, and nothing is written."""
+    stored, _ = _build(tmp_path, Frame(), monkeypatch, "adj_factor")
+    assert stored.exit_code == PanelExit.ok, stored.output
+    before = _factor_partition(tmp_path)
+
+    refused, upstream = _restate(tmp_path, Frame(restated_history_omits=SESSIONS), monkeypatch)
+
+    assert refused.exit_code == PanelExit.unhealthy, refused.output
+    assert "withdrawal" in refused.output
+    assert f"Rebuild {ADJ_FACTOR_DATASET} for the year" in refused.output
+    # One year range request, no confirmation spent on an answer with nothing to confirm.
+    assert len(upstream.payloads) == 1
+    assert _factor_partition(tmp_path) == before

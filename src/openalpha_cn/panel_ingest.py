@@ -4831,11 +4831,6 @@ def restated_adjustment_sessions(
             f"the year history offered for {ts_code} is a {history.dataset} batch, not "
             f"{ADJ_FACTOR_DATASET}"
         )
-    if history.status != "success":
-        raise PanelBatchError(
-            f"the {ADJ_FACTOR_DATASET} year history for {ts_code} answered no rows: a subject "
-            "with no stored observation in the year has nothing to restate"
-        )
     carried = carry_stored_sessions_forward(
         store,
         (),
@@ -4856,6 +4851,17 @@ def restated_adjustment_sessions(
         raise PanelBatchError(
             f"the stored {ADJ_FACTOR_DATASET} year={year} holds no row for {ts_code}; there is "
             "nothing to restate"
+        )
+    if history.status != "success":
+        # The stored year holds this security and the year-wide answer holds nothing: the
+        # upstream no longer serves a row it once did, which is a withdrawal (`V2-P6-016`), not
+        # a restatement of the rows that remain -- and a rebuild is the route that stores what
+        # it serves now.
+        raise PanelBatchError(
+            f"the stored {ADJ_FACTOR_DATASET} year={year} holds {ts_code}'s rows and the "
+            "upstream's year history for the security answered none: a stored row the upstream "
+            "no longer serves is a withdrawal (V2-P6-016's path), not a restatement, and nothing "
+            f"was written. Rebuild {ADJ_FACTOR_DATASET} for the year"
         )
     others_at = [index for index, subject in enumerate(stored.subjects) if subject != ts_code]
     stored_subject = _select_rows(stored, subject_at)
