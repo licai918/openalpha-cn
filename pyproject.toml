@@ -284,14 +284,19 @@ forbidden_modules = [
   "openalpha_cn.shortlist_view",
   "openalpha_cn.model_view",
   "openalpha_cn.strategy_view",
+  "openalpha_cn.strategy_forward_session",
+  "openalpha_cn.strategy_registration",
   "openalpha_cn.strategy_survivor",
   "openalpha_cn.strategy_survivor_book",
   "openalpha_cn.strategy_survivor_check",
+  "openalpha_cn.strategy_survivor_continuation",
   "openalpha_cn.strategy_survivor_facts",
   "openalpha_cn.strategy_survivor_forward",
   "openalpha_cn.strategy_survivor_market",
   "openalpha_cn.strategy_survivor_morning",
+  "openalpha_cn.strategy_survivor_paper_report",
   "openalpha_cn.strategy_survivor_registration",
+  "openalpha_cn.strategy_survivor_summary",
 ]
 # Whole-package source, no exemptions: nothing under backtest/ reaches any of these today, on
 # full transitive reachability. ADR-0003's decision is that this repository ships no numerical
@@ -516,3 +521,135 @@ forbidden_modules = [
 # for the ranking itself, one step further down the same path. `tests/unit/backtest/
 # test_shortlist_gate.py::test_the_gate_cannot_reach_the_three_modules_that_make_an_order`
 # drives the same both-directions probe over the new source.
+
+# V2-P7-013. R1 moves the forward-registration protocol into
+# `openalpha_cn.strategy_forward_session`, and plan C's daily step imports it from `src` rather
+# than from `scripts/daily_selection.py`. Registration modules take their stores injected, so the
+# sentence this contract enforces is the one shape that seam must not have: no reach into the
+# faces (nor into the two shortlist views, nor into the runtime composition root).
+#
+# What the 13 sources actually reach, measured with grimp on `39baeb5` so that the `name` is not
+# wider than the contract (review 1, finding 2): none of them reaches `agents`, `runtime`, `cli`,
+# `api`, `product`, `sdk`, `shortlist_view` or `shortlist_compare`. Eight of the thirteen --
+# `strategy_forward_session` and `strategy_registration` among them -- reach `strategy_view`,
+# `model_view` and `panel_view`; all thirteen reach non-paper `backtest.*` modules (`execution`
+# and `factor_ic` at the least). Five of them -- `strategy_forward_session`,
+# `strategy_survivor_check`, `_continuation`, `_forward` and `strategy_survivor_registration` --
+# also reach `strategy_registration` itself, and the reach has more than one route, so this
+# comment does not claim a single one: `strategy_survivor_facts` and `_market` import `execution`
+# directly, and `_paper_report` reaches it through the paper modules. `strategy_survivor_book`
+# reaches `storage.paper_state`; and six of the survivor modules reach `backtest.paper*` and
+# `backtest.portfolio`. That is why the `name`
+# says "no shortlist view" rather than "no view", and why `strategy_view`, `model_view` and
+# `panel_view` are not forbidden: the survivor machinery reads the strategy's own scorer and
+# renderer, and the registration seam writes records for a backtest to trade. The contract is
+# therefore **kept on arrival**, which is the only honest way to add one -- a contract relaxed on
+# arrival is not one.
+#
+# `runtime.engine` is named because a registration module that can reach the engine can run a
+# cycle rather than file a record. `runtime.composition` is named by decision D3 in
+# `.superpowers/sdd/plan.md` section 0: registration modules do not open their own storage,
+# composition does, and composition already reaches `agents.base`/`agents.committee` (measured), so
+# a registration module allowed to import composition would reach the agent layer one hop later.
+# `shortlist_compare` joins `shortlist_view`: both read a stored candidate list, and a registration
+# module that could import one could publish or compare a list rather than file a prediction.
+#
+# The source list is an enumeration -- `strategy_survivor*` is not a wildcard import-linter accepts
+# -- so a thirteenth survivor module has to be added here by hand. The gate that forces it is
+# `tests/unit/test_forward_and_agent_layering.py::
+# test_the_forward_contract_covers_exactly_the_registration_modules_on_disk`, which reads
+# `src/openalpha_cn/` against this list in both directions, and
+# `test_a_thirteenth_strategy_module_would_arrive_unguarded_by_lint_imports_alone`, which measures
+# with `lint_copy` that the linter alone would not catch one. The other probe there plants
+# `import openalpha_cn.agents` in a listed source in a copy and watches this contract refuse it.
+
+[[tool.importlinter.contracts]]
+id = "forward-registration-reaches-no-face"
+name = "the forward-registration modules reach no face, no shortlist view and no runtime composition"
+type = "forbidden"
+source_modules = [
+  "openalpha_cn.strategy_forward_session",
+  "openalpha_cn.strategy_registration",
+  "openalpha_cn.strategy_survivor",
+  "openalpha_cn.strategy_survivor_book",
+  "openalpha_cn.strategy_survivor_check",
+  "openalpha_cn.strategy_survivor_continuation",
+  "openalpha_cn.strategy_survivor_facts",
+  "openalpha_cn.strategy_survivor_forward",
+  "openalpha_cn.strategy_survivor_market",
+  "openalpha_cn.strategy_survivor_morning",
+  "openalpha_cn.strategy_survivor_paper_report",
+  "openalpha_cn.strategy_survivor_registration",
+  "openalpha_cn.strategy_survivor_summary",
+]
+forbidden_modules = [
+  "openalpha_cn.agents",
+  "openalpha_cn.api",
+  "openalpha_cn.cli",
+  "openalpha_cn.product",
+  "openalpha_cn.runtime.composition",
+  "openalpha_cn.runtime.engine",
+  "openalpha_cn.sdk",
+  "openalpha_cn.shortlist_compare",
+  "openalpha_cn.shortlist_view",
+]
+
+# V2-P7-013. ADR-0005 decision 2 is that the daily agent family "does not trade", and V2-P7-013 is
+# the issue that registers an `agent_*` prediction family from the candidate top 300; this is the
+# guard that keeps that family from ever founding a paper book. Measured with grimp on `edaaa26`
+# (plan section 1): `openalpha_cn.agents` reaches only `models.base` and `domain.*`; it does not
+# reach `backtest`, `storage`, `domain.portfolio`, `domain.survivor_book`, `domain.survivor_orders`
+# or any `strategy_*`. The contract is therefore **kept on arrival**. No `openalpha_cn.agent_*`
+# module exists yet; the source list names the package today, and
+# `tests/unit/test_forward_and_agent_layering.py::
+# test_the_agent_contract_covers_the_agent_layer_and_reserves_the_agent_namespace` requires every
+# future `agent_*.py` / `agent_*/` to have joined this list -- a red run on the day it arrives, not
+# a review note.
+#
+# `openalpha_cn.strategy_forward_session` is deliberately **not** forbidden here: plan C's
+# registration step files its predictions through that protocol, so forbidding it would forbid the
+# very seam this issue builds. The forward contract above is what keeps the session off the faces;
+# this contract is about trading, not registering.
+#
+# The list enumerates the paper-book modules rather than `openalpha_cn.backtest` whole (review 1,
+# finding 1, measured with grimp on `39baeb5`): `strategy_forward_session -> strategy_registration
+# -> strategy_view` reaches ten non-paper `backtest.*` modules and no `paper*`, `portfolio` or
+# `portfolio_policy` module. A package-wide ban would therefore break on the day plan C's
+# `agent_*` step imports the seam it is supposed to file through, even though the whole point of
+# leaving `strategy_forward_session` off this list is that it may. The eight enumerated modules
+# are where a paper book is declared, stored, stepped, settled, reported or iterated; none is
+# reached by `strategy_forward_session` today, which is what makes this list kept on arrival.
+#
+# The `name` says `paper book` and never the bare word `order`, for V2-P4-035's reason: this
+# contract forbids the modules that declare or persist portfolio and survivor orders, not every
+# order intent in the tree. `tests/unit/test_forward_and_agent_layering.py::
+# test_the_agent_contract_name_does_not_promise_more_than_it_enforces` asserts that;
+# `test_the_agent_contract_rejects_a_probe_in_the_agents_package_reaching_the_paper_book` writes
+# `agents/_probe.py` importing `openalpha_cn.backtest.paper_step` into a copy and watches this
+# contract refuse it; and
+# `test_the_agent_contract_forbids_the_paper_book_and_lets_the_forward_session_through` writes
+# `agents/_forward_probe.py` importing `openalpha_cn.strategy_forward_session` into a copy and
+# watches this contract keep it, which is the property the enumerated list exists to protect.
+
+[[tool.importlinter.contracts]]
+id = "agent-layer-reaches-no-paper-book"
+name = "the agent layer reaches no paper book and no module that declares or persists a portfolio"
+type = "forbidden"
+source_modules = ["openalpha_cn.agents"]
+forbidden_modules = [
+  "openalpha_cn.backtest.paper",
+  "openalpha_cn.backtest.paper_evening",
+  "openalpha_cn.backtest.paper_reconciliation",
+  "openalpha_cn.backtest.paper_settlement",
+  "openalpha_cn.backtest.paper_state",
+  "openalpha_cn.backtest.paper_step",
+  "openalpha_cn.backtest.portfolio",
+  "openalpha_cn.backtest.portfolio_policy",
+  "openalpha_cn.domain.portfolio",
+  "openalpha_cn.domain.survivor_book",
+  "openalpha_cn.domain.survivor_orders",
+  "openalpha_cn.storage.paper_state",
+  "openalpha_cn.storage.portfolio",
+  "openalpha_cn.strategy_survivor_book",
+  "openalpha_cn.strategy_survivor_paper_report",
+]

@@ -40,17 +40,20 @@ alternative Task 9's reviewer flagged; nothing here uses `cast` or `# type: igno
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Final
 
+from openalpha_cn.agents.base import FeaturePlane, ResearchAgent
 from openalpha_cn.backtest.validation import ValidationStore
 from openalpha_cn.evidence.service import EvidenceStore
 from openalpha_cn.product.research import ReportStore, WatchlistStore
+from openalpha_cn.runtime.engine import ResearchEngine
 from openalpha_cn.runtime.memory import ResearchMemory
 from openalpha_cn.runtime.recovery import RecoveryStore
+from openalpha_cn.runtime.repository import RunRepository
 from openalpha_cn.storage.batch import SQLiteBatchTaskStore
 from openalpha_cn.storage.factor_experiments import FileExperimentStore
 from openalpha_cn.storage.jobs import SQLiteJobStore
@@ -251,6 +254,27 @@ PAPER_SNAPSHOT_DIRECTORY: Final[tuple[str, str]] = ("paper", "snapshots")
 PREDICTION_DIRECTORY: Final[str] = "predictions"
 """Where a runtime directory's registered predictions live (`V2-P4-017`)."""
 
+SHORTLIST_DIRECTORY: Final[str] = "shortlists"
+"""Where a runtime directory's stored shortlist answers live (`V2-P4-062`).
+
+The one spelling of the literal five `cli.py` call sites used to write by hand; see
+`shortlist_store_at`.
+"""
+
+EXPERIMENT_DIRECTORY: Final[str] = "experiments"
+"""Where a runtime directory's sealed factor experiment documents live (`V2-P3-015`).
+
+The one spelling of the literal `cli.py`'s `factor experiment` command used to write by hand; see
+`experiment_store_at`.
+"""
+
+STATE_DATABASE: Final[str] = "state.sqlite3"
+"""The SQLite file ten of the sixteen stores share at a runtime directory's root.
+
+Named once for `run_repository_at`, the one of those ten that a face opens without a
+`build_storage`; the other nine stay inline in `build_storage`, which is already their one source.
+"""
+
 
 def paper_state_store_at(runtime_dir: Path) -> FilePaperStateStore:
     """The paper book's snapshot store under `runtime_dir`, opened alone: no migration, no
@@ -266,6 +290,69 @@ def prediction_store_at(runtime_dir: Path, *, clock: Callable[[], datetime]) -> 
     (`V2-P7-023`: a predecessor's records). `build_storage` opens the same path through this
     function."""
     return FilePredictionStore(runtime_dir / PREDICTION_DIRECTORY, clock=clock)
+
+
+def shortlist_store_at(runtime_dir: Path) -> FileShortlistStore:
+    """`V2-P4-062`'s shortlist answers under `runtime_dir`, opened alone: no migration, no
+    directory created (`FileShortlistStore`'s reads are total on a missing directory).
+
+    For `openalpha shortlist run`, which writes one answer, and for `shortlist get`/`list`/
+    `compare`/`portfolio construct`, which resolve an address a caller supplied without assembling
+    sixteen stores. `build_storage` opens `runtime_dir / "shortlists"` through this function, so
+    there is one source for it (hard rule 5)."""
+    return FileShortlistStore(runtime_dir / SHORTLIST_DIRECTORY)
+
+
+def experiment_store_at(runtime_dir: Path) -> FileExperimentStore:
+    """`V2-P3-015`'s sealed experiment documents under `runtime_dir`, opened alone: no migration,
+    no directory created (`FileExperimentStore`'s reads are total on a missing directory).
+
+    For `openalpha factor experiment`, which writes one sealed document through the same path
+    `build_storage` opens. `build_storage` opens `runtime_dir / "experiments"` through this
+    function, so there is one source for it (hard rule 5)."""
+    return FileExperimentStore(runtime_dir / EXPERIMENT_DIRECTORY)
+
+
+def run_repository_at(runtime_dir: Path) -> SQLiteRunRepository:
+    """The `runs`/`decisions` repository under `runtime_dir`, opened alone: no migration, and the
+    store's own `_initialize` is the only schema work (`SQLiteRunRepository.__init__` creates its
+    parent directory and its tables, exactly as it does inside `build_storage`).
+
+    For `openalpha shortlist run` and `openalpha model daily-run`, which need the store one
+    command writes through without the other fifteen. `build_storage` opens
+    `runtime_dir / "state.sqlite3"` through this function, so there is one source for it (hard
+    rule 5)."""
+    return SQLiteRunRepository(runtime_dir / STATE_DATABASE)
+
+
+def research_engine(
+    *,
+    repository: RunRepository,
+    memory: ResearchMemory,
+    recovery_store: RecoveryStore,
+    clock: Callable[[], datetime],
+    agents: Sequence[ResearchAgent] | None = None,
+    features: FeaturePlane | None = None,
+) -> ResearchEngine:
+    """The one assembly of the shared-path research engine (`V2-P7-013`).
+
+    `sdk.py` and `api/app.py` each built `ResearchEngine` by hand -- the SDK once, the REST face
+    twice -- with the same four required wires. The two optional wires are the reason this
+    function defaults them to `None` rather than filling them: the SDK threads `self.agents` and
+    `self.features` through, and the REST face deliberately composes neither, so a shared opener
+    that supplied a default roster or plane would silently change what
+    `POST /api/v1/research/run` runs. Passing exactly the six keywords means the default is
+    `ResearchEngine.__init__`'s decision and not a second copy of it here: an absent roster is
+    `baseline_agents()` and an absent plane is `None`.
+    """
+    return ResearchEngine(
+        repository=repository,
+        memory=memory,
+        clock=clock,
+        recovery_store=recovery_store,
+        agents=agents,
+        features=features,
+    )
 
 
 def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> StorageContainer:
@@ -298,7 +385,7 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     runtime_dir.mkdir(parents=True, exist_ok=True)
     migration_result = run_migrations(runtime_dir / "state.sqlite3", clock=clock)
     evidence_store: EvidenceStore = ParquetEvidenceStore(runtime_dir / "evidence")
-    repository = SQLiteRunRepository(runtime_dir / "state.sqlite3")
+    repository = run_repository_at(runtime_dir)
     memory: ResearchMemory = SQLiteResearchMemory(runtime_dir / "state.sqlite3")
     recovery_store: RecoveryStore = SQLiteRecoveryStore(runtime_dir / "state.sqlite3")
     batch_store = SQLiteBatchTaskStore(runtime_dir / "state.sqlite3")
@@ -306,8 +393,8 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
     watchlist_store: WatchlistStore = SQLiteWatchlistStore(runtime_dir / "state.sqlite3")
     report_store: ReportStore = SQLiteReportStore(runtime_dir / "state.sqlite3")
     validation_store: ValidationStore = SQLiteValidationStore(runtime_dir / "state.sqlite3")
-    experiment_store = FileExperimentStore(runtime_dir / "experiments")
-    shortlist_store = FileShortlistStore(runtime_dir / "shortlists")
+    experiment_store = experiment_store_at(runtime_dir)
+    shortlist_store = shortlist_store_at(runtime_dir)
     job_store = SQLiteJobStore(runtime_dir / "state.sqlite3")
     model_usage_store = SQLiteModelUsageStore(runtime_dir / "state.sqlite3")
     prediction_store = prediction_store_at(runtime_dir, clock=clock)

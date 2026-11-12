@@ -319,7 +319,13 @@ from openalpha_cn.research_result_io import (
     parse_research_result,
     research_refusal_detail,
 )
-from openalpha_cn.runtime.composition import build_storage, prediction_store_at
+from openalpha_cn.runtime.composition import (
+    build_storage,
+    experiment_store_at,
+    prediction_store_at,
+    run_repository_at,
+    shortlist_store_at,
+)
 from openalpha_cn.runtime.contracts import (
     ResearchRunRequest,
     ResearchRunResult,
@@ -344,7 +350,7 @@ from openalpha_cn.shortlist_view import (
     shortlist_rows,
     shortlist_view,
 )
-from openalpha_cn.storage.factor_experiments import ExperimentStoreError, FileExperimentStore
+from openalpha_cn.storage.factor_experiments import ExperimentStoreError
 from openalpha_cn.storage.jobs import JobAlreadyRanError, SQLiteJobStore
 from openalpha_cn.storage.migrations import (
     REPAIR_APPLIED,
@@ -354,8 +360,7 @@ from openalpha_cn.storage.migrations import (
 )
 from openalpha_cn.storage.parquet import read_parquet_records
 from openalpha_cn.storage.predictions import PredictionStoreError
-from openalpha_cn.storage.shortlists import FileShortlistStore, ShortlistStoreError
-from openalpha_cn.storage.sqlite import SQLiteRunRepository
+from openalpha_cn.storage.shortlists import ShortlistStoreError
 from openalpha_cn.strategy_view import (
     PROTOCOL_BENCHMARKS,
     PROTOCOL_COSTS,
@@ -8177,7 +8182,7 @@ def factor_run_command(
                 _panel_store(runtime_dir),
                 request,
                 built_at=_panel_clock(),
-                experiments=FileExperimentStore(runtime_dir / "experiments"),
+                experiments=experiment_store_at(runtime_dir),
                 note=(
                     None
                     if not note.strip()
@@ -9269,8 +9274,8 @@ def shortlist_run_command(
                 _panel_store(runtime_dir),
                 request,
                 built_at=_panel_clock(),
-                runs=SQLiteRunRepository(runtime_dir / "state.sqlite3"),
-                shortlists=FileShortlistStore(runtime_dir / "shortlists"),
+                runs=run_repository_at(runtime_dir),
+                shortlists=shortlist_store_at(runtime_dir),
             )
         except ShortlistViewError as error:
             raise _shortlist_fail(error) from error
@@ -9320,7 +9325,7 @@ def shortlist_get_command(
 
     with _panel_command("shortlist get"):
         try:
-            answer = held_shortlist(FileShortlistStore(runtime_dir / "shortlists"), shortlist_id)
+            answer = held_shortlist(shortlist_store_at(runtime_dir), shortlist_id)
         except ShortlistViewError as error:
             raise _shortlist_fail(error) from error
         except ShortlistStoreError as error:
@@ -9348,7 +9353,7 @@ def shortlist_list_command(
     runtime_dir = _resolved_runtime_dir(runtime_dir)
 
     with _panel_command("shortlist list", json_output=json_output):
-        held = FileShortlistStore(runtime_dir / "shortlists").list_ids()
+        held = shortlist_store_at(runtime_dir).list_ids()
         if json_output:
             typer.echo(json.dumps({"shortlist_ids": list(held)}, ensure_ascii=False))
         else:
@@ -9406,7 +9411,7 @@ def shortlist_compare_command(
     with _panel_command("shortlist compare", json_output=json_output):
         try:
             comparison = compare_held_shortlists(
-                FileShortlistStore(runtime_dir / "shortlists"),
+                shortlist_store_at(runtime_dir),
                 baseline_id=baseline_id,
                 current_id=current_id,
             )
@@ -10097,7 +10102,7 @@ def model_daily_run_command(
                 _panel_store(runtime_dir),
                 request,
                 predictions=prediction_store_at(runtime_dir, clock=_panel_clock),
-                runs=SQLiteRunRepository(runtime_dir / "state.sqlite3"),
+                runs=run_repository_at(runtime_dir),
                 predicted_at=now,
                 started_at=now,
             )
@@ -10527,7 +10532,7 @@ def portfolio_construct_command(
                 ),
                 limits=limits,
             )
-            answer = held_shortlist(FileShortlistStore(runtime_dir / "shortlists"), shortlist_id)
+            answer = held_shortlist(shortlist_store_at(runtime_dir), shortlist_id)
             construction = construct_portfolio(
                 candidates=candidates_from_shortlist_answer(answer),
                 policy=policy,
