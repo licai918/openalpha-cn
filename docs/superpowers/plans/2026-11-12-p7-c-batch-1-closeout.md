@@ -5,7 +5,7 @@
 ## 0. 先读这几句
 
 - 本批次做的是方案 C 的三个 issue：`V2-P7-011`（面板推导的涨停 / 炸板 / 连板证据生产者）、`V2-P7-012`（DeepSeek 模型接入：Provider 配置、用量记账、提示词版本化、原始响应内容寻址存储）、`V2-P7-015`（LLM 历史污染护栏）。实施计划是任务书，**不在版本库内**：`.superpowers/sdd/c-batch-1/plan.md`（`.superpowers/` 不入库），本文是它的版本化记录。
-- 代码在分支 `feat/v2-p7-c-batch-1` 上（从 `main` 的 `5e5218e` 分出）。代码末端的截面是本文写作前的 tip：**15 个提交**（`git log --format='%h %s' 5e5218e..<tip>`），38 个文件、+5,301 / −93。本文与同一文档波里的其它 Markdown 提交在其后，tip 以控制者的报告与 `git log` 为准。
+- 代码在分支 `feat/v2-p7-c-batch-1` 上（从 `main` 的 `5e5218e` 分出）。到本文写作时的 tip：**17 个提交**（`git log --format='%h %s' 5e5218e..<tip>`：16 个代码提交 + 1 个文档提交），45 个文件、+5,427 / −117（含本文、路线图、§9 与台账）。最终的 tip 以控制者的报告与 `git log` 为准。
 - **未推送、未合并。** 交付的代码**没有跑过任何真实构建、因子、读数或冒烟，一次 Tushare 请求也没有发过，一次 DeepSeek（或任何 LLM）请求也没有发过**：所有测试都跑在测试时生成的夹具、已存的假记录和注入的假传输上。计划里那次 ≤5 次请求的联网探针**没有做**，等用户明确授权。
 - **没有任何 P7 登记存在，`docs/research/p7-registration.json` 没有写出，也没有任何绑定被作废**；issue 总数仍是 253（本批次只关闭三行的代码部分，不关闭任何一行）。
 - `DEEPSEEK_V4_1_FLASH` 是**占位**：model、base_url、structured_output_mode、价格都等人从 `api-docs.deepseek.com` 填，`verified_on=None`，`api_key_env="DEEPSEEK_API_KEY"` 是变量名而不是密钥。**没有一处把占位写成已核实**，也没有任何模型 id / endpoint 被当成“已核实”引用。
@@ -85,6 +85,5 @@
 ## 7. 提交与文件清单（本批次）
 
 - 分支 `feat/v2-p7-c-batch-1`，从 `5e5218e` 分出；代码提交（按时间倒序，tip 以 `git log` 为准）：
-  `3894e41`（012 Provider 选项）、`8ea5995`（012 记录/回放）、`1e35b2d`（015 规则）、`46acb46`（011 纯领域）、`2170c9f`（015 引擎调用点，Lead）、`4526bbb`（012 提示词版本化）、`c21b5da`（012 摘要普查）、`f29580d`（012 引擎侧，Lead）、`bf236fc`（011 面板适配器）、`2d0ef00`（012 引用换行修复）、`12ce8ae`（011 证据平面/CLI）、`286b7ce`（012 DeepSeek/组合根）、`f592cd9`（015 验证/回测路径）、`9152bf0`（011 表面奇偶声明，Lead）。
-  另有 `60328b2 fix(V2-P7-011): the evidence store's reader is named apart from the panel query door`（最终闸门上发现的计数漂移修复，见 §3 的偏离表尾）。  本文、路线图三行、规格 §9 两行与台账的文档提交在此之后。
+  `f645950`（011/012 两个测试改用计划里的原名，Lead）、`60328b2`（011 证据读门的参数改名，Lead，最终闸门发现）、`9152bf0`（011 表面奇偶声明，Lead）、`f592cd9`（015 验证/回测路径）、`286b7ce`（012 DeepSeek/组合根）、`12ce8ae`（011 证据平面/CLI）、`2d0ef00`（012 引用换行修复）、`bf236fc`（011 面板适配器）、`f29580d`（012 引擎侧，Lead）、`c21b5da`（012 摘要普查）、`4526bbb`（012 提示词版本化）、`2170c9f`（015 引擎调用点，Lead）、`46acb46`（011 纯领域）、`1e35b2d`（015 规则）、`8ea5995`（012 记录/回放）、`3894e41`（012 Provider 选项）；文档提交 `890e1dc`（本文、路线图、§9、台账）。
 - 文件面：`src/` 新增 `domain/limit_events.py`、`panel_limit_events.py`、`evidence/limit_events.py`、`models/recording.py`、`models/deepseek.py`、`storage/model_exchanges.py`、`agents/prompts.py`、`domain/llm_contamination.py`；修改 `runtime/engine.py`、`runtime/composition.py`、`cli.py`、`models/openai_compatible.py`、`agents/model.py`、`domain/run.py`、`backtest/validation.py`、`strategy_view.py`、`api/app.py`、`model_view.py`；测试新增 9 个文件、修改 10 个；另有 `pyproject.toml`（禁止表一行）、`tests/panel_fixtures.py`（opt-in 生成器）与台账/文档。
