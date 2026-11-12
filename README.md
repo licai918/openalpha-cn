@@ -1196,11 +1196,11 @@ uv run openalpha portfolio turnover-variants sla_0123456789abcdef01234567 \
    `.env` 的符号链接，凭据只经 `uv run --env-file` 传给子进程）：
 
    ```bash
-   uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-daily
+   uv run --no-sync python scripts/daily_selection.py --pin-worktree ~/openalpha-daily --registration docs/research/p6-registration.json
    ```
 
    ```bash
-   cd ~/openalpha-daily && UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research
+   cd ~/openalpha-daily && UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv/bin/python" scripts/daily_selection.py --runtime-dir ~/openalpha-research --registration docs/research/p6-registration.json
    ```
 
    它更新面板、体检、构建当日因子、出候选榜与目标权重、在次日 09:15 之前登记预测；同一天再跑一次不发请求、

@@ -1214,7 +1214,12 @@ def _replace_whole(path: Path, text: str) -> None:
 def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _utc_now) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--runtime-dir", type=Path, required=True)
-    parser.add_argument("--registration", type=Path)
+    parser.add_argument(
+        "--registration",
+        type=Path,
+        help="The registration this run reads: required, with no default (the P6 book's "
+        "registration is paused).",
+    )
     parser.add_argument("--repo", type=Path, default=daily_selection.REPOSITORY)
     parser.add_argument(
         "--as-of",
