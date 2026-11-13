@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 240
-- 当前真实完成: 235 (97.92%)
+- 功能总数: 244
+- 当前真实完成: 239 (97.95%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=26` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 214 |
+| `NATIVE_COMPLETE` | 218 |
 
 ## 功能明细
 
@@ -264,6 +264,10 @@
 | `OA-OPS-052` | operations | Capped, dry-run-first probe of the Tushare event interfaces | `NATIVE_COMPLETE` | `scripts/p7_event_probe.py#main;scripts/p7_event_probe.py#probe_plan;scripts/p7_event_probe.py#run_probe;scripts/p7_event_probe.py#render_report;scripts/p7_event_probe.py#PROBE_CAP;scripts/p7_event_probe.py#ProbeCall;scripts/p7_event_probe.py#ProbeFinding` | `tests/unit/scripts/test_p7_event_probe.py` | `pytest` | `tests/unit/scripts/test_p7_event_probe.py::test_the_cap_stops_the_301st_request_unsent` |
 | `OA-AGENT-011` | agent | Agent evening: score Step 0's survivors and file agent_* prediction records, never trading | `NATIVE_COMPLETE` | `scripts/agent_evening.py#main;scripts/agent_evening.py#_rule_family;scripts/agent_evening.py#_llm_family;scripts/agent_evening.py#_write_journal;scripts/agent_evening.py#AGENT_STEPS;src/openalpha_cn/strategy_agent_forward.py#file_agent_batch;src/openalpha_cn/strategy_agent_forward.py#agent_declaration;src/openalpha_cn/domain/agent_forward.py#primary_sample;src/openalpha_cn/domain/agent_forward.py#coverage_set;src/openalpha_cn/domain/agent_forward.py#score_of;src/openalpha_cn/runtime/composition.py#agent_journal_dir_at` | `tests/unit/scripts/test_agent_evening.py;tests/unit/test_strategy_agent_forward.py;tests/unit/domain/test_agent_forward.py` | `pytest` | `tests/unit/scripts/test_agent_evening.py::test_coverage_and_primary_are_filed_separately_and_overlap_reuses_one_run_id` |
 | `OA-EVAL-001` | evaluation | Incremental-IC evaluator: partial rank IC over Step 0's composite, inside the survivor set, one primary statistic | `NATIVE_COMPLETE` | `src/openalpha_cn/strategy_agent_evaluation.py#evaluate;src/openalpha_cn/strategy_agent_evaluation.py#read_agent_protocol;src/openalpha_cn/strategy_agent_evaluation.py#AgentProtocol;src/openalpha_cn/strategy_agent_evaluation.py#AgentEvaluation;src/openalpha_cn/strategy_agent_evaluation.py#AGENT_FORWARD_PROTOCOL_KEY;src/openalpha_cn/domain/incremental_ic.py#partial_rank_ic;src/openalpha_cn/domain/incremental_ic.py#non_overlapping;src/openalpha_cn/domain/incremental_ic.py#detectable_mean` | `tests/integration/test_agent_incremental_ic.py;tests/unit/domain/test_incremental_ic.py` | `pytest` | `tests/integration/test_agent_incremental_ic.py::test_known_increment_is_detected_and_none_is_not` |
+| `OA-OPS-053` | operations | Event-level power calculator for plan C: N=300 and the census, two measurability verdicts, zero requests | `NATIVE_COMPLETE` | `scripts/p7_c_power.py#historical_event_counts;scripts/p7_c_power.py#event_power;scripts/p7_c_power.py#power_report;scripts/p7_c_power.py#write_power_report;scripts/p7_c_power.py#main` | `tests/unit/scripts/test_p7_c_power.py` | `pytest` | `tests/unit/scripts/test_p7_c_power.py::test_the_report_is_the_writer_contract_and_round_trips` |
+| `OA-OPS-054` | operations | The C registration writer: one agent_forward/v1 registration, read back before it is committed | `NATIVE_COMPLETE` | `scripts/p7_c_register.py#c_registration_body;scripts/p7_c_register.py#c_read_back;scripts/p7_c_register.py#CRITERIA;scripts/p7_c_register.py#main;src/openalpha_cn/strategy_agent_evaluation.py#read_agent_forward_power` | `tests/unit/scripts/test_p7_c_register.py;tests/unit/test_p7_registration_chain.py` | `pytest` | `tests/unit/scripts/test_p7_c_register.py::test_the_registration_body_is_the_frozen_one` |
+| `OA-EVAL-002` | evaluation | The C report: records, abstentions, model-alias changes and the one adopted D5 statistic over stored sessions | `NATIVE_COMPLETE` | `scripts/agent_report.py#_report;scripts/agent_report.py#_view;scripts/agent_report.py#OUTCOME_WORDINGS;scripts/agent_report.py#main;src/openalpha_cn/strategy_agent_evaluation.py#ADOPTED_WINDOW_SESSIONS` | `tests/unit/scripts/test_agent_report.py;tests/integration/test_agent_incremental_ic.py` | `pytest` | `tests/unit/scripts/test_agent_report.py::test_the_json_report_repeats_the_printed_facts_and_print_only_writes_nothing` |
+| `OA-OPS-055` | operations | The D7 dry week: scratch-runtime-only model evenings that measure operations and never file a prediction | `NATIVE_COMPLETE` | `scripts/agent_evening.py#_dry_week;scripts/agent_evening.py#_dry_week_family;scripts/agent_evening.py#DRY_WEEK_MAX_REQUESTS;src/openalpha_cn/strategy_agent_evaluation.py#refuse_a_dry_week_runtime;src/openalpha_cn/strategy_agent_forward.py#AGENT_SCRIPTS` | `tests/unit/scripts/test_agent_evening.py;tests/integration/test_agent_incremental_ic.py` | `pytest` | `tests/unit/scripts/test_agent_evening.py::test_a_dry_week_evening_files_no_prediction_journal_or_evidence_and_leaves_step0_untouched` |
 
 ## 边界
 
