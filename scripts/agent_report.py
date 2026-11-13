@@ -149,6 +149,24 @@ OUTCOME_WORDINGS: Final[Mapping[str, str]] = {
 }
 """The five fixed outcome wordings; `not_measurable` is exactly the evaluator's, D3/D5."""
 
+READING_DESCRIPTIVE: Final[str] = "descriptive"
+"""`--json`'s reading kind for a registration whose power block says not_testable (N3)."""
+READING_TEST: Final[str] = "test"
+"""`--json`'s reading kind for a registration whose power block says testable."""
+DESCRIPTIVE_OUTCOME_WORDING: Final[str] = (
+    "descriptive (registered not_testable): this registration registered the design as not "
+    "testable, so the window's mean and any p-value below describe the stored candidate records "
+    "only; there is no pass or fail reading, no conclusion about the family, and no wording "
+    "beyond 候选 / candidate"
+)
+"""N3: the outcome wording for a not_testable registration.
+
+The user's ruling: C registers as an exploratory candidate, and its 120-session result is
+descriptive, not a test. The phrase "descriptive (registered not_testable):" is the required
+prefix; the wording deliberately does not use the evaluator's pass/fail labels, because a design
+registered as not testable cannot produce that reading.
+"""
+
 
 class AgentReportError(ValueError):
     """The report cannot state its facts as asked; the command prints this and exits 2."""
@@ -468,10 +486,14 @@ def _view(
 ) -> dict[str, Any]:
     """Every printed fact as one JSON-safe mapping (`--json` writes exactly this)."""
     primary = evaluation.primary
+    # N3: a registration whose power block says not_testable was registered as an exploratory
+    # candidate; its reading is descriptive and must never be printed as a pass/fail result.
+    descriptive_reading = power.register_untestable
     return {
         "schema": REPORT_SCHEMA,
         "candidate": True,
         "not_traded": True,
+        "reading": READING_DESCRIPTIVE if descriptive_reading else READING_TEST,
         "registration": {
             "config_id": registration.config_id,
             "registration_sha256": registration.registration_sha256,
@@ -519,7 +541,11 @@ def _view(
             "descriptive_only": primary.test is None,
         },
         "outcome": evaluation.outcome,
-        "outcome_wording": OUTCOME_WORDINGS[evaluation.outcome],
+        "outcome_wording": (
+            DESCRIPTIVE_OUTCOME_WORDING
+            if descriptive_reading
+            else OUTCOME_WORDINGS[evaluation.outcome]
+        ),
         "power": {
             "periods": evaluation.power.periods,
             "sd": evaluation.power.sd,
@@ -535,7 +561,10 @@ def _view(
         "exploratory": [
             _exploratory_view(reading, q=protocol.q) for reading in evaluation.exploratory
         ],
-        "adopted": list(evaluation.adopted),
+        # N3: an adopted-rule block is a decision statement; a descriptive reading does not take
+        # one, so it is withheld rather than presented as a decision (the registration and the
+        # protocol still carry the rules).
+        "adopted": [] if descriptive_reading else list(evaluation.adopted),
     }
 
 
@@ -593,13 +622,25 @@ def _render(view: Mapping[str, Any]) -> list[str]:
     )
     if primary["test"] is not None:
         test = primary["test"]
-        lines.append(
-            f"primary test      mean {_mean_text(primary['mean'])} over n={primary['measurable']}: "
-            f"two-sided p {test['two_sided_p_value']:.6g}, one-sided p "
-            f"{test['one_sided_p_value']:.6g}, level {power['level']:g}, "
-            f"{'exact' if test['exact'] else 'randomized'} sign-flip over "
-            f"{test['sign_patterns']} sign patterns"
-        )
+        if view["reading"] == READING_DESCRIPTIVE:
+            # N3: a not_testable registration's p-value is a descriptive fact, not the
+            # registered test's result; the label says so in the same line that prints it.
+            lines.append(
+                f"primary reading   mean {_mean_text(primary['mean'])} over "
+                f"n={primary['measurable']}: two-sided p {test['two_sided_p_value']:.6g}, "
+                f"one-sided p (descriptive, not a test) {test['one_sided_p_value']:.6g}, "
+                f"level {power['level']:g}, "
+                f"{'exact' if test['exact'] else 'randomized'} sign-flip over "
+                f"{test['sign_patterns']} sign patterns"
+            )
+        else:
+            lines.append(
+                f"primary test      mean {_mean_text(primary['mean'])} over "
+                f"n={primary['measurable']}: two-sided p {test['two_sided_p_value']:.6g}, "
+                f"one-sided p {test['one_sided_p_value']:.6g}, level {power['level']:g}, "
+                f"{'exact' if test['exact'] else 'randomized'} sign-flip over "
+                f"{test['sign_patterns']} sign patterns"
+            )
     lines.append(
         f"power             n={power['periods']}, detectable mean {_mean_text(power['mean'])} at "
         f"power {power['power']:g} from the window's measured dispersion; a property of the "

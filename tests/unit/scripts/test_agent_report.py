@@ -669,6 +669,97 @@ def test_the_five_outcomes_print_their_fixed_wording(
         assert "not evidence" in out
 
 
+def _matured_candidate_evaluation() -> AgentEvaluation:
+    """A matured window with a positive mean and a one-sided p below the level."""
+    return make_evaluation(
+        outcome="candidate_increment",
+        mean=0.3,
+        measurable=6,
+        sessions=6,
+        test=StatisticTest(
+            two_sided_p_value=0.06,
+            one_sided_p_value=0.03,
+            exact=False,
+            sign_patterns=64,
+            random_seed=11,
+        ),
+    )
+
+
+def _not_testable_body() -> dict[str, Any]:
+    """C's registration body with the power block N1/D1 expects for the untestable branch."""
+    body = _c_body()
+    body["settings"][AGENT_FORWARD_POWER_KEY] = {
+        **body["settings"][AGENT_FORWARD_POWER_KEY],
+        "verdict": "not_testable",
+        "register_untestable": True,
+    }
+    return body
+
+
+FORBIDDEN_TEST_PHRASES: Final[tuple[str, ...]] = (
+    "passed at the registered level",
+    "did not pass at the registered level",
+    "candidate_increment",
+    "no_increment_detected",
+    "that is the test's answer",
+    "primary test",
+)
+
+
+def test_a_register_untestable_registration_prints_a_descriptive_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N3: a not_testable registration's matured window is descriptive, never pass/fail.
+
+    C was registered as an exploratory candidate precisely because the frozen planning prior
+    makes the design untestable (N1). Even when the stored window has a positive mean and a
+    one-sided p below the level, the bound report must not print the registered test's pass/fail
+    wording: the outcome line is prefixed `descriptive (registered not_testable):`, the p-value
+    line is labelled descriptive, the D5 adopted-rule block is not presented as a decision, and
+    `--json` carries `reading: descriptive`.
+    """
+    evaluation = _matured_candidate_evaluation()
+    world = _world(tmp_path, monkeypatch, c_body=_not_testable_body(), evaluation=evaluation)
+    report_path = tmp_path / "report.json"
+
+    code = report.main(world.arguments("--json", str(report_path)), clock=lambda: AS_OF)
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "descriptive (registered not_testable):" in out
+    assert "one-sided p (descriptive, not a test)" in out
+    for phrase in FORBIDDEN_TEST_PHRASES:
+        assert phrase not in out, f"the descriptive report printed {phrase!r}"
+    assert "adopted" not in out, "no adopted-rule block is presented as a decision"
+    view = json.loads(report_path.read_text(encoding="utf-8"))
+    assert view["reading"] == "descriptive"
+    assert view["outcome_wording"].startswith("descriptive (registered not_testable):")
+    assert view["adopted"] == []
+
+
+def test_the_testable_path_keeps_the_registered_outcome_wording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N3: the testable registration's wording is unchanged, byte for byte, and reads `test`."""
+    evaluation = _matured_candidate_evaluation()
+    world = _world(tmp_path, monkeypatch, evaluation=evaluation)
+    report_path = tmp_path / "report.json"
+
+    code = report.main(world.arguments("--json", str(report_path)), clock=lambda: AS_OF)
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "primary test" in out
+    assert "one-sided p " in out and "one-sided p (descriptive" not in out
+    assert "candidate_increment: 候选 / candidate, not evidence -- the registered one-sided " in out
+    assert "passed at the registered level" in out
+    assert "descriptive (registered not_testable)" not in out
+    view = json.loads(report_path.read_text(encoding="utf-8"))
+    assert view["reading"] == "test"
+    assert view["outcome_wording"].startswith("candidate_increment:")
+
+
 def test_the_primary_test_is_printed_only_after_the_window_and_carries_its_reading(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
