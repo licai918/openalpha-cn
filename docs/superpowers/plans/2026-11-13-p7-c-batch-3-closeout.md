@@ -227,7 +227,7 @@
 
 ### 10.1 本轮的行为改变与记录
 
-- **N3 是“文本与代码一致性”的修复，不是新的研究判据**：用户 2026-11-13 的 N1 裁决已经规定 `not_testable` 登记是探索性候选、120 会话读数是描述性的；本轮让被登记的脚本真的这样打印。登记为 `not_testable` 时报告不再给出任何通过/失败、候选增量/无增量的措辞，也不把 D5 规则当作决定；`--json` 的 `reading` 让下游能区分两种读数。已登记的检验规则本身不变。
+- **N3 是“文本与代码一致性”的修复，不是新的研究判据**：用户 2026-11-13 的 N1 裁决已经规定 `not_testable` 登记是探索性候选、120 会话读数是描述性的；本轮让被登记的脚本真的这样打印。登记为 `not_testable` 时报告不再给出任何通过/失败、候选增量/无增量的措辞，也不把 D5 规则当作决定；`--json` 的 `reading` 让下游能区分两种读数。已登记的检验规则本身不变。**描述性分支不吞掉实质结论措辞**：`not_measurable` 仍打印 D3/D5 的“不可测、不是没有证据”的原文，`futility_stop` 仍说明在第 60 个前向会话按中期累积均值 ≤ 0 停止（在 `descriptive (registered not_testable):` 前缀下，两者都只描述已存窗口，不读成检验结论）；协议 §12.2 的 D8 段落补上同一个例外，避免绑定协议在 L5 之前自相矛盾。
 - **testable 路径不变**：报告对 `testable` 登记的打印文本与之前完全相同（测试断言 `primary test` 行、`candidate_increment:` 固定措辞、`passed at the registered level` 仍在），只是 `--json` 多了 `reading: test` 字段；这是 N3 明确要求的“unchanged otherwise”。
 - **覆盖测试的做法与边界**：真实 `_admit` 不能在测试进程里通过（包必须从被登记的那个仓库导入，而测试进程从本 worktree 导入），所以测试复制一份抛掷仓库并在子进程里跑真实脚本。它不碰网络（拒绝发生在任何 provider 之前，且子进程注入的 transport 一旦被调用就抛错），不改 Step 0 数据（快照断言），也不创建运行目录（断言不存在）。这条测试是覆盖缺口的一对一修补，不是对实现的替身。
 - **文档**：协议 §6.2.3 增加一段，说明绑定报告如何执行描述性读数（结论前缀、p 值标注、不打印采纳块、`--json` 的 `reading`），并在 §14 追加一条修复轮 3 记录（只追加）；运行手册 L6 同步说明；§9 决策链没有新增行（N3 是 N1 裁决的实现，不改判据/顺序/闸门；§9 仍保持只追加、旧行未动）。
@@ -240,5 +240,5 @@
 
 ### 10.3 修复轮 3 之后跑过的门槛（定向；不跑目录级/全量）
 
-- 触碰的测试文件：`tests/unit/scripts/test_agent_report.py`（29）、`tests/unit/scripts/test_agent_evening.py`（49）——一起跑 **78 passed**；`tests/unit/domain/test_contract_identity.py`（44）与 `tests/unit/test_documentation_tables.py`（3）单独跑通过。
+- 触碰的测试文件：`tests/unit/scripts/test_agent_report.py`（31；含描述性读数保留 `not_measurable`/`futility_stop` 实质措辞的两条）、`tests/unit/scripts/test_agent_evening.py`（49）——一起跑 **80 passed**；`tests/unit/domain/test_contract_identity.py`（44）与 `tests/unit/test_documentation_tables.py`（3）单独跑通过。
 - `ruff check .`、`ruff format --check .`、`mypy --cache-dir=/dev/null src scripts`、`PYTHONPATH=src lint-imports`、`scripts/verify_publication.py`、`scripts/build_feature_coverage.py --check` 在最终 tip 上跑；**串行全量闸门由控制者跑**（本记录不复制控制者的读数）。

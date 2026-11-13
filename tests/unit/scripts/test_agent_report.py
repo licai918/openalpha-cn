@@ -738,6 +738,48 @@ def test_a_register_untestable_registration_prints_a_descriptive_reading(
     assert view["adopted"] == []
 
 
+def test_the_descriptive_reading_keeps_the_not_measurable_wording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N3: descriptive wording does not swallow D3/D5's own 'not_measurable' outcome.
+
+    A not_testable registration whose window matured but is too thin still has to say "not
+    measurable" (never "no evidence"); the outcome line keeps that substance under the
+    descriptive prefix and the p-value line stays descriptive.
+    """
+    evaluation = make_evaluation(outcome="not_measurable", mean=0.01, measurable=40, sessions=120)
+    world = _world(tmp_path, monkeypatch, c_body=_not_testable_body(), evaluation=evaluation)
+
+    code = report.main(world.arguments(), clock=lambda: AS_OF)
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "descriptive (registered not_testable):" in out
+    assert NOT_MEASURABLE_WORDING in out
+    assert "no test is made (window not matured, or the registration is not testable)" in out
+    for phrase in FORBIDDEN_TEST_PHRASES:
+        assert phrase not in out, f"the descriptive report printed {phrase!r}"
+
+
+def test_the_descriptive_reading_keeps_the_futility_wording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N3: the futility stop's substance survives, without being called a test's answer."""
+    evaluation = make_evaluation(outcome="futility_stop", mean=-0.1, measurable=60, sessions=60)
+    world = _world(tmp_path, monkeypatch, c_body=_not_testable_body(), evaluation=evaluation)
+
+    code = report.main(world.arguments(), clock=lambda: AS_OF)
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "descriptive (registered not_testable):" in out
+    assert "forward session 60" in out
+    assert "cumulative interim mean at or below zero" in out
+    assert "a design stop, not a negative result" in out
+    for phrase in FORBIDDEN_TEST_PHRASES:
+        assert phrase not in out, f"the descriptive report printed {phrase!r}"
+
+
 def test_the_testable_path_keeps_the_registered_outcome_wording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

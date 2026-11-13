@@ -38,11 +38,19 @@ and the registered Step 0 configuration, and this script only states what it ans
 - The **primary arm**: before the registered window matures, counts and a descriptive mean with no
   test; once it has matured, the once-made sign-flip test (mean, two-sided and one-sided
   readings, level, exact/randomized) and one of the five fixed outcomes. `not_measurable` prints
-  exactly the evaluator's wording and never "no evidence".
+  exactly the evaluator's wording and never "no evidence". **When the registration's power block
+  says `register_untestable`** (a not_testable design), the reading is descriptive only: the
+  outcome line is prefixed `descriptive (registered not_testable):`, the p-value line is labelled
+  `one-sided p (descriptive, not a test)`, the fix's pass/fail labels are not used, `not_measurable`
+  and `futility_stop` keep their substantive wording under the descriptive prefix (a description of
+  the stored window, never a test result), and `--json` carries `"reading": "descriptive"` (a
+  testable registration's reading is `"test"`, its printed text unchanged).
 - The **exploratory block**, every arm labelled `EXPLORATORY`, its mean and its Benjamini-Yekutieli
   q-value read as "below q" / "at or above q" against the registered `q`, never pooled with the
   primary arm and never stated as a conclusion.
-- The adopted D5 rules the evaluation applied (futility form and one-sided reading).
+- The adopted D5 rules the evaluation applied (futility form and one-sided reading), unless the
+  reading is descriptive: a not_testable registration takes no decision, so the adopted-rule block
+  is withheld rather than presented as this report's decision.
 
 `--json PATH` writes the same facts as one document, atomically (temporary file plus
 `os.replace`); without it the command prints and writes nothing.
@@ -166,6 +174,35 @@ descriptive, not a test. The phrase "descriptive (registered not_testable):" is 
 prefix; the wording deliberately does not use the evaluator's pass/fail labels, because a design
 registered as not testable cannot produce that reading.
 """
+DESCRIPTIVE_PREFIX: Final[str] = "descriptive (registered not_testable): "
+
+DESCRIPTIVE_FUTILITY_WORDING: Final[str] = (
+    "the registered futility look stopped the window at forward session 60 on a cumulative "
+    "interim mean at or below zero; this describes the stored window -- a design stop, not a "
+    "negative result and not a test's answer"
+)
+"""A descriptive reading keeps the futility stop's substance without the pass/fail framing."""
+DESCRIPTIVE_NOT_YET_WORDING: Final[str] = (
+    "the registered window has not filled, or a position's label window has not matured; only "
+    "counts and a descriptive mean are shown, and no test is made"
+)
+"""A descriptive reading before the window: no decision is available yet."""
+
+
+def _descriptive_outcome_wording(outcome: str) -> str:
+    """The N3 wording for one outcome under a not_testable registration (no pass/fail reading).
+
+    `not_measurable` and `futility_stop` are not pass/fail labels, so their substance is kept
+    under the descriptive prefix; the increment labels are replaced by the generic wording,
+    because a design registered as not testable does not produce them as a test result.
+    """
+    if outcome == "not_measurable":
+        return DESCRIPTIVE_PREFIX + NOT_MEASURABLE_WORDING
+    if outcome == "futility_stop":
+        return DESCRIPTIVE_PREFIX + DESCRIPTIVE_FUTILITY_WORDING
+    if outcome == "not_yet":
+        return DESCRIPTIVE_PREFIX + DESCRIPTIVE_NOT_YET_WORDING
+    return DESCRIPTIVE_OUTCOME_WORDING
 
 
 class AgentReportError(ValueError):
@@ -542,7 +579,7 @@ def _view(
         },
         "outcome": evaluation.outcome,
         "outcome_wording": (
-            DESCRIPTIVE_OUTCOME_WORDING
+            _descriptive_outcome_wording(evaluation.outcome)
             if descriptive_reading
             else OUTCOME_WORDINGS[evaluation.outcome]
         ),
@@ -610,11 +647,15 @@ def _render(view: Mapping[str, Any]) -> list[str]:
         f"{'yes' if aliases['changed'] else 'no'}; missing: "
         f"{', '.join(aliases['missing_journals']) or 'none'}"
     )
-    descriptive = (
-        "; descriptive only, the registered test is not made before the window matures"
-        if primary["descriptive_only"]
-        else ""
-    )
+    if primary["descriptive_only"]:
+        descriptive = (
+            "; descriptive only: no test is made (window not matured, or the registration is "
+            "not testable)"
+            if view["reading"] == READING_DESCRIPTIVE
+            else "; descriptive only, the registered test is not made before the window matures"
+        )
+    else:
+        descriptive = ""
     lines.append(
         f"primary           {primary['family']}/{primary['scoring_set']}/h{primary['horizon']}: "
         f"mean {_mean_text(primary['mean'])} over {primary['measurable']} measurable of "

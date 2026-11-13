@@ -538,7 +538,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src" "$PWD/.venv/bin/python" scripts/
 C 的报告是**单独的命令** `scripts/agent_report.py`，不是 Step 0 的 `scripts/forward_report.py` 里的一节；
 **Step 0 的周报脚本从不因 C 而修改**。报告：见证/缺失记录与原因、弃权率、模型别名变化、主检验（窗口之前
 只印计数与描述性均值，窗口满足之后才印那一次检验）、带标签的探索性块、样本数与可检出均值、以及五种结论的
-固定措辞。它只读已存记录（零模型调用），Step 0 的运行目录只读。报告里的**弃权率与模型别名**统计只覆盖
+固定措辞。**例外**：若登记的 power 块是 `not_testable` + `register_untestable`，报告只印描述性读数——结论行前缀 `descriptive (registered not_testable):`、p 值行标注 `one-sided p (descriptive, not a test)`、不打印采纳规则块、`--json` 的 `reading` 为 `descriptive`（testable 登记不变）；`not_measurable` 与 `futility_stop` 的实质措辞在描述性前缀下保留，但整段不读成那次检验的结论。它只读已存记录（零模型调用），Step 0 的运行目录只读。报告里的**弃权率与模型别名**统计只覆盖
 `anchor_session <= session <= through`（与主臂同一个窗口），不读窗口之外的记录。它先拒绝带 D7 干跑标记的
 运行目录（第 12.1 节）。
 
