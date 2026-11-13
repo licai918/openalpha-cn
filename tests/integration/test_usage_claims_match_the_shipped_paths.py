@@ -10,12 +10,19 @@ with a `usage_store` and the endpoint reported usage. No module under `src/` or 
 constructs that provider except `V2-P7-012`'s `runtime/composition.llm_provider`, which
 *assembles* it (around the exchange recorder and, in record mode, the usage store) without making
 a request; no CLI command, REST route or SDK method invokes that assembly or reads or writes the
-ledger. Beneath that sits a wider fact: no shipped path calls a model at all. The one model
-call under `src/` is `StructuredSignalAgent.analyze`'s `generate_json`, and nothing under
-`src/` or `scripts/` constructs that agent or a
-`ModelRegistry`; a model is reached only through code a user writes -- an agent they build and
-pass in, as `OpenAlphaSDK(agents=...)` accepts. So "Token and estimated cost are recorded" is
-true of a component a deployer can wire, and false of the product as it ships.
+ledger. Beneath that sits a wider fact: **no shipped path can spend a model request while the
+shipped endpoint constant is unverified.** The one model call under `src/` is
+`StructuredSignalAgent.analyze`'s `generate_json`; the only shipped construction of that agent is
+`scripts/agent_evening.py`'s model family (`V2-P7-013`), which is built *after*
+`runtime/composition.llm_provider` -- and that assembly refuses a live provider while
+`DEEPSEEK_V4_1_FLASH.verified_on is None`, so the construction site is unreachable in the shipped
+tree. `test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint` pins the gate: the
+day `L2` fills `verified_on`, that test fails and asks for the four documents to be rewritten and
+these guards to be retired or inverted. `ModelRegistry` is constructed nowhere under `src/` or
+`scripts/`; apart from the gated evening step a model is reached only through code a user writes
+-- an agent they build and pass in, as `OpenAlphaSDK(agents=...)` accepts. So "Token and estimated
+cost are recorded" is true of a component a deployer can wire (and of the gated evening command
+once its endpoint is verified), and false of the product as it ships today.
 
 Four couplings. The first three stand on that one fact, the fourth on a narrower one:
 
@@ -548,6 +555,19 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
     _site(
         "agents/model.py", "StructuredSignalAgent.analyze", CALLED_KINDS[MODEL_CALL_NAMED]
     ): Counted(1, "The same `self.provider.generate_json(...)`, counted again as a call."),
+    _site("agents/model.py", "StructuredSignalAgent.__init__", MODEL_CALL_NAMED): Counted(
+        1,
+        "Batch 1's fix round 2 names the callable here: the constructor reads "
+        "`provider.metadata` and hands `provider.generate_json` to `_accepts_attempt`. Naming "
+        "the callable is not calling it -- no request is posted and no usage row is appended "
+        "until a caller runs `analyze`, which is the site above.",
+    ),
+    _site("agents/model.py", "_accepts_attempt", MODEL_CALL_NAMED): Counted(
+        1,
+        "Batch 1's fix round 2 asks `inspect.signature(generate_json)` once, at construction, "
+        "whether the provider's callable accepts the `attempt` keyword. It inspects the "
+        "callable's signature; it calls nothing and records nothing.",
+    ),
     _site("models/__init__.py", "<module>", PROVIDER_NAMED): Counted(
         2,
         "The package re-exports the provider class: an import and its `__all__` entry. Nothing "
@@ -663,6 +683,27 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
         "Constructing a provider posts nothing; a row is written only when a caller invokes it "
         "against a vendor, and no shipped command, route or SDK method does.",
     ),
+    UsageSite("scripts/agent_evening.py", "<module>", AGENT_NAMED): Counted(
+        1,
+        "`V2-P7-013`'s evening command imports `StructuredSignalAgent` and `llm_provider`. It "
+        "constructs the agent only inside `_llm_family`, after `llm_provider` returned -- and "
+        "`llm_provider` refuses a live provider while `DEEPSEEK_V4_1_FLASH.verified_on is None`, "
+        "so the shipped tree cannot reach the constructor at all. The gate is asserted by "
+        "`test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint`; the day L2 "
+        "verifies the endpoint, that test fails and this entry's reason has to change with the "
+        "four documents.",
+    ),
+    UsageSite("scripts/agent_evening.py", "_llm_family", AGENT_NAMED): Counted(
+        1,
+        "The same gated construction, in the step's own scope: `_llm_family` is called after "
+        "step 5's `llm_provider(...)` assembly, which is unreachable while the shipped endpoint "
+        "constant has no verification date.",
+    ),
+    UsageSite("scripts/agent_evening.py", "_llm_family", CALLED_KINDS[AGENT_NAMED]): Counted(
+        1,
+        "The same gated construction counted again as a call (the `D12`-review rule). Nothing "
+        "runs here in the shipped tree for the reason above.",
+    ),
 }
 """Every `UsageSite` outside `tests/`, with how often it occurs and why it neither calls a model
 nor records usage."""
@@ -696,6 +737,68 @@ def test_no_shipped_path_calls_a_model_or_records_usage() -> None:
         "test_user_facing_docs_do_not_present_usage_recording_as_shipped and, if a registry is "
         "built, test_user_facing_docs_do_not_present_capability_selection_as_shipped. If the "
         "place calls and records nothing, record it in USAGE_SITES with its count and the reason."
+    )
+
+
+def test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint(
+    tmp_path: Path,
+) -> None:
+    """The one shipped model call path cannot spend a request while the endpoint is unverified.
+
+    `scripts/agent_evening.py` (`V2-P7-013`) is the first shipped command that *can* call a
+    model, so the two prose guards above no longer stand on "nothing under `src/` or `scripts/`
+    even constructs the agent". They stand on a narrower, still true fact: the construction sits
+    inside `_llm_family`, after `llm_provider(...)`, and `llm_provider` refuses a live provider
+    while `DEEPSEEK_V4_1_FLASH.verified_on is None` -- which it is, because filling it is the
+    gated live step L2. This test is the tripwire for the day that changes: the first assertion
+    fails, and the batch that fills the endpoint must then rewrite the four documents' "no
+    shipped path calls a model" clauses and retire or invert the two prose guards instead of
+    keeping them green over a false premise.
+    """
+    from datetime import UTC, datetime
+
+    from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH
+    from openalpha_cn.models.openai_compatible import ModelConfigurationError
+    from openalpha_cn.runtime.composition import llm_provider
+
+    assert DEEPSEEK_V4_1_FLASH.verified_on is None, (
+        "DEEPSEEK_V4_1_FLASH now has a verification date: the gated step L2 happened, so the "
+        "four guard-ed documents' 'no shipped path calls a model' clauses are no longer true and "
+        "the two prose guards above must be rewritten and retired or inverted. See plan C tasks "
+        "2.8/3.2 and the batch-2 closeout's open concern 1"
+    )
+    with pytest.raises(ModelConfigurationError):
+        llm_provider(
+            DEEPSEEK_V4_1_FLASH,
+            runtime_dir=tmp_path,
+            clock=lambda: datetime(2026, 11, 12, 20, 30, tzinfo=UTC),
+            replay=False,
+        )
+
+    source = (ROOT / "scripts" / "agent_evening.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="scripts/agent_evening.py")
+    calls: dict[str, list[tuple[str, int]]] = {}
+    pending: list[tuple[ast.AST, str]] = [(tree, "<module>")]
+    while pending:
+        node, scope = pending.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            scope = node.name
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            name = node.func.id
+            if name in {"StructuredSignalAgent", "llm_provider"}:
+                calls.setdefault(name, []).append((scope, node.lineno))
+        pending.extend((child, scope) for child in ast.iter_child_nodes(node))
+    constructions = calls.get("StructuredSignalAgent", [])
+    assert constructions, "the evening command no longer constructs the model-backed agent"
+    assert [scope for scope, _line in constructions] == ["_llm_family"], (
+        "the shipped construction moved out of `_llm_family`; the gating argument above is "
+        f"about that step, and it now happens in {constructions}"
+    )
+    assemblies = [line for scope, line in calls.get("llm_provider", []) if scope == "_llm_family"]
+    assert assemblies, "the evening command no longer assembles the provider through `llm_provider`"
+    assert all(line > min(assemblies) for _scope, line in constructions), (
+        "the agent is constructed before `llm_provider` is assembled, which would make the "
+        "unverified-endpoint refusal unable to gate it"
     )
 
 

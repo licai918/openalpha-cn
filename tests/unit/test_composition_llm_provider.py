@@ -508,3 +508,154 @@ def test_the_recorded_retry_sequence_replays_both_attempts_with_zero_inner_calls
 
     assert str(replayed.value) == str(recorded.value)
     assert len(fake.calls) == 2, "replay must reach neither the fake nor a real transport"
+
+
+# --- V2-P7-012 Task 2.1: the endpoint's extra payload goes through the composition root -----
+
+
+def test_llm_provider_passes_the_endpoint_extra_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one assembly passes the endpoint's mapping through, and replay addresses it.
+
+    `llm_provider` is the only `src/` construction site of the provider (hard rule 5), so this is
+    where the endpoint's `extra_payload` -- the DeepSeek thinking switch -- must reach the vendor
+    request. It is part of the payload, therefore part of the exchange digest: a replay of the
+    same endpoint finds the recorded answer with zero inner calls.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-record")
+    endpoint = replace(
+        DEEPSEEK_V4_1_FLASH,
+        verified_on=date(2026, 1, 1),
+        extra_payload={"thinking": {"type": "disabled"}},
+    )
+    fake = FakeJsonTransport(RESPONSE)
+    record = llm_provider(
+        endpoint,
+        runtime_dir=tmp_path,
+        clock=lambda: CLOCK,
+        replay=False,
+        transport=fake,
+    )
+
+    assert record.generate_json(**GENERATE) == {"direction": "up"}
+    payload = fake.calls[0]["payload"]
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["model"] == endpoint.model
+    assert [message["role"] for message in payload["messages"]] == ["system", "user"]
+    assert payload["response_format"]["type"] == "json_schema"
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    replay = llm_provider(endpoint, runtime_dir=tmp_path, clock=lambda: LATER, replay=True)
+    assert replay.generate_json(**GENERATE) == {"direction": "up"}
+    assert len(fake.calls) == 1, "the extra payload is part of the request address"
+
+
+# --- F2/F8 (fix round 1): the budget decorator wraps the INNER transport -----------------------
+
+
+class CountingWrapper:
+    """A `JsonTransport` decorator double: one counter per forwarded request, then the inner."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.calls = 0
+
+    def post_json(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        self.calls += 1
+        return self.inner.post_json(
+            url=url, headers=headers, payload=payload, timeout_seconds=timeout_seconds
+        )
+
+
+def test_wrap_transport_decorates_the_inner_transport_inside_the_recorder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook is applied to the HTTP transport, *inside* `RecordingJsonTransport`.
+
+    A decorator there counts and refuses only the requests that would reach the vendor; a store
+    hit is answered by the recorder before the decorator, which is the ordering a rerun needs.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-record")
+    fake = FakeJsonTransport(RESPONSE)
+    wrapped: list[Any] = []
+
+    def wrap(inner: Any) -> Any:
+        wrapped.append(inner)
+        return CountingWrapper(inner)
+
+    record = llm_provider(
+        DEEPSEEK_V4_1_FLASH,
+        runtime_dir=tmp_path,
+        clock=lambda: CLOCK,
+        replay=False,
+        transport=fake,
+        wrap_transport=wrap,
+    )
+
+    assert wrapped == [fake], "the hook receives the caller's transport, not the recorder"
+    assert isinstance(record.transport, RecordingJsonTransport)
+    assert isinstance(record.transport.inner, CountingWrapper), "the recorder must sit outside"
+    assert record.transport.inner.inner is fake
+
+    assert record.generate_json(**GENERATE) == {"direction": "up"}
+    assert record.transport.inner.calls == 1
+    assert len(fake.calls) == 1
+
+    assert record.generate_json(**GENERATE) == {"direction": "up"}
+    assert record.transport.inner.calls == 1, "a store hit is answered before the decorator"
+    assert len(fake.calls) == 1
+
+
+def test_wrap_transport_is_not_applied_in_replay_mode(tmp_path: Path) -> None:
+    """Replay has no inner transport, so there is nothing to decorate and the hook is not called."""
+    wrapped: list[Any] = []
+
+    def wrap(inner: Any) -> Any:
+        wrapped.append(inner)
+        return CountingWrapper(inner)
+
+    replay = llm_provider(
+        DEEPSEEK_V4_1_FLASH,
+        runtime_dir=tmp_path,
+        clock=lambda: CLOCK,
+        replay=True,
+        wrap_transport=wrap,
+    )
+
+    assert replay.transport.inner is None
+    assert wrapped == []
+
+
+def test_wrap_transport_cannot_bypass_the_unverified_endpoint_gate(tmp_path: Path) -> None:
+    """The gate is decided on the undecorated caller transport, before any wrapping."""
+    for supplied in (None, UrllibJsonTransport()):
+        with pytest.raises(ModelConfigurationError):
+            llm_provider(
+                DEEPSEEK_V4_1_FLASH,
+                runtime_dir=tmp_path,
+                clock=lambda: CLOCK,
+                replay=False,
+                transport=supplied,
+                wrap_transport=CountingWrapper,
+            )
+
+    # An explicitly injected test transport is allowed while the endpoint is unverified; the
+    # hook is still applied to it.
+    fake = FakeJsonTransport(RESPONSE)
+    provider = llm_provider(
+        DEEPSEEK_V4_1_FLASH,
+        runtime_dir=tmp_path,
+        clock=lambda: CLOCK,
+        replay=False,
+        transport=fake,
+        wrap_transport=CountingWrapper,
+    )
+    assert isinstance(provider.transport.inner, CountingWrapper)

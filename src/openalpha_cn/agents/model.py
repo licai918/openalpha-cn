@@ -9,9 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult
 from openalpha_cn.agents.prompts import STRUCTURED_SIGNAL_PROMPT_V1, PromptTemplate
+from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.json_value import thaw_json
 from openalpha_cn.domain.run import VersionRef
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.models.base import ModelProvider
+from openalpha_cn.models.openai_compatible import ModelConfigurationError
 
 
 class ModelProviderFailure(RuntimeError):
@@ -48,7 +51,14 @@ class StructuredAgentPayload(BaseModel):
 
 
 class StructuredSignalAgent:
-    """Call a model provider and enforce the same signal contract as baseline agents."""
+    """Call a model provider and enforce the same signal contract as baseline agents.
+
+    `include_facts` is opt-in and off by default. Off, the user payload is exactly the one every
+    recorded exchange was addressed under: `run_id`, `subject`, `as_of` and, per evidence item,
+    `evidence_id`/`kind`/`summary`. On, each item also carries the frozen evidence payload's
+    `facts`, which is what the `json_object` prompt needs in order to have a number to reason
+    about (`V2-P7-012` Task 2.1).
+    """
 
     def __init__(
         self,
@@ -59,6 +69,7 @@ class StructuredSignalAgent:
         feature_dependencies: frozenset[str] = frozenset(),
         max_attempts: int = 2,
         prompt: PromptTemplate = STRUCTURED_SIGNAL_PROMPT_V1,
+        include_facts: bool = False,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
@@ -80,6 +91,9 @@ class StructuredSignalAgent:
         self._provider_accepts_attempt = _accepts_attempt(provider.generate_json)
         self.max_attempts = max_attempts
         self.prompt = prompt
+        # Opt-in, and off by default: the default rendering is the one already-recorded
+        # exchanges are addressed under, so turning facts on may not change those bytes.
+        self.include_facts = include_facts
         # V2-P4-010: read off the provider at construction, not restated by the caller.
         # `ModelMetadata` already knows which endpoint and which model this agent will call,
         # and those two strings are precisely what `RunManifest.code_commit` cannot pin --
@@ -109,14 +123,7 @@ class StructuredSignalAgent:
             "run_id": context.run_id,
             "subject": context.subject,
             "as_of": context.as_of.isoformat(),
-            "evidence": [
-                {
-                    "evidence_id": item.evidence_id,
-                    "kind": item.kind,
-                    "summary": item.summary,
-                }
-                for item in context.evidence
-            ],
+            "evidence": [self._rendered_evidence(item) for item in context.evidence],
         }
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
@@ -145,12 +152,40 @@ class StructuredSignalAgent:
                     signal=payload.signal,
                     rationale=payload.rationale,
                 )
+            except ModelConfigurationError:
+                # Fix round 1, F1: a configuration error is a deployment fault, not a bad
+                # answer. It subclasses `ValueError`, so without this branch it was retried as
+                # an invalid answer and surfaced as `ModelProviderFailure`, which the evening
+                # command filed as a permanent `model_invalid_output` batch -- misattributing a
+                # missing credential or a misassembled provider to the model's output. It
+                # propagates unchanged after exactly one attempt, and the caller journals a
+                # family gap instead.
+                raise
             except (ValidationError, ValueError) as error:
                 last_error = error
         raise ModelProviderFailure(
             f"{self.agent_id} produced invalid structured output after "
             f"{self.max_attempts} attempts: {last_error}"
         )
+
+    def _rendered_evidence(self, item: EvidenceSnapshot) -> dict[str, Any]:
+        """One evidence item as the prompt sees it, with `facts` only when asked for.
+
+        `item.payload` is deeply frozen by `FreezePayloadMixin` (mappings become
+        `MappingProxyType`), so it cannot go into `json.dumps` directly; `thaw_json` is the one
+        conversion this repository uses for that. A payload without a `facts` key renders as the
+        default item: the flag adds facts, it never invents them.
+        """
+        rendered: dict[str, Any] = {
+            "evidence_id": item.evidence_id,
+            "kind": item.kind,
+            "summary": item.summary,
+        }
+        if self.include_facts:
+            payload = thaw_json(item.payload)
+            if isinstance(payload, dict) and "facts" in payload:
+                rendered["facts"] = payload["facts"]
+        return rendered
 
     @staticmethod
     def _validate_context(

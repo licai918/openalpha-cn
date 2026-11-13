@@ -775,16 +775,25 @@ DECLARED_CONTENT_ADDRESS_MINTS: Final[dict[str, str]] = {
         "not an address at all: `part-<24 hex>.parquet` is a file name, and no prefix "
         "`CONTENT_ADDRESS_PATTERN` admits can be spelled with the `-` it uses"
     ),
+    "strategy_agent_forward.py::agent_run_id": (
+        "`agent-<date>-<code>-<16 hex>`: one research cycle's run id, the identity a rerun "
+        "recomputes and the key a stored run manifest is found by; the four fields are canonical "
+        "JSON (the one spelling) and the digest is truncated because the readable prefix carries "
+        "the session and the security. It is **not a `CONTENT_ADDRESS_PATTERN` address** -- the "
+        "hyphenated prefix cannot spell one, the same documented shape as the Parquet "
+        "part-file name -- but the identity is real and the audit's question is the narrowing "
+        "(V2-P7-013)"
+    ),
 }
 
 """Every function under `src/` that narrows a digest, and what each one addresses.
 
-Eight, and the roadmap row for `V2-P4-037` named five of them -- `stable_model_id` plus a
+Nine, and the roadmap row for `V2-P4-037` named five of them -- `stable_model_id` plus a
 "genuine non-model content digests" list of `set_digest`, `rkc_`, `chr_` and `ev_`. Read off
-the tree instead, `cross_section_digest`, `stable_answer_digest` and `ParquetEvidenceStore
-.append` are there too, which is the same lesson `V2-P4-016` took from the hand-written prefix
-list this module's sibling replaced: a list of who hashes, written from memory, is a list that
-is already wrong.
+the tree instead, `cross_section_digest`, `stable_answer_digest`, `ParquetEvidenceStore
+.append` and `V2-P7-013`'s `agent_run_id` are there too, which is the same lesson `V2-P4-016`
+took from the hand-written prefix list this module's sibling replaced: a list of who hashes,
+written from memory, is a list that is already wrong.
 
 Keyed by `<module>::<class.function>` rather than by module, so a **second** bespoke digest
 added inside a file that already holds a legitimate one is red. `domain/factor.py` is why that
@@ -792,8 +801,9 @@ matters: it holds two, and a file-level allowlist would have admitted a third. `
 carries the same argument one level down, for a second digest added inside a function that
 already legitimately holds one.
 
-The seven prefixes these mint (`set`, `obs`/`prc`/`nrs`/`xs`, `chr`, `rkc`, `sla`, `ev`, and
-whichever the caller hands `stable_model_id`) are a different census from the one in
+The nine sights' prefixes (`set`, `obs`/`prc`/`nrs`/`xs`, `chr`, `rkc`, `sla`, `ev`, the
+hyphenated `agent-<date>-<code>-`, and whichever the caller hands `stable_model_id`) are a
+different census from the one in
 `test_manifest_component_provenance.py::live_prefixes`, which reads **prefix arguments** off
 call sites -- 31 of them carrying 28 distinct prefixes, none containing an underscore, as of
 `V2-P7-017` (`V2-P7-005`'s `sbc`, `tor` and `trl` joined the 24 that `V2-P4-017` left, and
@@ -884,6 +894,10 @@ DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
     "models/recording.py::exchange_response_digest": (
         "the whole 64 hex of one decoded model response, stored beside the exchange and "
         "re-derived on read; never prefixed, never truncated (V2-P7-012)"
+    ),
+    "domain/agent_forward.py::primary_sample": (
+        "the whole 64 hex of `salt|session|ts_code`, used only to order the survivors into the "
+        "registered draw; compared to nothing, stored nowhere and never an id (V2-P7-013, D2)"
     ),
 }
 """Every function under `src/` that hashes and does **not** narrow the result.

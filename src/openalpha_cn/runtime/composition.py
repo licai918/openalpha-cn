@@ -343,6 +343,7 @@ def llm_provider(
     clock: Callable[[], datetime],
     replay: bool,
     transport: JsonTransport | None = None,
+    wrap_transport: Callable[[JsonTransport], JsonTransport] | None = None,
 ) -> OpenAICompatibleProvider:
     """The one assembly of a vendor endpoint's provider (`V2-P7-012`).
 
@@ -352,6 +353,14 @@ def llm_provider(
     - **The exchange is recorded.** The provider's transport is a `RecordingJsonTransport` over
       `model_exchange_store_at(runtime_dir)`; in `replay` it has no inner transport at all, so an
       unrecorded request raises `ModelExchangeNotStoredError` instead of touching a network.
+    - **A caller may decorate the HTTP transport.** `wrap_transport` is applied to the *inner*
+      transport, inside the recorder -- so it sees only the requests that would reach the vendor.
+      A store hit, a replay and an unchanged second request are answered by the recorder and
+      never reach the decorator, and the decorator's own failures propagate through the recorder
+      unchanged. The one caller is `scripts/agent_evening.py`'s request budget (`F2`/`F8`): the
+      cap and the wall deadline belong to requests that would actually be sent, not to answers the
+      exchange store already holds, and a provider-level retry must count as another HTTP
+      request. Replay passes no inner transport, so nothing is wrapped there.
     - **The credential is a name.** `api_key_env` is passed in record mode and `None` in replay,
       so a replayed run needs no key; the value is read from the process environment by the
       provider and never stored (`models/recording.py` excludes headers from the request digest).
@@ -370,6 +379,9 @@ def llm_provider(
     one the caller passes explicitly, and both are refused while `verified_on is None`. Writing
     `transport=UrllibJsonTransport()` used to bypass the gate, which is exactly how a future
     probe script would spend a request against the placeholder model id.
+
+    The gate is decided on the **undecorated** caller transport, before `wrap_transport` runs: a
+    decorator is not a way to smuggle a real transport past an unverified endpoint.
     """
     live_transport = transport is None or isinstance(transport, UrllibJsonTransport)
     if not replay and endpoint.verified_on is None and live_transport:
@@ -383,6 +395,11 @@ def llm_provider(
             "verified"
         )
     inner: JsonTransport | None = None if replay else (transport or UrllibJsonTransport())
+    if inner is not None and wrap_transport is not None:
+        # Inside the recorder by design: a store hit, a replay and an unchanged second request
+        # are answered before this point, so only a request that would reach the vendor is
+        # decorated (see this function's docstring).
+        inner = wrap_transport(inner)
     recording = RecordingJsonTransport(
         store=model_exchange_store_at(runtime_dir),
         inner=inner,
@@ -396,6 +413,10 @@ def llm_provider(
         structured_output_mode=endpoint.structured_output_mode,
         temperature=endpoint.temperature,
         max_tokens=endpoint.max_output_tokens,
+        # The endpoint's vendor-specific JSON (DeepSeek's `thinking: {"type": "disabled"}`, the
+        # switch that makes its temperature effective). Empty by default, and the provider adds
+        # nothing for an empty mapping, so an endpoint that sets none keeps the recorded bytes.
+        extra_payload=endpoint.extra_payload,
         require_usage=True,
         transport=recording,
         usage_store=None if replay else model_usage_store_at(runtime_dir),
@@ -556,3 +577,23 @@ def build_storage(*, runtime_dir: Path, clock: Callable[[], datetime]) -> Storag
         paper_state_store=paper_state_store,
         migration_result=migration_result,
     )
+
+
+AGENT_JOURNAL_DIRECTORY: Final[str] = "agent_evening"
+"""Where a runtime directory's agent-evening journals live (`V2-P7-013`, plan C Task 2.5).
+
+The one spelling of the literal; see `agent_journal_dir_at`. One JSON document per session,
+written once: the evening command is the only writer, and it writes the day's journal with a
+temporary file plus `os.replace`, so a reader never sees half of one.
+"""
+
+
+def agent_journal_dir_at(runtime_dir: Path) -> Path:
+    """The agent evening's journal directory under `runtime_dir`, opened alone: no migration, no
+    directory created (the command creates it on the one write, at step 6, after every filing).
+
+    For `scripts/agent_evening.py`, which journals one session's account of its two families
+    without assembling sixteen stores and without adding a `StorageContainer` field: the journal
+    is not a stage of a run but the command's own record of one evening, so it is an `*_at`
+    opener beside `paper_state_store_at` rather than a sixteenth store (hard rule 5)."""
+    return runtime_dir / AGENT_JOURNAL_DIRECTORY
