@@ -554,7 +554,9 @@ def test_llm_provider_passes_the_endpoint_extra_payload(
     assert payload["thinking"] == {"type": "disabled"}
     assert payload["model"] == endpoint.model
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
-    assert payload["response_format"]["type"] == "json_schema"
+    # The verified endpoint declares DeepSeek's only supported mode: json_object, not json_schema.
+    assert endpoint.structured_output_mode == "json_object"
+    assert payload["response_format"]["type"] == "json_object"
 
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     replay = llm_provider(endpoint, runtime_dir=tmp_path, clock=lambda: LATER, replay=True)

@@ -3,28 +3,36 @@
 The batch's requirement is one **named** vendor endpoint whose model identity, base URL and
 prices are verified from the vendor's own documentation by a human -- not inferred by a coding
 agent, and not committed as if it already had been. So this module holds two things: the
-`VendorEndpoint` value type the composition root wires, and `DEEPSEEK_V4_1_FLASH`, a
-**placeholder** whose `verified_on` is `None`.
+`VendorEndpoint` value type the composition root wires, and `DEEPSEEK_V4_1_FLASH`, the one named
+DeepSeek endpoint, verified by a human's reading on 2026-11-12 (gated step L2).
 
-While `verified_on` is `None`, `runtime.composition.llm_provider` refuses a *live* provider --
-the one that would spend a real request -- and names this constant in the refusal. Replay and an
-injected (fake) transport are still allowed, which is what lets the batch's tests run with zero
-network calls and without a credential.
+## Where the values come from
 
-## What a human fills in, and where from
+A human read these official pages on 2026-11-12 (newest changelog entry 2026-10-17):
 
-Read <https://api-docs.deepseek.com/> and fill:
+- <https://api-docs.deepseek.com/>
+- <https://api-docs.deepseek.com/zh-cn/updates>
+- <https://api-docs.deepseek.com/quick_start/pricing>
+- <https://api-docs.deepseek.com/guides/json_mode>
+- <https://api-docs.deepseek.com/guides/thinking_mode>
+- <https://api-docs.deepseek.com/api/create-chat-completion>
+- <https://api-docs.deepseek.com/quick_start/token_usage>
 
-- `model` -- the exact model id the API accepts;
-- `base_url` -- the OpenAI-compatible base URL (the provider appends `/chat/completions`);
-- `structured_output_mode` -- whether this endpoint supports `json_schema` or only
-  `json_object`;
-- `max_output_tokens` -- the vendor's cap this deployment wants to use;
-- `input_price_per_million` / `output_price_per_million` -- the vendor's prices, as `Decimal`.
+What the reading settled: the OpenAI-compatible base URL has no `/v1`; the API model id is
+`deepseek-flash` (a moving alias -- `DeepSeek-V4.1-Flash-1017` at reading time); JSON output is
+`response_format={"type": "json_object"}` only, with no `json_schema`; thinking mode is on by
+default and makes `temperature` inert, so the payload disables it explicitly; and the prices are
+off-peak USD per 1M tokens (the evening run, Beijing >= 18:30, is off-peak; peak is 2x).
 
-Then set `verified_on` to the date of that reading. `api_key_env` is an environment-variable
-*name*, never a value: `OpenAICompatibleProvider` reads it from the process environment, and the
-recording transport excludes headers from the stored exchange, so the key never reaches disk.
+`verified_on` is the load-bearing field: `runtime.composition.llm_provider` refuses a *live*
+provider while it is `None`, and names the endpoint in the refusal. A verification date does not
+by itself make a model call; it records that a human read the values. Each stored exchange's
+`response.model` / `system_fingerprint` is the per-exchange record of which model behind the
+moving alias actually answered.
+
+`api_key_env` is an environment-variable *name*, never a value: `OpenAICompatibleProvider` reads
+it from the process environment, and the recording transport excludes headers from the stored
+exchange, so the key never reaches disk.
 """
 
 import copy
@@ -88,25 +96,27 @@ class VendorEndpoint:
 DEEPSEEK_V4_1_FLASH: Final[VendorEndpoint] = VendorEndpoint(
     name="DEEPSEEK_V4_1_FLASH",
     provider_id="deepseek",
-    # PLACEHOLDERS. A human fills `model`, `base_url`, `structured_output_mode`,
-    # `max_output_tokens`, both prices and -- once the reading confirms the thinking switch --
-    # `extra_payload` (for this vendor, `{"thinking": {"type": "disabled"}}`) from
-    # https://api-docs.deepseek.com/, then sets `verified_on` to the date of that reading.
-    # Deliberately not guessed here: a plausible real-looking model id or URL is how an
-    # unverified endpoint comes to look verified.
-    model="PLACEHOLDER-set-from-api-docs.deepseek.com",
-    base_url="https://placeholder.invalid/deepseek/v1",
+    # Values read from the official DeepSeek documentation pages listed in this module's
+    # docstring on 2026-11-12 (gated step L2). Prices are off-peak USD per 1M tokens: the
+    # evening run (Beijing >= 18:30) is off-peak, and peak is 2x these. `deepseek-flash` is a
+    # moving alias (V4.1-Flash-1017 at reading time), so each stored exchange's `response.model`
+    # / `system_fingerprint` -- not this constant -- is the record of which model answered.
+    model="deepseek-flash",
+    base_url="https://api.deepseek.com",
     api_key_env="DEEPSEEK_API_KEY",
-    structured_output_mode="json_schema",
+    structured_output_mode="json_object",
     temperature=0.0,
     max_output_tokens=4096,
-    input_price_per_million=Decimal("0"),
-    output_price_per_million=Decimal("0"),
+    input_price_per_million=Decimal("0.15"),
+    output_price_per_million=Decimal("0.60"),
     documentation_url="https://api-docs.deepseek.com/",
-    verified_on=None,
+    verified_on=date(2026, 11, 12),
+    extra_payload={"thinking": {"type": "disabled"}},
 )
-"""DeepSeek V4.1 Flash, as a placeholder until a human verifies the vendor's documented values.
+"""DeepSeek V4.1 Flash, verified from the vendor's documentation on 2026-11-12 (gated step L2).
 
-`verified_on=None` is the load-bearing field: it is what makes a live call refuse before a
-request is spent, and it is the only assertion that separates configuration from a claim.
+`verified_on` is what separates configuration from a claim: `llm_provider` refuses a live
+provider while it is `None`, and setting it is a human's act, not a coding agent's. The model id
+is a moving alias, so `response.model` / `system_fingerprint` stay the per-exchange record of
+what answered.
 """
