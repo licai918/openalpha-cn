@@ -847,11 +847,10 @@ def test_the_agent_evening_model_family_is_reachable_only_through_its_two_gated_
     each after its own `llm_provider(...)` assembly; this test pins that those are the only two
     shipped construction sites, and that the verified endpoint now assembles a live provider
     (which makes no request until a caller invokes it). The four documents state the same
-    narrower truth; `test_the_four_user_facing_documents_state_the_one_shipped_model_path_and_its_limits`
+    narrower truth;
+    `test_the_four_user_facing_documents_state_the_one_shipped_model_path_and_its_limits`
     pins their wording.
     """
-    from datetime import UTC, datetime
-
     from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH
     from openalpha_cn.models.openai_compatible import OpenAICompatibleProvider
     from openalpha_cn.runtime.composition import llm_provider
@@ -938,7 +937,9 @@ _OLD_USAGE_UNIVERSAL: Final[re.Pattern[str]] = re.compile(
 """The two universal claims L2 made false, in the wordings the four documents used."""
 
 
-def test_the_four_user_facing_documents_no_longer_claim_the_shipped_path_never_calls_a_model() -> None:
+def test_the_four_user_facing_documents_no_longer_claim_the_shipped_path_never_calls_a_model() -> (
+    None
+):
     """The old universal condition is now the false claim, not the exempting phrase.
 
     L2 verified the endpoint and the evening command can spend a model request when the user
@@ -950,7 +951,9 @@ def test_the_four_user_facing_documents_no_longer_claim_the_shipped_path_never_c
     problems: list[str] = []
     for path in GUARDED_FILES:
         for clause in clauses(_guarded_documents()[path]):
-            if not (_OLD_MODEL_UNIVERSAL.search(clause.text) or _OLD_USAGE_UNIVERSAL.search(clause.text)):
+            if not (
+                _OLD_MODEL_UNIVERSAL.search(clause.text) or _OLD_USAGE_UNIVERSAL.search(clause.text)
+            ):
                 continue
             lowered = clause.text.lower()
             excepted = "agent_evening" in clause.text and (
@@ -966,7 +969,6 @@ def test_the_four_user_facing_documents_no_longer_claim_the_shipped_path_never_c
         "shipped command that can call a model is `scripts/agent_evening.py`, and the rest of "
         "the shipped path still makes no model call."
     )
-
 
 
 def _counted(*sites: tuple[str, str, int]) -> Counter[UsageSite]:
@@ -1745,7 +1747,10 @@ ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
     AllowedClause(
         path=MARKETING,
         excerpt="用量账本已备好",
-        clause="### 037｜用量账本已备好，只有方案 C 的晚间命令在登记上限内写入",
+        clause=(
+            "### 037\N{FULLWIDTH VERTICAL LINE}用量账本已备好，"
+            "只有方案 C 的晚间命令在登记上限内写入"
+        ),
         reason=(
             "Section 037's heading states the bounded truth in a heading: the ledger exists and "
             "only plan C's evening command writes it, within the registered cap. It claims no "

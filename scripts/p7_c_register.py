@@ -389,10 +389,10 @@ CRITERIA: Final[dict[str, str]] = {
         "scripts/forward_report.py 的字节不变、不被修改。"
     ),
     "model": (
-        "模型身份（L2 已完成，2026-11-13 记录；值来自 2026-11-12 的官方文档阅读）："
+        "模型身份（L2 已完成，2026-11-13 记录，值来自 2026-11-12 的官方文档阅读）："
         "deepseek-flash 是移动别名（阅读时为 DeepSeek-V4.1-Flash-1017）。每次模型交换记录 "
         "response.model 与 system_fingerprint，别名变化只报告、不重登记。thinking 关闭、"
-        "temperature 0、错峰运行。DEEPSEEK_V4_1_FLASH.verified_on = 2026-11-12；L3 live 探针"
+        "temperature 0、错峰运行。DEEPSEEK_V4_1_FLASH.verified_on = 2026-11-12，L3 live 探针"
         "仍未运行。"
     ),
     "forward_only": (
