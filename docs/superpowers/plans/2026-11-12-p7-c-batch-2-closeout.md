@@ -25,7 +25,7 @@
 
 ### 任务 2.2 —— `V2-P7-010` 探针工具（提交 `75dff34`）
 
-- 新 `scripts/p7_event_probe.py`：`PROBE_CAP = 300`；`ProbeCall`/`ProbeFinding`（frozen）；`probe_plan(*, today, depth_years)` 覆盖 `moneyflow`/`limit_list_d`/`top_list`/`top_inst`/`anns_d` × 模式/整日/深度/时点字段，且从不超上限；`run_probe(plan, *, transport, cap=PROBE_CAP)` 复用 `scripts/p7_smoke_requests.CappedCounter`（先计数再转发，会越过上限的请求既不构造也不发送）；`render_report` 只输出元数据（每次探测的接口名、是否允许、错误码、行数/页数、字段名、最早日期、时点字段名），绝不含行值、消息或令牌；`main` 默认 `--dry-run`（打印计划、零请求、零写入），`--live` 需 `--i-have-the-users-go` 且 `TUSHARE_TOKEN` 只在发送时从环境读取。权限错误/传输失败变成 finding，不是崩溃。**live 没有被运行。**
+- 新 `scripts/p7_event_probe.py`：`PROBE_CAP = 300`；`ProbeCall`/`ProbeFinding`（frozen）；`probe_plan(*, today, depth_years)` 覆盖 `moneyflow`/`limit_list_d`/`top_list`/`top_inst`/`anns_d` × 模式/整日/深度/时点字段，且从不超上限；`run_probe(plan, *, transport, cap=PROBE_CAP)` 复用 `scripts/p7_smoke_requests.CappedCounter`（先计数再转发，会越过上限的请求既不构造也不发送）；`render_report` 只输出元数据（每次探测的接口名、是否允许、错误码、行数/页数、字段名、最早日期、时点字段名），绝不含行值、消息或令牌；`main` 默认 `--dry-run`（打印计划、零请求、零写入），`--live` 需 `--i-have-the-users-go` 且 `TUSHARE_TOKEN` 只在发送时从环境读取。权限错误/传输失败变成 finding，不是崩溃。**受闸的 L1 live 没有被运行。**（修复轮 1 之后工具还多了分页/截断与跨调用累计预算 `--budget-file`，见 §7；同轮中也发生过一次越闸的真实 `--live`，见 §7.2。）
 - 新 `docs/research/p7-event-probe-report.template.md`：L1 受闸 live 的报告模板，只写元数据、候选措辞、每列的读法；明确“行数为 0 不等于接口不存在”。
 - 测试 10 条（`tests/unit/scripts/test_p7_event_probe.py`），全部脚本化传输。
 
@@ -171,7 +171,7 @@
 
 修复轮期间，探针的实现者为了手工验证 F12，**在受闸的 L1 之外运行了一次真实的 `--live`**：使用真实 `UrllibTushareTransport`、假 token `x`、默认 `--today`，向 `api.tushare.pro` 发出 **20 次**首页 HTTP POST 尝试（5 schema + 5 full_day + 5 pit_field + 5 depth）。token 无效，因此不可能返回任何数据；没有报告、没有任何仓库文件被写（只有 `/tmp` 下的预算文件，之后被一次拒绝检查覆盖）。**这违反了本轮"任何地方都不得有真实 Tushare 请求"的规则**，本记录如实记下，不写成"没有请求"。后果与处置：
 
-- L1 仍未运行；`docs/research/p7-event-probe-report.template.md` 与 `OA-OPS-052` 台账行已改正“从未发过 Tushare 请求”的措辞。本记录 §0/§5 原有的同类句子在本节写入时**没有**同步改掉，只读验收子代理指出了这一点；随后的更正提交才把它们、路线图两行与 §9 原始行一并改正——这就是本段此前写“本文都已改正”不准确的原因。
+- L1 仍未运行；`OA-OPS-052` 台账行、路线图 `V2-P7-010`/`V2-P7-013` 两行与一个新增的 §9 更正行已改正“从未发过 Tushare 请求”的措辞。**探针模板本身没有写“从未发过”的句子**——它只标“模板，未运行”，所以它既不需要、也从来没有被改成事故记录；本段此前把它列进“已改正”是不准确的，只读验收子代理指出了这一点。本记录 §0/§5 原有的同类句子在本节写入时也没有同步改掉；**更正提交 `84d59ae`** 才把它们、路线图两行与 §9 原始行一并改正——这就是本段早先写“本文都已改正”不准确的原因。
 - 保守记账：这 20 次尝试计入计划 300 次硬上限，所以 **L1 的预算文件必须从 `{"spent": 20}` 开始**（或由用户另行裁决）。它们没有返回数据、没有进入任何面板/证据/研究记录，因此不影响任何研究结论；它们只是被拒绝的凭据尝试。
 - 没有第二次真实运行；其后所有 live 路径测试都用脚本化传输。
 
