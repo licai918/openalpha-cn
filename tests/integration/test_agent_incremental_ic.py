@@ -44,6 +44,11 @@ from openalpha_cn.domain.alpha_model import (
 from openalpha_cn.domain.incremental_ic import detectable_mean, partial_rank_ic
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
+from openalpha_cn.domain.trading_calendar import (
+    CalendarDay,
+    TradingCalendar,
+    build_trading_calendar,
+)
 from openalpha_cn.model_view import LabelReach, OutcomeLabels
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import session_publication_instant
@@ -58,7 +63,8 @@ from openalpha_cn.strategy_agent_evaluation import (
     evaluate,
     read_agent_protocol,
 )
-from openalpha_cn.strategy_survivor_registration import SURVIVOR_FAMILY
+from openalpha_cn.strategy_registration import RegisteredConfiguration, registration_cutoff
+from openalpha_cn.strategy_survivor_registration import survivor_declaration
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
@@ -237,6 +243,54 @@ SURVIVORS: Final[tuple[str, ...]] = tuple(sorted(SECURITIES[1:]))
 """The seven survivors, best first: every name of `SECURITIES` but the score-0 one."""
 BOOK: Final[SurvivorBookConfig] = SurvivorBookConfig(seed=7)
 
+C_REGISTRATION_SHA256: Final[str] = "c" * 64
+"""C's registration content digest. Every agent record the evaluator reads declares it; a missing
+or foreign digest is refused by name rather than read."""
+STEP0_REGISTERED: Final[RegisteredConfiguration] = RegisteredConfiguration(
+    config_id="p7-step0-test",
+    registration_sha256="0" * 64,
+    code_commit="d2b74f7",
+    seed=BOOK.seed,
+)
+"""Step 0's registered configuration. A Step 0 record is bound when its declaration is
+`survivor_declaration(BOOK, STEP0_REGISTERED)`, the same comparison the evening command makes."""
+OTHER_STEP0_REGISTERED: Final[RegisteredConfiguration] = RegisteredConfiguration(
+    config_id="p7-step0-test-other",
+    registration_sha256="1" * 64,
+    code_commit="d2b74f7",
+    seed=BOOK.seed,
+)
+"""A second registered survivor configuration in the same store: its records are not bound."""
+ANCHOR: Final[date] = SESSIONS[0]
+"""C's registration's own window anchor, passed to the evaluator; never derived from the data."""
+
+
+def calendar_over(sessions: Sequence[date], *, exchange: str = "SSE") -> TradingCalendar:
+    """A trading calendar over the contiguous natural days spanning `sessions` and a week after.
+
+    `build_trading_calendar` refuses a gap in the natural-day sequence, so every date from the
+    first session to a week past the last is declared, open exactly where `sessions` says. The
+    tail is what `registration_cutoff` reads: a late record's cutoff is 09:15 on the session after
+    the record's day.
+    """
+    days: list[CalendarDay] = []
+    previous: date | None = None
+    day = min(sessions)
+    last = max(sessions) + timedelta(days=7)
+    while day <= last:
+        trading = day in sessions
+        days.append(
+            CalendarDay(calendar_date=day, is_trading=trading, previous_trading_date=previous)
+        )
+        if trading:
+            previous = day
+        day += timedelta(days=1)
+    return build_trading_calendar(exchange, days)
+
+
+CALENDAR: Final[TradingCalendar] = calendar_over(SESSIONS)
+"""The labels reader's calendar: the test sessions, and the week after them for the cutoffs."""
+
 
 def return_of(ts_code: str, session: date) -> float:
     """A label table: a permutation of the eight names' factor order, and varying by session.
@@ -258,6 +312,7 @@ class FakeLabels:
 
     def __init__(self, *, horizon_sessions: bool = True) -> None:
         self._horizon_sessions = horizon_sessions
+        self.calendar = CALENDAR
 
     def window(self, instant: datetime, *, horizon: Any) -> Any:
         session = instant.astimezone(SHANGHAI).date()
@@ -285,28 +340,78 @@ class FakeStore:
         return self._records.get(record_id)
 
 
-def record_for(
-    *, session: date, scores: Mapping[str, float], family: str, scoring_set: str | None
+def agent_record_for(
+    *,
+    session: date,
+    scores: Mapping[str, float],
+    family: str,
+    scoring_set: str,
+    registered_sha256: str | None = C_REGISTRATION_SHA256,
+    abstained: Sequence[str] = (),
+    predicted_at: datetime | None = None,
 ) -> PredictionRecord:
-    """One stored batch as a `PredictionRecord`, with no store and no panel behind it."""
+    """One stored agent batch as a `PredictionRecord`, with no store and no panel behind it.
+
+    The declaration carries the two hyperparameters the evaluator reads -- the scoring set and
+    C's registration digest -- and is the one `strategy_agent_forward.agent_declaration` builds.
+    `registered_sha256=None` writes no digest at all, for the missing-digest refusal; `abstained`
+    adds rows the family answered with no number, which must leave the cross section.
+    """
     as_of = session_publication_instant(session)
-    hyperparameters: tuple[tuple[str, Any], ...] = ()
-    if scoring_set is not None:
-        hyperparameters = (("scoring_set", scoring_set),)
+    hyperparameters: list[tuple[str, bool | int | float | str]] = [
+        ("scoring_set", scoring_set),
+    ]
+    if registered_sha256 is not None:
+        hyperparameters.append(("registration_sha256", registered_sha256))
     declaration = AlphaModelDeclaration(
-        name="c-primary" if scoring_set == "primary" else f"c-{scoring_set or 'step0'}",
+        name=f"c-{scoring_set}",
         family=family,
-        horizon="5d" if scoring_set is not None else "20d",
-        feature_version="test-config",
+        horizon="5d",
+        feature_version="c-test-config",
         seed=7,
         code_commit="d2b74f7",
-        hyperparameters=hyperparameters,
+        hyperparameters=tuple(sorted(hyperparameters)),
     )
+    rows = [Prediction(ts_code=code, score=score) for code, score in scores.items()]
+    rows += [Prediction(ts_code=code, abstention="agent_abstained") for code in abstained]
     batch = PredictionBatch(
         as_of=as_of,
-        predicted_at=as_of,
+        predicted_at=as_of if predicted_at is None else predicted_at,
         artifact=AlphaModelArtifact(
             declaration=declaration,
+            feature_ids=("test/v1",),
+            training_cutoff=as_of,
+            training_example_count=1,
+        ),
+        predictions=tuple(sorted(rows, key=lambda row: row.ts_code)),
+    )
+    return PredictionRecord(
+        batch=batch,
+        outcome_known_at=as_of + timedelta(days=3),
+        recorded_at=as_of,
+    )
+
+
+def step0_record_for(
+    session: date,
+    *,
+    scores: Mapping[str, float] = STEP0_SCORES,
+    registered: RegisteredConfiguration = STEP0_REGISTERED,
+    predicted_at: datetime | None = None,
+) -> PredictionRecord:
+    """One Step 0 survivor record, declaring the registered configuration's own declaration.
+
+    `survivor_declaration(BOOK, registered)` is the whole declaration `survivor_record_is_bound`
+    compares, so a record built from another registration (or another book) is exactly the
+    unbound record the evaluator must refuse.
+    """
+    as_of = session_publication_instant(session)
+    produced_at = as_of if predicted_at is None else predicted_at
+    batch = PredictionBatch(
+        as_of=as_of,
+        predicted_at=produced_at,
+        artifact=AlphaModelArtifact(
+            declaration=survivor_declaration(BOOK, registered),
             feature_ids=("test/v1",),
             training_cutoff=as_of,
             training_example_count=1,
@@ -318,15 +423,12 @@ def record_for(
     return PredictionRecord(
         batch=batch,
         outcome_known_at=as_of + timedelta(days=3),
-        recorded_at=as_of,
+        recorded_at=produced_at,
     )
 
 
 def step0_records(sessions: Sequence[date] = SESSIONS) -> tuple[PredictionRecord, ...]:
-    return tuple(
-        record_for(session=session, scores=STEP0_SCORES, family=SURVIVOR_FAMILY, scoring_set=None)
-        for session in sessions
-    )
+    return tuple(step0_record_for(session) for session in sessions)
 
 
 def agent_records(
@@ -334,13 +436,17 @@ def agent_records(
     *,
     family: str = AGENT_LLM_FAMILY,
     scoring_set: str = "primary",
+    registered_sha256: str | None = C_REGISTRATION_SHA256,
+    abstained: Mapping[date, Sequence[str]] | None = None,
 ) -> tuple[PredictionRecord, ...]:
     return tuple(
-        record_for(
+        agent_record_for(
             session=session,
             scores=scores,
             family=family,
             scoring_set=scoring_set,
+            registered_sha256=registered_sha256,
+            abstained=(abstained or {}).get(session, ()),
         )
         for session, scores in sorted(session_scores.items())
     )
@@ -361,21 +467,34 @@ def planted_scores(
 
 
 def independent_scores(
-    sessions: Sequence[date], *, constant: int = 0
+    sessions: Sequence[date], *, positive_lead: int = 0
 ) -> dict[date, dict[str, float]]:
-    """Agent scores with no relation to the label: the null the evaluator must not detect."""
-    return {
-        session: {
-            code: float((SECURITIES.index(code) * 5 + SESSIONS.index(session) * 3) % 7)
+    """Agent scores with no relation to the label: the null the evaluator must not detect.
+
+    `positive_lead` negates the first that many sessions' scores. Negating an independent score
+    flips the sign of its partial rank IC, which is what keeps the window's first positions'
+    cumulative mean positive: without it a null fixture can trip D5's sticky futility look (the
+    stop that fires on a non-positive interim mean) before the full-window test this fixture is
+    for ever runs. The scores stay independent of the label either way.
+    """
+    scores: dict[date, dict[str, float]] = {}
+    for index, session in enumerate(sessions):
+        sign = -1.0 if index < positive_lead else 1.0
+        scores[session] = {
+            code: sign * float((SECURITIES.index(code) * 5 + SESSIONS.index(session) * 3) % 7)
             for code in SURVIVORS
         }
-        for session in sessions
-    }
+    return scores
 
 
 def evaluate_with(
     *records: Sequence[PredictionRecord],
     step0: Sequence[PredictionRecord] | None = None,
+    registered_sha256: str = C_REGISTRATION_SHA256,
+    step0_registered: RegisteredConfiguration = STEP0_REGISTERED,
+    anchor: date = ANCHOR,
+    through: date = THROUGH,
+    as_of: datetime = AS_OF,
     **changes: object,
 ) -> AgentEvaluation:
     agent = [record for group in records if group is not None for record in group]
@@ -385,8 +504,11 @@ def evaluate_with(
         step0_store=FakeStore(step0_records() if step0 is None else step0),
         labels=FakeLabels(),
         book=BOOK,
-        through=THROUGH,
-        as_of=AS_OF,
+        registered_sha256=registered_sha256,
+        step0_registered=step0_registered,
+        anchor_session=anchor,
+        through=through,
+        as_of=as_of,
     )
 
 
@@ -405,7 +527,7 @@ def test_known_increment_is_detected_and_none_is_not() -> None:
     assert detected.primary.test.one_sided_p_value <= 0.05
     assert detected.measurable == 6
 
-    nothing = evaluate_with(agent_records(independent_scores(SESSIONS[:6])))
+    nothing = evaluate_with(agent_records(independent_scores(SESSIONS[:6], positive_lead=2)))
     assert nothing.outcome == "no_increment_detected"
     assert nothing.primary.test is not None
     assert nothing.primary.test.one_sided_p_value > 0.05
@@ -504,6 +626,101 @@ def test_a_missing_llm_day_is_a_gap_that_reduces_n_without_moving_the_window() -
     )
 
 
+def test_the_window_starts_at_the_registered_anchor_not_at_the_first_stored_session() -> None:
+    """C's registration names the anchor; a record before it never moves the window.
+
+    Step 0 has filed from the first test session and the agent store holds records there too, so
+    deriving the anchor from the earliest stored agent session -- the evaluator's old rule --
+    would start the window two sessions early and read records the registration does not cover.
+    The anchor is the registration's, so the positions are its window's sessions from it.
+    """
+    evaluation = evaluate_with(
+        agent_records(planted_scores(SESSIONS[:6])),
+        step0=step0_records(SESSIONS[:8]),
+        anchor=SESSIONS[2],
+    )
+
+    assert evaluation.sessions == 4, (
+        "the window is the registered anchor's positions, not the store's earliest session"
+    )
+    assert evaluation.measurable == 4
+    assert evaluation.missing == ()
+    assert evaluation.primary.mean == pytest.approx(1.0)
+
+
+def test_an_agent_record_from_another_registration_is_refused_by_name() -> None:
+    """F4: the evaluator measures what C registered; a foreign digest is refused, not skipped.
+
+    A superseded, dry-run or earlier C registration in the same runtime files records of the same
+    two families. Reading one would put another registration's answers into this registration's
+    primary statistic, so the record is refused by name.
+    """
+    foreign = "f" * 64
+    with pytest.raises(AgentEvaluationError, match="registration"):
+        evaluate_with(agent_records(planted_scores(SESSIONS[:6]), registered_sha256=foreign))
+
+
+def test_an_agent_record_with_no_registration_digest_is_refused_by_name() -> None:
+    """F4: a record that cannot name the registration that produced it is not auditable."""
+    with pytest.raises(AgentEvaluationError, match="registration_sha256"):
+        evaluate_with(agent_records(planted_scores(SESSIONS[:6]), registered_sha256=None))
+
+
+def test_a_step0_record_that_is_not_bound_is_refused_by_name() -> None:
+    """F4: a Step 0 record whose declaration is not the registered configuration's is refused.
+
+    The evaluator's factor is Step 0's stored composite; a record declared under another
+    registration -- a different `config_id` or digest -- is another configuration's factor and is
+    refused rather than residualised on.
+    """
+    unbound_session = SESSIONS[1]
+    step0 = tuple(
+        step0_record_for(session, registered=OTHER_STEP0_REGISTERED)
+        if session == unbound_session
+        else step0_record_for(session)
+        for session in SESSIONS[:6]
+    )
+
+    with pytest.raises(AgentEvaluationError, match="not bound"):
+        evaluate_with(agent_records(planted_scores(SESSIONS[:6])), step0=step0)
+
+
+def test_a_late_step0_record_is_refused_by_name() -> None:
+    """F4: the factor is a record registered before its cutoff, not one filed after it.
+
+    `registration_cutoff` is 09:15 Shanghai on the next open session, and the evening command
+    reads only a record filed before it. A late record was not a prediction made before the trade
+    it drives, so the evaluator refuses it rather than residualising on it.
+    """
+    late_session = SESSIONS[1]
+    late = registration_cutoff(CALENDAR, late_session) + timedelta(hours=1)
+    step0 = tuple(
+        step0_record_for(session, predicted_at=late)
+        if session == late_session
+        else step0_record_for(session)
+        for session in SESSIONS[:6]
+    )
+
+    with pytest.raises(AgentEvaluationError, match="cutoff"):
+        evaluate_with(agent_records(planted_scores(SESSIONS[:6])), step0=step0)
+
+
+def test_a_duplicate_record_for_one_session_is_still_refused() -> None:
+    """F4's binding work must not weaken the one-record-per-session rule: it stays refused.
+
+    A session has one stored composite and a family files one record per session and scoring
+    set, so neither store may hold two. This is a regression guard over the refusals the batch
+    already had.
+    """
+    agent_one = agent_records(planted_scores(SESSIONS[:1]))
+    with pytest.raises(AgentEvaluationError, match="two"):
+        evaluate_with(agent_one + agent_one)
+
+    step0_one = step0_records(SESSIONS[:1])
+    with pytest.raises(AgentEvaluationError, match="two"):
+        evaluate_with(agent_records(planted_scores(SESSIONS[:1])), step0=step0_one + step0_one)
+
+
 def test_a_non_positive_cumulative_mean_at_the_interim_stops_as_futility() -> None:
     """D5: at the interim look, a cumulative mean at or below zero stops 'futility'.
 
@@ -520,6 +737,121 @@ def test_a_non_positive_cumulative_mean_at_the_interim_stops_as_futility() -> No
     assert evaluation.primary.mean == pytest.approx(-1.0)
     assert evaluation.outcome == "futility_stop"
     assert evaluation.primary.test is None
+
+
+def test_a_thin_interim_does_not_stop_for_futility() -> None:
+    """F5: below the pro-rated measurability floor the interim is not enough to stop on.
+
+    One of the interim's two positions is measurable and its value is below zero, but the floor
+    `max(2, ceil(min_measurable_sessions * interim_session / window_sessions))` is two, so the
+    answer is `not_yet`: a thin interim is not a futility stop, and the values are not silently
+    dropped from a stop decision.
+    """
+    anti = {code: -return_of(code, SESSIONS[0]) for code in SURVIVORS}
+    sparce = {
+        SESSIONS[0]: anti,
+        SESSIONS[2]: anti,
+    }
+    evaluation = evaluate_with(agent_records(sparce), step0=step0_records(SESSIONS[:3]))
+
+    assert evaluation.sessions == 3
+    assert evaluation.primary.measurable == 2
+    assert evaluation.outcome == "not_yet"
+
+
+def test_an_immature_interim_does_not_stop_for_futility() -> None:
+    """F5: the futility look needs every interim position matured, not just published.
+
+    The second position's h=1 label window has not closed at the report's `as_of`, so its value is
+    not measurable yet; a decision taken on the one matured value would be a stop before the data
+    the registration fixed it on exists.
+    """
+    anti = {
+        session: {code: -return_of(code, session) for code in SURVIVORS} for session in SESSIONS[:3]
+    }
+    evaluation = evaluate_with(
+        agent_records(anti),
+        step0=step0_records(SESSIONS[:3]),
+        as_of=datetime(2026, 1, 8, 12, 0, tzinfo=SHANGHAI),
+    )
+
+    assert evaluation.sessions == 3
+    assert evaluation.primary.measurable == 1, "the second interim position is not matured"
+    assert evaluation.outcome == "not_yet"
+
+
+def test_a_matured_non_positive_interim_stays_futility_after_the_window_fills() -> None:
+    """F5: `futility_stop` is sticky -- the same interim data can never revert to `not_yet`.
+
+    The first two positions are the anti-signal and both are matured and measurable, so the
+    interim look stops. Filling the window later must not turn that answer back into `not_yet`:
+    the stop was a decision made on immutable data.
+    """
+    anti = {
+        session: {code: -return_of(code, session) for code in SURVIVORS} for session in SESSIONS[:2]
+    }
+    stopped = evaluate_with(agent_records(anti), step0=step0_records(SESSIONS[:3]))
+    assert stopped.outcome == "futility_stop"
+
+    filled = {**anti, **planted_scores(SESSIONS[2:6])}
+    later = evaluate_with(agent_records(filled), step0=step0_records(SESSIONS[:6]))
+    assert later.sessions == 6, "the window filled"
+    assert later.outcome == "futility_stop", (
+        "the interim look is immutable; a filled window cannot erase it"
+    )
+
+
+def test_the_futility_form_and_the_one_sided_reading_are_labelled_provisional() -> None:
+    """F5/D5: both the futility form and the one-sided reading are PROVISIONAL pending D5.
+
+    The protocol's values come from the plan; the *form* of the futility rule and reading a
+    two-sided sign-flip one-sidedly are D5 content the user has not ruled on. The answer carries
+    the words so no report can present either as adopted.
+    """
+    evaluation = evaluate_with(agent_records(planted_scores(SESSIONS[:6])))
+
+    assert len(evaluation.provisional) == 2
+    for label in evaluation.provisional:
+        assert "PROVISIONAL" in label
+        assert "D5" in label
+    futility = [label for label in evaluation.provisional if "futility" in label.lower()]
+    one_sided = [label for label in evaluation.provisional if "one-sided" in label]
+    assert len(futility) == 1, "the futility form is labelled"
+    assert len(one_sided) == 1, "the one-sided reading is labelled"
+
+    early = evaluate_with(
+        agent_records(planted_scores(SESSIONS[:2])), step0=step0_records(SESSIONS[:2])
+    )
+    assert early.provisional == evaluation.provisional, "the labels are always populated"
+
+
+def test_an_abstention_is_excluded_never_scored_as_zero() -> None:
+    """F10/D3: an abstention leaves the cross section; it is never a `0.0` score.
+
+    One survivor abstains in every session. The per-session cross section is the six remaining
+    names, so the statistic is the partial IC over those six; scoring the abstention as `0.0`
+    would move the ranks and the mean. This guards the rule the review found expressed as dead
+    `0.0` fallbacks: the dicts hold scored names only, so the fallbacks are gone, not latent.
+    """
+    abstained_name = SURVIVORS[0]
+    remaining = tuple(code for code in SURVIVORS if code != abstained_name)
+    scored = {
+        session: {code: return_of(code, session) for code in remaining} for session in SESSIONS[:6]
+    }
+    abstained = {session: (abstained_name,) for session in SESSIONS[:6]}
+
+    evaluation = evaluate_with(agent_records(scored, abstained=abstained))
+
+    expected = [
+        partial_rank_ic(
+            [return_of(code, session) for code in remaining],
+            [STEP0_SCORES[code] for code in remaining],
+            [return_of(code, session) for code in remaining],
+        )
+        for session in SESSIONS[:6]
+    ]
+    assert evaluation.primary.measurable == 6
+    assert evaluation.primary.mean == pytest.approx(statistics.fmean(expected))  # type: ignore[arg-type]
 
 
 def test_coverage_set_is_reported_separately_never_pooled() -> None:
@@ -579,7 +911,7 @@ def test_sample_size_and_detectable_ic_are_always_printed() -> None:
     to the window's measured dispersion and stated as a property of this design; it is not
     observed power, which is a monotone function of the p-value and says nothing new.
     """
-    evaluation = evaluate_with(agent_records(independent_scores(SESSIONS[:6])))
+    evaluation = evaluate_with(agent_records(independent_scores(SESSIONS[:6], positive_lead=2)))
 
     assert evaluation.power.periods == evaluation.measurable
     assert evaluation.power.sd is not None and evaluation.power.sd > 0
@@ -657,17 +989,18 @@ def test_the_evaluator_reads_labels_through_the_shared_outcome_labels_reader(
         ),
         step0_store=FakeStore(
             tuple(
-                record_for(
-                    session=session,
+                step0_record_for(
+                    session,
                     scores={code: float((codes.index(code) * 5) % 8) for code in codes},
-                    family=SURVIVOR_FAMILY,
-                    scoring_set=None,
                 )
                 for session in sessions
             )
         ),
         labels=labels,
         book=BOOK,
+        registered_sha256=C_REGISTRATION_SHA256,
+        step0_registered=STEP0_REGISTERED,
+        anchor_session=sessions[0],
         through=sessions[-1],
         as_of=PANEL_AS_OF,
     )

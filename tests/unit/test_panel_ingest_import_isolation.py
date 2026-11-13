@@ -925,15 +925,24 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
     ),
     "openalpha_cn.strategy_agent_evaluation": frozenset(
         {
-            # V2-P7-013 (plan C task 2.7). The evaluator reads the two stored record planes and
-            # the panel: the publication instant a session's step 0 record stands at, the
-            # registration's zone, Step 0's scope reader and its family name. It names no
-            # dataset of its own -- every read is a stored record or a label through the
-            # caller's `model_view.OutcomeLabels`.
+            # V2-P7-013 (plan C task 2.7; widened by fix round 1's F4 binding checks). The
+            # evaluator reads the two stored record planes and the panel: the publication
+            # instant a session's Step 0 record stands at, the zone, Step 0's scope reader and
+            # its family name, and -- since F4 -- the registration vocabulary that proves it
+            # measures what was registered: C's digest key (from the producer), Step 0's
+            # registered configuration, the on-time check (`registered_at` /
+            # `registration_cutoff`) and the binding check (`survivor_record_is_bound`). It
+            # names no dataset of its own -- every read is a stored record or a label through
+            # the caller's `model_view.OutcomeLabels`.
             "panel_ingest.session_publication_instant",
+            "strategy_agent_forward.REGISTRATION_HYPERPARAMETER",
+            "strategy_registration.RegisteredConfiguration",
             "strategy_registration.SHANGHAI",
+            "strategy_registration.registered_at",
+            "strategy_registration.registration_cutoff",
             "strategy_survivor_forward.record_scope",
             "strategy_survivor_registration.SURVIVOR_FAMILY",
+            "strategy_survivor_registration.survivor_record_is_bound",
         }
     ),
     "openalpha_cn.shortlist_compare": frozenset(
