@@ -175,16 +175,21 @@ def test_the_default_template_is_accepted_and_renderable() -> None:
 
 
 def test_v2_prompt_mentions_json_and_carries_an_example() -> None:
-    """`response_format={"type": "json_object"}` needs the prompt to say "json" and show one.
+    """`response_format={"type": "json_object"}` needs the prompt to say "json" and show both.
 
-    The example is the only description of the output contract the vendor gets in `json_object`
-    mode -- the response schema is not sent -- so it must be one parseable JSON object, and the
-    rendering must still be exactly one bare `{payload_json}`.
+    The examples are the only description of the output contract the vendor gets in
+    `json_object` mode -- the response schema is not sent. Fix round 1 (F13): the single example
+    was an abstention with strength 0, which a temperature-0 model could anchor on and abstain
+    more often, biasing the abstention rate C reports. The prompt now carries two examples with
+    neutral placeholder values: one directional (scored) and one abstaining. The rendering must
+    still be exactly one bare `{payload_json}`.
     """
     prompt = STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT
 
     assert "json" in prompt.system.lower()
     assert prompt.name != STRUCTURED_SIGNAL_PROMPT_V1.name
+    assert prompt.name == "structured-signal/v2-json-object-examples"
+    assert "provisional" not in prompt.system.lower()
 
     fields = [
         (field_name, format_spec, conversion)
@@ -193,11 +198,22 @@ def test_v2_prompt_mentions_json_and_carries_an_example() -> None:
     ]
     assert fields == [("payload_json", "", None)]
 
-    start = prompt.system.index("{")
-    example, _ = json.JSONDecoder().raw_decode(prompt.system[start:])
-    assert isinstance(example, dict)
-    assert set(example) == {"signal", "rationale"}
-    assert isinstance(example["signal"], dict)
+    decoder = json.JSONDecoder()
+    examples = []
+    rest = prompt.system
+    while "{" in rest:
+        start = rest.index("{")
+        example, end = decoder.raw_decode(rest[start:])
+        examples.append(example)
+        rest = rest[start + end :]
+    assert len(examples) == 2, f"expected one scored and one abstaining example, got {examples}"
+    assert {example["signal"]["direction"] for example in examples} == {"bullish", "abstain"}
+    for example in examples:
+        assert set(example) == {"signal", "rationale"}
+        assert isinstance(example["signal"], dict)
+        # Neutral placeholder values: a generic security, a fixed instant, no real facts.
+        assert example["signal"]["subject"] == "000001.SZ"
+        assert example["signal"]["as_of"] == "2026-01-05T07:00:00+00:00"
     assert prompt.user_format.format(payload_json='{"subject": "000001.SZ"}') == (
         '{"subject": "000001.SZ"}'
     )

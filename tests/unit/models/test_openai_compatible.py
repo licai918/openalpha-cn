@@ -262,9 +262,9 @@ def test_extra_payload_thinking_disabled_reaches_the_request_body(
     """DeepSeek's thinking switch is a vendor dial the provider has no keyword for.
 
     Thinking mode is on by default and ignores `temperature`, so the endpoint must be able to
-    send `thinking: {"type": "disabled"}`. The mapping is merged *last*: the provider's three
-    required keys stay as the provider set them, and a non-reserved key the endpoint names wins
-    over the provider keyword that also set it -- that is what "last" means.
+    send `thinking: {"type": "disabled"}`. The mapping is merged *last* but may not override a
+    key the provider owns (fix round 1, F9): `temperature` keeps the provider keyword's value
+    and a mapping naming it is refused at construction, so this test passes only `thinking`.
     """
     monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
     transport = FakePostJsonTransport(
@@ -276,7 +276,7 @@ def test_extra_payload_thinking_disabled_reaches_the_request_body(
         base_url="https://example.invalid/v1",
         api_key_env="TEST_MODEL_KEY",
         temperature=0.5,
-        extra_payload={"thinking": {"type": "disabled"}, "temperature": 0.0},
+        extra_payload={"thinking": {"type": "disabled"}},
         transport=transport,
     )
 
@@ -285,7 +285,7 @@ def test_extra_payload_thinking_disabled_reaches_the_request_body(
     assert transport.request is not None
     payload = transport.request["payload"]
     assert payload["thinking"] == {"type": "disabled"}
-    assert payload["temperature"] == 0.0
+    assert payload["temperature"] == 0.5
     # The provider-owned keys are untouched and still come first in the serialized payload.
     assert list(payload) == ["model", "messages", "response_format", "temperature", "thinking"]
     assert payload["model"] == "deepseek-chat"
@@ -299,7 +299,14 @@ def test_extra_payload_thinking_disabled_reaches_the_request_body(
 def test_extra_payload_cannot_override_model_or_messages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The three contract keys belong to the provider, refused at construction, before network."""
+    """The contract keys and the provider's own request keywords belong to the provider.
+
+    Fix round 1 (F9) widened the reserved set from the three required keys to every key this
+    provider writes itself: `temperature`, `max_tokens`, `stream` and `n` as well, because an
+    endpoint mapping that set `stream: true` would break the response contract and one that set
+    `n > 1` would change the answer's shape without changing the recorded exchange's model.
+    Refused at construction, before any request.
+    """
     monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
     for reserved in ("model", "messages", "response_format"):
         transport = FakePostJsonTransport({})
@@ -313,6 +320,86 @@ def test_extra_payload_cannot_override_model_or_messages(
                 transport=transport,
             )
         assert transport.request is None, "the refusal happens before any request"
+
+
+def test_extra_payload_cannot_override_the_optional_provider_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F9: the provider's own optional keywords are reserved too, not silently overridden."""
+    monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
+    for reserved in ("temperature", "max_tokens", "stream", "n"):
+        with pytest.raises(ModelConfigurationError, match=reserved):
+            OpenAICompatibleProvider(
+                provider_id="deepseek.compatible",
+                model="deepseek-chat",
+                base_url="https://example.invalid/v1",
+                api_key_env="TEST_MODEL_KEY",
+                extra_payload={reserved: 1},
+                transport=FakePostJsonTransport({}),
+            )
+
+
+def test_extra_payload_is_copied_and_frozen_so_a_later_mutation_cannot_change_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F9: the endpoint's mapping is copied, so a caller mutating it later changes no request.
+
+    A shallow copy would still share the nested `thinking` object: the test mutates the caller's
+    nested dict *after* construction and expects the request to carry the value it was built
+    with, and the provider's own mapping to be immutable.
+    """
+    monkeypatch.setenv("TEST_MODEL_KEY", "secret-value")
+    source: dict[str, object] = {"thinking": {"type": "disabled"}}
+    transport = FakePostJsonTransport(
+        {"choices": [{"message": {"content": '{"direction":"abstain"}'}}]}
+    )
+    provider = OpenAICompatibleProvider(
+        provider_id="deepseek.compatible",
+        model="deepseek-chat",
+        base_url="https://example.invalid/v1",
+        api_key_env="TEST_MODEL_KEY",
+        extra_payload=source,
+        transport=transport,
+    )
+    source["thinking"]["type"] = "enabled"  # type: ignore[index]
+
+    provider.generate_json(system="system", user="user", schema={"type": "object"})
+
+    assert transport.request is not None
+    assert transport.request["payload"]["thinking"] == {"type": "disabled"}
+    assert provider.extra_payload is not source
+    with pytest.raises(TypeError):
+        provider.extra_payload["new"] = 1  # type: ignore[index]
+
+
+def test_the_endpoint_value_owns_a_deep_copy_of_its_extra_payload() -> None:
+    """F9: a caller mutating the mapping it built an endpoint with cannot change the endpoint.
+
+    The endpoint keeps a deep copy (a plain `dict`, so `dataclasses.asdict` keeps working) and
+    the provider freezes its own second copy, so neither level shares a mutable nested object.
+    """
+    source: dict[str, object] = {"thinking": {"type": "disabled"}}
+    from openalpha_cn.models.deepseek import VendorEndpoint
+
+    endpoint = VendorEndpoint(
+        name="TEST_ENDPOINT",
+        provider_id="test",
+        model="test-model",
+        base_url="https://example.invalid/v1",
+        api_key_env="TEST_MODEL_KEY",
+        structured_output_mode="json_object",
+        temperature=0.0,
+        max_output_tokens=16,
+        input_price_per_million=__import__("decimal").Decimal("0"),
+        output_price_per_million=__import__("decimal").Decimal("0"),
+        documentation_url="https://example.invalid/",
+        verified_on=None,
+        extra_payload=source,
+    )
+    source["thinking"]["type"] = "enabled"  # type: ignore[index]
+
+    assert endpoint.extra_payload["thinking"] == {"type": "disabled"}
+    assert isinstance(endpoint.extra_payload, dict)
 
 
 def test_blank_content_is_an_invalid_answer_not_an_empty_object(

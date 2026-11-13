@@ -10,7 +10,7 @@ from openalpha_cn.agents.prompts import STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT
 from openalpha_cn.domain.evidence import EvidenceSnapshot
 from openalpha_cn.domain.time import Timeline
 from openalpha_cn.models.base import ModelMetadata
-from openalpha_cn.models.openai_compatible import ModelResponseError
+from openalpha_cn.models.openai_compatible import ModelConfigurationError, ModelResponseError
 
 
 @pytest.fixture
@@ -384,6 +384,54 @@ class BlankContentProvider:
             "model response content is blank: an empty or whitespace-only answer is not a JSON "
             "object"
         )
+
+
+class ConfigurationErrorProvider:
+    """A provider whose `generate_json` cannot even form a request (a deployment fault)."""
+
+    metadata = ModelMetadata(
+        provider_id="fake.model",
+        model="fake-v1",
+        credential_env_vars=("FAKE_KEY",),
+        structured_output=True,
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_json(
+        self, *, system: str, user: str, schema: dict[str, Any], attempt: int = 1
+    ) -> dict[str, Any]:
+        self.calls += 1
+        raise ModelConfigurationError("required model credential is missing: FAKE_KEY")
+
+
+def test_a_configuration_error_is_never_retried_as_an_invalid_answer(
+    theme_evidence, frozen_now: datetime
+) -> None:
+    """Fix round 1, F1: a missing credential is a deployment fault, not a bad answer.
+
+    `ModelConfigurationError` is a `ValueError`, so before this fix the agent retried it as if
+    the model had answered badly and raised `ModelProviderFailure`, which the evening command
+    filed as a permanent `model_invalid_output` batch. It must propagate unchanged after exactly
+    one attempt, so the deployment failure is journalled as a family gap instead.
+    """
+    item = theme_evidence()
+    provider = ConfigurationErrorProvider()
+    agent = StructuredSignalAgent(
+        agent_id="model-theme-agent",
+        evidence_families=frozenset({"theme"}),
+        provider=provider,
+        max_attempts=2,
+    )
+
+    with pytest.raises(ModelConfigurationError):
+        agent.analyze(
+            AgentContext(
+                run_id="run_model", subject="000001.SZ", as_of=frozen_now, evidence=(item,)
+            )
+        )
+    assert provider.calls == 1, "a configuration error is not an answer to retry"
 
 
 def test_blank_content_is_retried_up_to_max_attempts_and_never_accepted(

@@ -27,6 +27,7 @@ Then set `verified_on` to the date of that reading. `api_key_env` is an environm
 recording transport excludes headers from the stored exchange, so the key never reaches disk.
 """
 
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
@@ -68,8 +69,20 @@ class VendorEndpoint:
     Empty by default **on purpose**: `OpenAICompatibleProvider` merges this mapping after its own
     required keys and adds nothing when it is empty, so an endpoint that sets no extra payload
     sends exactly the bytes `V2-P7-012` pinned. The provider refuses a mapping that would
-    override `model`, `messages` or `response_format`.
+    override a key it owns (`RESERVED_PAYLOAD_KEYS`).
     """
+
+    def __post_init__(self) -> None:
+        """Freeze the endpoint-specific JSON: no caller may mutate what an endpoint sends.
+
+        Fix round 1, F9: the field's mutable `dict` default and the provider's shallow copy left
+        the nested vendor dial shared with whoever built the endpoint. A deep copy severs that, so
+        mutating the caller's mapping after construction cannot change what this endpoint sends.
+        The provider additionally freezes its own copy (`MappingProxyType`), so no downstream
+        caller can mutate the request either; a plain dict here keeps `dataclasses.asdict` (used
+        by the endpoint tests) working.
+        """
+        object.__setattr__(self, "extra_payload", copy.deepcopy(dict(self.extra_payload)))
 
 
 DEEPSEEK_V4_1_FLASH: Final[VendorEndpoint] = VendorEndpoint(

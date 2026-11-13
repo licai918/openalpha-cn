@@ -14,6 +14,7 @@ from openalpha_cn.domain.json_value import thaw_json
 from openalpha_cn.domain.run import VersionRef
 from openalpha_cn.domain.signal import SignalFrame
 from openalpha_cn.models.base import ModelProvider
+from openalpha_cn.models.openai_compatible import ModelConfigurationError
 
 
 class ModelProviderFailure(RuntimeError):
@@ -151,6 +152,15 @@ class StructuredSignalAgent:
                     signal=payload.signal,
                     rationale=payload.rationale,
                 )
+            except ModelConfigurationError:
+                # Fix round 1, F1: a configuration error is a deployment fault, not a bad
+                # answer. It subclasses `ValueError`, so without this branch it was retried as
+                # an invalid answer and surfaced as `ModelProviderFailure`, which the evening
+                # command filed as a permanent `model_invalid_output` batch -- misattributing a
+                # missing credential or a misassembled provider to the model's output. It
+                # propagates unchanged after exactly one attempt, and the caller journals a
+                # family gap instead.
+                raise
             except (ValidationError, ValueError) as error:
                 last_error = error
         raise ModelProviderFailure(

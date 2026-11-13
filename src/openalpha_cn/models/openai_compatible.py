@@ -1,11 +1,13 @@
 """Secure BYOK adapter for OpenAI-compatible chat-completions endpoints."""
 
+import copy
 import json
 import os
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Final, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -45,13 +47,18 @@ class ModelResponseError(ValueError):
     """Raised when a successful endpoint response violates the provider contract."""
 
 
-RESERVED_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset({"model", "messages", "response_format"})
+RESERVED_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
+    {"model", "messages", "response_format", "temperature", "max_tokens", "stream", "n"}
+)
 """The request-payload keys the provider itself owns and an extra payload may not override.
 
 `model` names the endpoint's model identity, `messages` carries the prompt the caller asked for,
-and `response_format` is the structured-output contract; an endpoint-specific mapping that
-replaced any of them would silently answer a different question than the one recorded in the
-model-exchange digest.
+and `response_format` is the structured-output contract. Fix round 1 (F9) widened the set by
+`temperature` and `max_tokens` (the configured generation limits) and by `stream` and `n` --
+`stream: true` would break the response contract and `n > 1` would change the answer's shape,
+silently, because the stored exchange's request digest would still name the same question. An
+endpoint-specific mapping that replaced any of the seven would answer a different question than
+the one recorded, so each is refused at construction, by name, before a request.
 """
 
 
@@ -145,14 +152,21 @@ class OpenAICompatibleProvider:
             )
         if timeout_seconds <= 0:
             raise ModelConfigurationError("timeout_seconds must be positive")
-        extra = {} if extra_payload is None else dict(extra_payload)
+        # Copied deeply and frozen (fix round 1, F9): a shallow `dict(...)` would share the
+        # nested `thinking` object with the caller, so mutating the caller's mapping after
+        # construction would silently change later requests. The provider's own copy cannot be
+        # mutated, and nothing it sends depends on what the caller does afterwards.
+        extra: Mapping[str, JsonValue] = MappingProxyType(
+            {} if extra_payload is None else copy.deepcopy(dict(extra_payload))
+        )
         collisions = RESERVED_PAYLOAD_KEYS.intersection(extra)
         if collisions:
             # A configuration error, refused at construction like `base_url`/`timeout_seconds`
             # above: an endpoint mapping that replaced one of these three keys would change the
             # question being asked, so it is a broken deployment, not a bad answer to retry.
             raise ModelConfigurationError(
-                "extra_payload must not override the provider's required payload keys: "
+                "extra_payload must not override the provider's required or configured "
+                "payload keys: "
                 f"{', '.join(sorted(collisions))}"
             )
         self.base_url = base_url.rstrip("/")
