@@ -743,14 +743,15 @@ def agents() -> None:
         1000,
         532,
         376,
-        162,
+        186,
         title="模型治理边界",
         label="OPTIONAL MODEL ENHANCEMENT",
         color=CORAL,
         lines=(
             "需代码接入 · Schema 校验",
             "408/429/500/502/503/504 有界重试",
-            "Token / 尝试次数账本 · 出厂路径不调用模型",
+            "唯一能调用模型：agent_evening（默认不运行）",
+            "其余路径不调用模型 · 账本仅该命令写入",
         ),
     )
     svg.finish("openalpha-brain-03-agents.svg")

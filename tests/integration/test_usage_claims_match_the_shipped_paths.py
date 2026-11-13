@@ -790,7 +790,7 @@ DOCUMENT_MODEL_PATH_EN: Final[tuple[str, ...]] = (
     "the rest of the shipped path still calls no model",
 )
 DOCUMENT_USAGE_BOUND_ZH: Final[tuple[str, ...]] = (
-    "只由该晚间命令在登记请求上限内写入",
+    "只有该晚间命令会在登记请求上限内写入",
     "出厂路径的其余部分不记账",
 )
 DOCUMENT_USAGE_BOUND_EN: Final[tuple[str, ...]] = (
@@ -1541,10 +1541,10 @@ USAGE_CONDITION: Final[re.Pattern[str]] = re.compile(
     f"|no shipped path (?:writes|records)(?: to)?{_CONDITION_END}"
     "|no shipped path (?:writes|records) (?:to )?(?:the (?:ledger|table)|(?:any |model )?usage)"
     "(?![A-Za-z])"
-    "|只由该晚间命令[^。；!?]{0,200}?出厂路径的其余部分不记账"
-    "|only (?:that|the gated) evening command[^.;!?]{0,200}?"
+    "|只有(?:该|方案 C 的)?晚间命令[\\s\\S]{0,200}?出厂路径的其余部分不记账"
+    "|only (?:that|the gated) evening command[\\s\\S]{0,200}?"
     "rest of the shipped path records (?:none|nothing)"
-    "|其余路径不调用模型[^。；!?]{0,80}?账本仅该命令写入",
+    "|其余路径不调用模型[\\s\\S]{0,80}?账本仅该命令写入",
     re.IGNORECASE,
 )
 """A statement that shipped usage is bounded to the gated evening command: 出厂路径, 不, then
@@ -1565,8 +1565,8 @@ MODEL_CALL_CONDITION: Final[re.Pattern[str]] = re.compile(
     r"(?![一-鿿]|\s*(?:api\s*)?(?:keys?|credentials?|secrets?)(?![A-Za-z]))"
     "|no shipped path (?:calls|makes|sends) (?:a |any )?(?:models?|llms?)(?: calls?)?"
     f"(?:{_CONDITION_END}|(?= at all))"
-    "|唯一能调用模型(?:的)?[^。；!?]{0,400}?其余路径不调用模型"
-    "|only shipped command that can call a model[^.;!?]{0,600}?"
+    "|唯一能调用模型(?:的)?[\\s\\S]{0,400}?其余路径不调用模型"
+    "|only shipped command that can call a model[\\s\\S]{0,600}?"
     "rest of the shipped path (?:still )?(?:calls|makes) no model",
     re.IGNORECASE,
 )
@@ -1744,6 +1744,17 @@ class AllowedClause:
 ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
     AllowedClause(
         path=MARKETING,
+        excerpt="用量账本已备好",
+        clause="### 037｜用量账本已备好，只有方案 C 的晚间命令在登记上限内写入",
+        reason=(
+            "Section 037's heading states the bounded truth in a heading: the ledger exists and "
+            "only plan C's evening command writes it, within the registered cap. It claims no "
+            "unbounded recording, so it is true as written; the section's body carries the full "
+            "USAGE_CONDITION sentence."
+        ),
+    ),
+    AllowedClause(
+        path=MARKETING,
         excerpt="FinOps、模型成本专题、团队采购评估",
         clause="**建议渠道：** FinOps、模型成本专题、团队采购评估。",
         reason=(
@@ -1767,7 +1778,9 @@ ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
 """The usage guard's true non-claims. An entry is for a clause that is true as written, never
 for a claim waiting to be rewritten.
 
-After the D7 rewrite the usage guard flagged exactly these two clauses in the four files.
+After the D7 rewrite the usage guard flagged exactly two clauses in the four files. The L2
+rewrite added section 037's bounded heading, which states the ledger's limit as a heading; its
+body carries the full USAGE_CONDITION sentence.
 """
 
 MODEL_CALL_ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
