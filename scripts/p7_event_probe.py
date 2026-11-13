@@ -39,18 +39,29 @@ is deliberate: the context manager patches `cli._panel_transport` and would take
 of the caller's hands, while `run_probe` takes it as an argument so tests can pass a scripted one
 and open a fake-transport seam with no process-global state.
 
-**Answers are findings, never crashes -- except the two rejections that cannot improve.** A
+**Answers are findings, never crashes -- except a refused credential, which stops the run.** A
 non-zero Tushare `code` (e.g. `40101`, a credential or endpoint refusal) and a transport-level
 exception both become a `permitted=False` finding with an `error_code` -- the Tushare code as
-text, or the exception's class name. Messages are never kept: a provider message can carry a
-credential (see `cli._fetch_panel`'s reasoning), and they are not metadata.
+text, or the exception's class name. The vendor's own `msg` is kept for a rejection as metadata:
+it is the only thing that tells a rate limit apart from a missing permission (both arrive as
+`40203`), it is truncated to `MAX_MESSAGE_CHARS` characters and folded to one line so it cannot
+break the report's table, and the token is redacted from it defensively even though the request
+body -- not the response -- is what carries the token. A transport exception's message is still
+never kept: it is not a vendor answer and can name the endpoint or the request.
 
-**A rejection that can only repeat stops the run.** The first `40101` (`TUSHARE_CREDENTIAL_CODE`)
-or `40203` (`TUSHARE_RATE_LIMIT_CODE`) rejection is recorded as the finding it is, and then
-`run_probe` sends nothing more -- no further planned call and no further page. Its `ProbeRun`
-carries the `ProbeStop` and the number of planned calls not sent, the report prints a
-`stopped: ...` line, and `--live` exits `STOPPED_EXIT` (3) with the cause on stderr after the
-budget file has recorded what it did send. Every other non-zero code is a finding the plan
+**A refused credential stops the run; a ``40203`` stops only its interface.** The first `40101`
+(`TUSHARE_CREDENTIAL_CODE`) rejection is recorded as the finding it is, and then `run_probe`
+sends nothing more -- no further planned call and no further page -- because the same answer can
+only repeat. A `40203` (`TUSHARE_RATE_LIMIT_CODE`) is ambiguous: Tushare answers with it both for
+a per-minute/per-day rate limit and for "no permission for this interface", and only the
+vendor's `msg` says which. So the first `40203` stops **that interface only**: no further
+planned call to it is sent in this run (its later calls are skipped without spending a request),
+the finding and its `msg` are recorded, and the other interfaces continue. A `40101` on a
+follow-up page stops the whole run just like one on a first request; a `40203` on a follow-up
+page stops that interface after the page is recorded as a truncation. The `ProbeRun` carries the
+whole-run `ProbeStop` (a refused credential) and one `ProbeInterfaceStop` per refused interface;
+the report marks each stopped interface `stopped: <code>` with its `msg`, and `--live` exits
+`STOPPED_EXIT` (3) only for the credential stop. Every other non-zero code is a finding the plan
 continues past: an unrecognised interface name in an `anns_d` schema probe must not end the run.
 
 **The token is the environment's.** `TUSHARE_TOKEN` is read at send time and put in the request
@@ -61,10 +72,15 @@ is what reads it, so a scripted transport in a test receives only the test envir
 writes nothing, and ignores `--budget-file` (it neither reads nor creates it). `--live` is the
 only path that sends, and it refuses without `--i-have-the-users-go`, without a `TUSHARE_TOKEN`
 read from the environment at send time, and without a `--budget-file`; even then it prints the
-metadata report and writes only the budget file. A `--live` run stopped by a credential or
-rate-limit rejection exits `STOPPED_EXIT` (3), not 0 and not the refusal's 2, because it did send
-requests and the budget file records them. `--live` is never run by this repository's tests or by
-the batch that added this script: it is gated live step L1 and waits for the user's explicit go.
+metadata report and writes only the budget file. `--skip-interface NAME` (repeatable, the five
+interface names) leaves an interface out of the plan: the dry run prints the reduced plan and
+count, a live run plans and sends nothing to it, and the report names it `skipped by operator` --
+this is how a rerun leaves out an interface already known to be refused, at zero requests.
+`--live` exits `STOPPED_EXIT` (3) only when a refused credential ended the run, not 0 and not the
+refusal's 2, because it did send requests and the budget file records them; a run in which only
+per-interface `40203` stops happened has finished, so it exits 0. `--live` is never run by this
+repository's tests or by the batch that added this script: it is gated live step L1 and waits for
+the user's explicit go.
 
 **The budget is cumulative across invocations.** `--live` requires `--budget-file PATH`: a small
 JSON file (`PROBE_BUDGET_SCHEMA`, one `spent` field, cumulative requests), read before the run and
@@ -120,6 +136,12 @@ verified here.** A `full_day` answer that fills this many rows without a flag bu
 follow-up request, and an answer at this count that the probe could not follow is flagged
 `truncated="possibly"` rather than reported as a total."""
 
+MAX_MESSAGE_CHARS: Final[int] = 200
+"""How much of a rejection's vendor `msg` the report keeps. The message is the only witness that
+tells a `40203` rate limit from a `40203` missing permission, so it is metadata worth recording;
+truncating it bounds a line the operator has to read and makes an unbounded vendor string unable
+to dominate the report. The token is redacted before truncation."""
+
 MAX_PAGES_PER_CALL: Final[int] = 10
 """How many pages one `full_day` call may take before the probe stops and flags the answer
 truncated. 10 x `PAGE_ROW_LIMIT` = 60,000 rows is far above the whole-market day any of the five
@@ -149,10 +171,12 @@ _TUSHARE_TOKEN_ENV: Final[str] = "TUSHARE_TOKEN"
 
 _KNOWN_CODES: Final[Mapping[str, str]] = {
     str(TUSHARE_CREDENTIAL_CODE): "credential or endpoint refused",
-    str(TUSHARE_RATE_LIMIT_CODE): "per-interface rate limit",
+    str(TUSHARE_RATE_LIMIT_CODE): ("rate limit or no permission for this interface (read its msg)"),
 }
-"""What the two measured Tushare rejection codes mean, so a report names them without reading a
-message (the message can carry a credential, so it is never kept)."""
+"""What the two measured Tushare rejection codes can mean. `40203` is ambiguous -- a per-minute
+rate limit and a missing permission answer with the same code -- so the report prints the
+vendor's own `msg` beside it; that message is metadata, truncated and token-redacted, never row
+data."""
 
 REFUSED_EXIT: Final[int] = 2
 """What a refusal of this script exits with (a usage error is 2 too): the invocation sent nothing
@@ -160,10 +184,11 @@ and recorded nothing. The one exception prints its report and says the budget fi
 record the requests that were sent."""
 
 STOPPED_EXIT: Final[int] = 3
-"""What a `--live` run exits with when a credential or rate-limit rejection stopped it. Distinct
-from both success (0) and `REFUSED_EXIT` (2, where nothing was sent): this run did send requests,
-and the budget file has recorded them before the exit, so a rerun is refused by the budget rather
-than repeating them."""
+"""What a `--live` run exits with when a refused credential (`40101`) stopped the whole run.
+Distinct from both success (0) and `REFUSED_EXIT` (2, where nothing was sent): this run did send
+requests, and the budget file has recorded them before the exit, so a rerun is refused by the
+budget rather than repeating them. A run in which only per-interface `40203` stops happened has
+finished and exits 0 -- the report names the stopped interfaces."""
 
 
 class ProbeBudgetError(ValueError):
@@ -178,9 +203,10 @@ Truncation = Literal["no", "possibly", "yes"]
 next page, `yes` = the server's own flag said more rows exist (or a follow-up page failed) and
 they were not fetched. The two are kept apart because only the first is certain."""
 
-StopReason = Literal["credential_refused", "rate_limited"]
-"""Why a run stopped early: the two rejections that can only repeat -- a refused credential
-(`40101`) and a per-interface rate limit (`40203`). Every other rejection stays a finding."""
+StopReason = Literal["credential_refused"]
+"""Why a whole run stopped early: a refused credential (`40101`), the one rejection whose next
+answer can only repeat. A `40203` is ambiguous and stops only its own interface
+(`ProbeInterfaceStop`); every other rejection stays a finding."""
 
 
 @dataclass(frozen=True)
@@ -201,7 +227,9 @@ class ProbeFinding:
     than 1 when a `full_day` answer was paged. `truncated` says whether `rows` is a lower bound
     (`possibly`/`yes`) or the total (`no`). `error_code` is the first non-zero Tushare code or
     transport exception class name; when a follow-up page failed, it is that page's code beside
-    `permitted=True`. `earliest_date_seen` is the earliest value of a `*_date` column parsed
+    `permitted=True`. `msg` is the vendor's own rejection message for that code -- metadata, kept
+    to `MAX_MESSAGE_CHARS` characters, token-redacted, and never a row value; a transport
+    failure has none. `earliest_date_seen` is the earliest value of a `*_date` column parsed
     across the returned rows -- only the date is kept, never the cell -- and `timestamp_fields`
     names the columns whose names look like a publication instant, for the PIT decision the live
     step has to make.
@@ -216,12 +244,13 @@ class ProbeFinding:
     earliest_date_seen: date | None
     timestamp_fields: tuple[str, ...]
     truncated: Truncation
+    msg: str | None = None
 
 
 @dataclass(frozen=True)
 class ProbeStop:
-    """The rejection that ended a run early: its finding is recorded, and nothing after it was
-    sent, because the same answer would only repeat (a refused credential, a rate limit)."""
+    """The rejection that ended a whole run early: its finding is recorded, and nothing after it
+    was sent, because the same answer would only repeat (a refused credential)."""
 
     reason: StopReason
     error_code: str
@@ -229,17 +258,30 @@ class ProbeStop:
 
 
 @dataclass(frozen=True)
+class ProbeInterfaceStop:
+    """A `40203` that stopped one interface: no further planned call to it was sent, and the
+    other interfaces continued. `msg` is the vendor's message, which is what tells a rate limit
+    apart from a missing permission."""
+
+    api_name: str
+    error_code: str
+    msg: str | None
+
+
+@dataclass(frozen=True)
 class ProbeRun:
-    """What `run_probe` did: the findings it recorded, the plan it was given, and any early stop.
+    """What `run_probe` did: the findings it recorded, the plan it was given, and any early stops.
 
     `not_sent` is `planned - len(findings)`: the planned calls whose first request was never sent,
-    whether a stop or the cap ended the run. One finding is one planned call even when the call
-    was paged.
+    whether a whole-run stop, an interface stop or the cap ended that call. One finding is one
+    planned call even when the call was paged. `interfaces_stopped` records the `40203` stops,
+    each of which cost the planned calls to that interface that came after it.
     """
 
     findings: tuple[ProbeFinding, ...]
     planned: int
     stop: ProbeStop | None = None
+    interfaces_stopped: tuple[ProbeInterfaceStop, ...] = ()
 
     @property
     def not_sent(self) -> int:
@@ -249,15 +291,18 @@ class ProbeRun:
 
 _STOP_CODES: Final[Mapping[str, StopReason]] = {
     str(TUSHARE_CREDENTIAL_CODE): "credential_refused",
-    str(TUSHARE_RATE_LIMIT_CODE): "rate_limited",
 }
-"""The rejections that stop a run: another request would get the same answer and spend the cap."""
+"""The rejection that stops a whole run: another request would get the same answer and spend the
+cap."""
+
+_INTERFACE_STOP_CODE: Final[str] = str(TUSHARE_RATE_LIMIT_CODE)
+"""The rejection that stops only its own interface: Tushare uses it for a rate limit and for a
+missing permission, so the run continues with the interfaces that can still answer."""
 
 _STOP_LABELS: Final[Mapping[StopReason, str]] = {
     "credential_refused": "credential refused",
-    "rate_limited": "rate limited",
 }
-"""How the report and the command name each stop."""
+"""How the report and the command name the whole-run stop."""
 
 
 # --- the plan -----------------------------------------------------------------------------------
@@ -267,7 +312,12 @@ _FIXED_PURPOSES: Final[tuple[Purpose, ...]] = ("schema", "full_day", "pit_field"
 """The probes of one interface that do not depend on `depth_years`; `depth` adds one per year."""
 
 
-def probe_plan(*, today: date, depth_years: Sequence[int]) -> tuple[ProbeCall, ...]:
+def probe_plan(
+    *,
+    today: date,
+    depth_years: Sequence[int],
+    skip_interfaces: Sequence[str] = (),
+) -> tuple[ProbeCall, ...]:
     """The whole probe: one request per call, at most `PROBE_CAP`.
 
     Parameters are the documented Tushare ones and are unverified until the gated live step L1
@@ -278,9 +328,14 @@ def probe_plan(*, today: date, depth_years: Sequence[int]) -> tuple[ProbeCall, .
     `depth_years` are the whole years back to also probe, one whole-market request per interface
     each (e.g. `(1, 2, 3, 4, 5)`), and the plan refuses a list whose calls would pass
     `PROBE_CAP` rather than silently truncating the history it was asked to measure.
+    `skip_interfaces` names event interfaces an operator leaves out entirely (e.g. one already
+    known to be refused): they are planned zero calls, and a name that is not one of the five is
+    refused by name rather than silently ignored.
     """
     years = _depth_years(depth_years)
-    calls = len(EVENT_INTERFACES) * (len(_FIXED_PURPOSES) + len(years))
+    skipped = _skipped_interfaces(skip_interfaces)
+    selected = [api_name for api_name in EVENT_INTERFACES if api_name not in skipped]
+    calls = len(selected) * (len(_FIXED_PURPOSES) + len(years))
     if calls > PROBE_CAP:
         raise ValueError(
             f"{len(years)} depth year(s) make {calls} probes, and PROBE_CAP is {PROBE_CAP}; "
@@ -290,19 +345,19 @@ def probe_plan(*, today: date, depth_years: Sequence[int]) -> tuple[ProbeCall, .
     settled = _weekday(today - timedelta(days=1))
     earlier = _weekday(settled - timedelta(days=1))
     plan: list[ProbeCall] = []
-    for api_name in EVENT_INTERFACES:
+    for api_name in selected:
         plan.append(
             ProbeCall(
                 api_name=api_name, params=_subject_params(api_name, settled), purpose="schema"
             )
         )
-    for api_name in EVENT_INTERFACES:
+    for api_name in selected:
         plan.append(
             ProbeCall(
                 api_name=api_name, params=_market_params(api_name, settled), purpose="full_day"
             )
         )
-    for api_name in EVENT_INTERFACES:
+    for api_name in selected:
         plan.append(
             ProbeCall(
                 api_name=api_name, params=_subject_params(api_name, earlier), purpose="pit_field"
@@ -310,11 +365,25 @@ def probe_plan(*, today: date, depth_years: Sequence[int]) -> tuple[ProbeCall, .
         )
     for years_back in years:
         day = _depth_day(settled, years_back)
-        for api_name in EVENT_INTERFACES:
+        for api_name in selected:
             plan.append(
                 ProbeCall(api_name=api_name, params=_market_params(api_name, day), purpose="depth")
             )
     return tuple(plan)
+
+
+def _skipped_interfaces(values: Sequence[str]) -> frozenset[str]:
+    """The operator-skipped event interfaces as a set, or a refusal naming the unknown one."""
+    skipped: set[str] = set()
+    for value in values:
+        if value not in EVENT_INTERFACES:
+            choices = ", ".join(EVENT_INTERFACES)
+            raise ValueError(
+                f"--skip-interface names one of the five event interfaces ({choices}), not "
+                f"{value!r}: nothing was planned"
+            )
+        skipped.add(value)
+    return frozenset(skipped)
 
 
 def _depth_years(values: Sequence[int]) -> tuple[int, ...]:
@@ -377,26 +446,43 @@ def run_probe(
     """Send `plan` through `transport` and record one finding per planned call that is sent.
 
     The cap is `p7_smoke_requests.CappedCounter`: incremented before the transport is reached, so
-    a call past `cap` is never sent and the probe stops there. A credential (`40101`) or
-    rate-limit (`40203`) rejection also stops the run: its finding is kept and no further planned
-    call or page is sent, because the next answer would be the same. Every other non-zero code or
-    transport failure is a finding the plan continues past. The token comes from `TUSHARE_TOKEN`
-    at send time and is never kept; `transport` is the caller's (tests pass a scripted one).
+    a call past `cap` is never sent and the probe stops there. A refused credential (`40101`)
+    stops the whole run: its finding is kept and no further planned call or page is sent, because
+    the next answer would be the same. A `40203` stops only the interface it was sent to: the
+    finding and its `msg` are kept, every later planned call to that interface is skipped without
+    spending a request, and the other interfaces continue. Every other non-zero code or transport
+    failure is a finding the plan continues past. The token comes from `TUSHARE_TOKEN` at send
+    time and is never kept; `transport` is the caller's (tests pass a scripted one).
     """
     counter = budget.CappedCounter(cap)
+    token = os.environ.get(_TUSHARE_TOKEN_ENV, "")
     findings: list[ProbeFinding] = []
     stop: ProbeStop | None = None
+    interface_stops: dict[str, ProbeInterfaceStop] = {}
     for call in plan:
-        finding = _probe_call(call, transport, counter)
+        if call.api_name in interface_stops:
+            continue  # a 40203 already stopped this interface; send it no request at all
+        finding = _probe_call(call, transport, counter, token=token)
         if finding is None:
             break
         findings.append(finding)
         code = finding.error_code
-        reason = None if code is None else _STOP_CODES.get(code)
-        if code is not None and reason is not None:
+        if code is None:
+            continue
+        reason = _STOP_CODES.get(code)
+        if reason is not None:
             stop = ProbeStop(reason=reason, error_code=code, api_name=call.api_name)
             break
-    return ProbeRun(findings=tuple(findings), planned=len(plan), stop=stop)
+        if code == _INTERFACE_STOP_CODE:
+            interface_stops[call.api_name] = ProbeInterfaceStop(
+                api_name=call.api_name, error_code=code, msg=finding.msg
+            )
+    return ProbeRun(
+        findings=tuple(findings),
+        planned=len(plan),
+        stop=stop,
+        interfaces_stopped=tuple(interface_stops.values()),
+    )
 
 
 _FLAG_ABSENT: Final[object] = object()
@@ -406,7 +492,7 @@ _FLAG_ABSENT: Final[object] = object()
 @dataclass(frozen=True)
 class _Page:
     """One response parsed into metadata only: a row value is read for the earliest date and then
-    dropped, never stored."""
+    dropped, never stored. `msg` is a rejection's vendor message, already sanitised."""
 
     permitted: bool
     error_code: str | None
@@ -417,32 +503,39 @@ class _Page:
     more: bool | None
     """The server's `has_more`: `False` is the only complete answer, `None` is absent from the
     response -- the case the documented row limit has to judge."""
+    msg: str | None = None
 
 
 def _probe_call(
-    call: ProbeCall, transport: TushareTransport, counter: budget.CappedCounter
+    call: ProbeCall,
+    transport: TushareTransport,
+    counter: budget.CappedCounter,
+    *,
+    token: str,
 ) -> ProbeFinding | None:
     """One planned call's finding, or `None` when the cap stopped its first request unsent.
 
     A `full_day` answer is paged: while the last page says more rows exist (`has_more=True`, or
     the documented row limit with no flag) and the cap allows, one follow-up `offset` request is
     sent. The finding aggregates every page; `truncated` records a page the probe could not
-    follow. Nothing else is paged.
+    follow. Nothing else is paged. The token is `run_probe`'s environment value: it is put in the
+    request envelope and redacted from any vendor message that somehow names it.
     """
     if not _spend(counter, call.api_name):
         return None
-    response, failure = _post(transport, _envelope(call))
+    response, failure = _post(transport, _envelope(call, token=token))
     if response is None:
         return _refused(call.api_name, failure or "invalid_response")
-    page = _parse_response(response)
+    page = _parse_response(response, token=token)
     if not page.permitted:
-        return _refused(call.api_name, page.error_code)
+        return _refused(call.api_name, page.error_code, msg=page.msg)
     if page.error_code is not None:  # permitted, but the body was not a data page
         return _invalid(call.api_name)
 
     pages = [page]
     truncated: Truncation = "no"
     follow_up_error: str | None = None
+    follow_up_msg: str | None = None
     if call.purpose == "full_day":
         while _wants_more(pages[-1]):
             if len(pages) >= MAX_PAGES_PER_CALL:
@@ -452,19 +545,23 @@ def _probe_call(
                 truncated = _truncation_when_stopped(pages[-1])
                 break
             response, failure = _post(
-                transport, _envelope(_offset_call(call, offset=sum(page.rows for page in pages)))
+                transport,
+                _envelope(_offset_call(call, offset=sum(page.rows for page in pages)), token=token),
             )
             if response is None:
                 truncated = _truncation_when_stopped(pages[-1])
                 follow_up_error = failure
                 break
-            page = _parse_response(response)
+            page = _parse_response(response, token=token)
             if not page.permitted or page.error_code is not None:
                 truncated = _truncation_when_stopped(pages[-1])
                 follow_up_error = page.error_code
+                follow_up_msg = page.msg
                 break
             pages.append(page)
-    return _finding_of(call.api_name, pages, truncated=truncated, error_code=follow_up_error)
+    return _finding_of(
+        call.api_name, pages, truncated=truncated, error_code=follow_up_error, msg=follow_up_msg
+    )
 
 
 def _wants_more(page: _Page) -> bool:
@@ -486,11 +583,12 @@ def _spend(counter: budget.CappedCounter, api_name: str) -> bool:
     return True
 
 
-def _envelope(call: ProbeCall) -> dict[str, Any]:
-    """The Tushare request envelope: the credential is read at send time, never stored."""
+def _envelope(call: ProbeCall, *, token: str) -> dict[str, Any]:
+    """The Tushare request envelope: the credential is read by `run_probe` at send time and never
+    stored."""
     return {
         "api_name": call.api_name,
-        "token": os.environ.get(_TUSHARE_TOKEN_ENV, ""),
+        "token": token,
         "params": dict(call.params),
         "fields": "",
     }
@@ -518,12 +616,13 @@ def _post(
         return None, type(error).__name__
 
 
-def _parse_response(response: Mapping[str, Any]) -> _Page:
+def _parse_response(response: Mapping[str, Any], *, token: str) -> _Page:
     """One response as a `_Page`: a non-zero code is a refusal, a body without `data` is invalid,
-    and a data page carries its own `has_more` when the server sends one."""
+    and a data page carries its own `has_more` when the server sends one. A rejection's vendor
+    `msg` is kept through `_message`, which redacts `token` and bounds the text."""
     code = response.get("code")
     if code != 0:
-        return _refused_page(_error_code(code))
+        return _refused_page(_error_code(code), _message(response.get("msg"), token=token))
     data = response.get("data")
     if not isinstance(data, dict):
         return _invalid_page()
@@ -548,7 +647,24 @@ def _parse_response(response: Mapping[str, Any]) -> _Page:
     )
 
 
-def _refused_page(error_code: str | None) -> _Page:
+def _message(value: Any, *, token: str) -> str | None:
+    """A vendor `msg` as metadata: token-redacted, one line, at most `MAX_MESSAGE_CHARS`.
+
+    The response message does not carry the token -- the request body does -- but this is the one
+    path that writes a vendor string into the report, so it redacts a token it is given and
+    asserts nothing else about the string. Newlines and runs of whitespace become one space and
+    every `|` is escaped before the text is truncated, so the cell can neither break the report's
+    table nor outgrow the bound. `None` when the response carried no string message (a transport
+    failure has none at all).
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.replace(token, "[redacted]") if token else value
+    text = " ".join(text.split()).replace("|", "\\|")
+    return text[:MAX_MESSAGE_CHARS]
+
+
+def _refused_page(error_code: str | None, msg: str | None) -> _Page:
     return _Page(
         permitted=False,
         error_code=error_code,
@@ -557,6 +673,7 @@ def _refused_page(error_code: str | None) -> _Page:
         earliest_date_seen=None,
         timestamp_fields=(),
         more=None,
+        msg=msg,
     )
 
 
@@ -578,6 +695,7 @@ def _finding_of(
     *,
     truncated: Truncation,
     error_code: str | None = None,
+    msg: str | None = None,
 ) -> ProbeFinding:
     """The aggregated finding of one planned call's pages: counts are total, dates the earliest."""
     dates = [page.earliest_date_seen for page in pages if page.earliest_date_seen is not None]
@@ -591,10 +709,11 @@ def _finding_of(
         earliest_date_seen=min(dates) if dates else None,
         timestamp_fields=_ordered_union(page.timestamp_fields for page in pages),
         truncated=truncated,
+        msg=msg,
     )
 
 
-def _refused(api_name: str, error_code: str | None) -> ProbeFinding:
+def _refused(api_name: str, error_code: str | None, *, msg: str | None = None) -> ProbeFinding:
     """A first request the endpoint refused or the transport could not deliver."""
     return ProbeFinding(
         api_name=api_name,
@@ -606,6 +725,7 @@ def _refused(api_name: str, error_code: str | None) -> ProbeFinding:
         earliest_date_seen=None,
         timestamp_fields=(),
         truncated="no",
+        msg=msg,
     )
 
 
@@ -675,18 +795,23 @@ def render_report(
     cumulative: int | None = None,
     stop: ProbeStop | None = None,
     not_sent: int = 0,
+    skipped: Sequence[str] = (),
+    interfaces_stopped: Sequence[ProbeInterfaceStop] = (),
 ) -> str:
-    """The metadata report: no row value, no message, no token, nothing persisted.
+    """The metadata report: no row value, no token, nothing persisted.
 
     One interface's findings are folded into one line: `permitted` is `yes` only when every call
     to it was permitted (`partial` when some were, `no` when none was), the row and page counts
     are the largest single answer -- a whole-market day, paged when it filled a page -- the
-    earliest date is the earliest seen across the calls, and the field and timestamp names are
-    the union in first-seen order. `truncated` is `yes` if any call's row count is a hard lower
-    bound, else `possibly` if any is a possible one, else `no`; the paging note says which is
-    which. `spent` is this invocation's requests; `cumulative`, when given, is the budget file's
-    total after the run; `stop`, when given, adds the line naming why the run stopped early and
-    how many planned calls that left unsent.
+    earliest date is the earliest seen across the calls, the field and timestamp names are the
+    union in first-seen order, and `msg` is every rejection message the interface answered,
+    sanitized and truncated by `_message`. `truncated` is `yes` if any call's row count is a hard
+    lower bound, else `possibly` if any is a possible one, else `no`; the paging note says which
+    is which. `spent` is this invocation's requests; `cumulative`, when given, is the budget
+    file's total after the run; `stop`, when given, adds the line naming why the whole run stopped
+    early and how many planned calls that left unsent; `interfaces_stopped` adds one
+    `stopped: <code>` line per `40203`-refused interface with its message; `skipped` names the
+    interfaces an operator left out of the plan (`skipped by operator`, zero requests).
     """
     grouped: dict[str, list[ProbeFinding]] = {}
     for finding in findings:
@@ -701,9 +826,16 @@ def render_report(
         f"- Requests spent: {spent} of PROBE_CAP ({PROBE_CAP}).",
         f"- Interfaces reported: {len(grouped)}.",
     ]
+    for api_name in skipped:
+        lines.append(f"- `{api_name}`: skipped by operator (no call planned; zero requests).")
     if cumulative is not None:
         lines.append(
             f"- Cumulative budget: {cumulative} of PROBE_CAP ({PROBE_CAP}) requests spent."
+        )
+    for interface_stop in interfaces_stopped:
+        message = f' -- "{interface_stop.msg}"' if interface_stop.msg is not None else ""
+        lines.append(
+            f"- `{interface_stop.api_name}`: stopped: {interface_stop.error_code}{message}"
         )
     if stop is not None:
         lines.append(f"- stopped: {_STOP_LABELS[stop.reason]}, {not_sent} planned calls not sent.")
@@ -722,10 +854,15 @@ def render_report(
             "  failed) and they were not fetched. `rows` is then a lower bound, not the daily "
             "total.",
             "  An error code beside a permitted interface is a follow-up page's refusal.",
+            "- Rejection msg: the vendor's own message, metadata only -- it is what tells a "
+            "`40203`",
+            "  rate limit from a missing permission. Truncated to 200 characters, folded to one "
+            "line,",
+            "  and token-redacted; a transport failure has none.",
             "",
             "| interface | permitted | error code | rows | pages | truncated | earliest date seen "
-            "| timestamp fields |",
-            "|---|---|---|---|---|---|---|---|",
+            "| timestamp fields | msg |",
+            "|---|---|---|---|---|---|---|---|---|",
         ]
     )
     for api_name, group in grouped.items():
@@ -736,10 +873,11 @@ def render_report(
         truncated = _truncated_of(group)
         earliest = _earliest_of(group)
         timestamps = _ordered_union(finding.timestamp_fields for finding in group)
+        messages = _messages_of(group)
         lines.append(
             f"| `{api_name}` | {permitted} | {', '.join(codes) if codes else '-'} | {rows} "
             f"| {pages} | {truncated} | {earliest.isoformat() if earliest is not None else '-'} "
-            f"| {_names(timestamps)} |"
+            f"| {_names(timestamps)} | {messages} |"
         )
 
     lines.extend(["", "## Field names", ""])
@@ -789,6 +927,15 @@ def _codes_of(group: Sequence[ProbeFinding]) -> list[str]:
     return codes
 
 
+def _messages_of(group: Sequence[ProbeFinding]) -> str:
+    """Every distinct rejection message an interface answered, in first-seen order."""
+    messages: list[str] = []
+    for finding in group:
+        if finding.msg is not None and finding.msg not in messages:
+            messages.append(finding.msg)
+    return "; ".join(messages) if messages else "-"
+
+
 def _earliest_of(group: Sequence[ProbeFinding]) -> date | None:
     dates: list[date] = []
     for finding in group:
@@ -809,20 +956,32 @@ def _names(values: tuple[str, ...]) -> str:
     return ", ".join(f"`{value}`" for value in values) if values else "-"
 
 
-def render_plan(plan: Sequence[ProbeCall], *, today: date) -> str:
-    """The dry run's output: every planned request and the count, with nothing sent."""
+def render_plan(plan: Sequence[ProbeCall], *, today: date, skipped: Sequence[str] = ()) -> str:
+    """The dry run's output: every planned request and the count, with nothing sent.
+
+    `skipped` names the interfaces an operator left out (they are not in `plan`), so the dry run
+    shows the reduced plan and says what it left out.
+    """
     lines = [
         "# Tushare event-interface probe (V2-P7-010) -- plan (dry run)",
         "",
         f"- today: {today.isoformat()}",
         f"- planned calls: {len(plan)} of PROBE_CAP ({PROBE_CAP})",
-        f"- full-day paging: a `full_day` page of {PAGE_ROW_LIMIT} rows (or `has_more=true`) buys",
-        "  an `offset` follow-up request not listed above; every follow-up is inside the same cap.",
-        "- dry run: nothing is sent and nothing is written.",
-        "",
-        "| # | interface | purpose | params |",
-        "|---|---|---|---|",
     ]
+    for api_name in skipped:
+        lines.append(f"- `{api_name}`: skipped by operator (no call planned; zero requests).")
+    lines.extend(
+        [
+            f"- full-day paging: a `full_day` page of {PAGE_ROW_LIMIT} rows (or `has_more=true`) "
+            "buys",
+            "  an `offset` follow-up request not listed above; every follow-up is inside the same "
+            "cap.",
+            "- dry run: nothing is sent and nothing is written.",
+            "",
+            "| # | interface | purpose | params |",
+            "|---|---|---|---|",
+        ]
+    )
     for index, call in enumerate(plan, start=1):
         params = json.dumps(dict(call.params), sort_keys=True, ensure_ascii=False)
         lines.append(f"| {index} | `{call.api_name}` | {call.purpose} | `{params}` |")
@@ -969,18 +1128,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="N",
         help="whole years back to probe, one whole-market request per interface each",
     )
+    parser.add_argument(
+        "--skip-interface",
+        dest="skip_interfaces",
+        action="append",
+        choices=EVENT_INTERFACES,
+        default=[],
+        metavar="NAME",
+        help=(
+            "leave an event interface out of the plan entirely (repeatable; choices: "
+            f"{', '.join(EVENT_INTERFACES)}); it costs zero requests, and the report names it "
+            "as skipped by operator"
+        ),
+    )
     args = parser.parse_args(argv)
+    skipped: tuple[str, ...] = tuple(dict.fromkeys(args.skip_interfaces))
 
     today = args.today if args.today is not None else date.today()
     try:
-        plan = probe_plan(today=today, depth_years=args.depth_years)
+        plan = probe_plan(
+            today=today,
+            depth_years=args.depth_years,
+            skip_interfaces=skipped,
+        )
     except ValueError as error:
         print(f"p7_event_probe: {error}", file=sys.stderr)
         return REFUSED_EXIT
 
     if not args.live:
         # The dry run ignores --budget-file entirely: it neither reads nor creates it.
-        print(render_plan(plan, today=today), end="")
+        print(render_plan(plan, today=today, skipped=skipped), end="")
         return 0
 
     if args.dry_run:
@@ -1047,6 +1224,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 spent=tally.attempts,
                 stop=run.stop,
                 not_sent=run.not_sent,
+                skipped=skipped,
+                interfaces_stopped=run.interfaces_stopped,
             ),
             end="",
         )
@@ -1063,21 +1242,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         cumulative=cumulative,
         stop=run.stop,
         not_sent=run.not_sent,
+        skipped=skipped,
+        interfaces_stopped=run.interfaces_stopped,
     )
     print(report, end="")
     if run.stop is not None:
-        cause = (
-            "credential refusal"
-            if run.stop.reason == "credential_refused"
-            else "rate-limit rejection"
-        )
         print(
-            f"p7_event_probe: stopped at the first {cause} (Tushare code {run.stop.error_code}) "
-            f"on {run.stop.api_name}; {run.not_sent} of {run.planned} planned calls were not "
-            f"sent; {tally.attempts} request(s) recorded in {budget_path}",
+            f"p7_event_probe: stopped at the first {_STOP_LABELS[run.stop.reason]} (Tushare code "
+            f"{run.stop.error_code}) on {run.stop.api_name}; {run.not_sent} of {run.planned} "
+            f"planned calls were not sent; {tally.attempts} request(s) recorded in {budget_path}",
             file=sys.stderr,
         )
         return STOPPED_EXIT
+    for interface_stop in run.interfaces_stopped:
+        print(
+            f"p7_event_probe: {interface_stop.api_name} stopped at Tushare code "
+            f"{interface_stop.error_code}; no further call to it was sent; {tally.attempts} "
+            f"request(s) recorded in {budget_path}; the report has its msg",
+            file=sys.stderr,
+        )
     return 0
 
 
