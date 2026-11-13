@@ -43,8 +43,11 @@ and the registered Step 0 configuration, and this script only states what it ans
   outcome line is prefixed `descriptive (registered not_testable):`, the p-value line is labelled
   `one-sided p (descriptive, not a test)`, the fix's pass/fail labels are not used, `not_measurable`
   and `futility_stop` keep their substantive wording under the descriptive prefix (a description of
-  the stored window, never a test result), and `--json` carries `"reading": "descriptive"` (a
-  testable registration's reading is `"test"`, its printed text unchanged).
+  the stored window, never a test result), and `--json` carries `"reading": "descriptive"` with a
+  descriptive `"outcome"` (`descriptive_positive_mean`/`descriptive_nonpositive_mean`, while
+  `not_measurable` and `futility_stop` keep their substance) and `"reading": "descriptive"` inside
+  `primary.test` (a testable registration's reading is `"test"` and its JSON and printed text
+  are unchanged).
 - The **exploratory block**, every arm labelled `EXPLORATORY`, its mean and its Benjamini-Yekutieli
   q-value read as "below q" / "at or above q" against the registered `q`, never pooled with the
   primary arm and never stated as a conclusion.

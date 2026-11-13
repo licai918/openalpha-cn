@@ -2498,11 +2498,15 @@ def test_the_real_admission_git_helpers_are_hermetic(
         at=datetime(2026, 1, 5, 9, 0, tzinfo=SHANGHAI),
     )
 
-    assert (
-        _git_unpinned(repository, "-C", str(repository), "rev-parse", "--is-inside-work-tree")
-        == "true"
-    )
-    assert _git_unpinned(repository, "rev-parse", "--is-inside-work-tree") == "true"
+    # `--is-inside-work-tree` alone would also be true from `git -C <repo>` while a hostile
+    # GIT_DIR is inherited (the commit lands in the outer repository), so assert the repository
+    # actually used: the tmp repo has its own .git, the hostile path was never created and the
+    # pinned commit is in this repository's history.
+    assert (repository / ".git").is_dir()
+    assert not (tmp_path / "hostile-outer-repo").exists()
+    assert _git_unpinned(repository, "rev-parse", "--git-dir") == ".git"
+    assert _git_unpinned(repository, "rev-parse", "HEAD")
+    assert _git_unpinned(repository, "log", "-1", "--format=%s") == "pinned"
 
 
 def test_the_real_admission_derives_the_anchor_from_the_committed_registration(

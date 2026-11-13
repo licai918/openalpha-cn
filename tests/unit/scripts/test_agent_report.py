@@ -802,6 +802,44 @@ def test_the_descriptive_reading_keeps_the_futility_wording(
         assert phrase not in document, f"the descriptive --json carries {phrase!r}"
 
 
+def test_the_other_increment_label_is_mapped_descriptively_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N4: `no_increment_detected` is the second forbidden JSON label and is mapped as well.
+
+    The evaluator returns it for a non-significant window (including one with a positive mean), so
+    the descriptive value names the reading category, not a claim about the mean's sign.
+    """
+    evaluation = make_evaluation(
+        outcome="no_increment_detected",
+        mean=0.1,
+        measurable=6,
+        sessions=6,
+        test=StatisticTest(
+            two_sided_p_value=0.4,
+            one_sided_p_value=0.2,
+            exact=False,
+            sign_patterns=64,
+            random_seed=11,
+        ),
+    )
+    world = _world(tmp_path, monkeypatch, c_body=_not_testable_body(), evaluation=evaluation)
+    report_path = tmp_path / "report.json"
+
+    code = report.main(world.arguments("--json", str(report_path)), clock=lambda: AS_OF)
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "descriptive (registered not_testable):" in out
+    for phrase in FORBIDDEN_TEST_PHRASES:
+        assert phrase not in out, f"the descriptive report printed {phrase!r}"
+    view = json.loads(report_path.read_text(encoding="utf-8"))
+    assert view["outcome"] == "descriptive_nonpositive_mean"
+    document = json.dumps(view, ensure_ascii=False)
+    for phrase in ("candidate_increment", "no_increment_detected"):
+        assert phrase not in document, f"the descriptive --json carries {phrase!r}"
+
+
 def test_the_testable_path_keeps_the_registered_outcome_wording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
