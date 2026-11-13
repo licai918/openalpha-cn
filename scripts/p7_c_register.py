@@ -610,6 +610,13 @@ def _power_row(
             f"the power report {path}'s {label!r} row sd is {sd!r}, not a positive number; the "
             "calculator's session sd has a positive planning part"
         )
+    # The calculator caps a row's sd at 1 (a rank-IC sd cannot exceed 1); a row above it is not
+    # a design the shipped calculator can produce (fix round 2, review robustness note).
+    if sd is not None and sd > 1.0:
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row sd is {sd!r}, above 1.0; the calculator "
+            "caps a session sd at 1, so no report it writes carries this row"
+        )
     mean = _finite_number(
         block.get("detectable_mean"), field="detectable_mean", label=label, path=path
     )

@@ -580,7 +580,16 @@ def _refuse_a_misplanned_anchor(
         )
     committed = admitted.registration_committed_at.astimezone(SHANGHAI)
     commit_date = committed.date()
-    store = PanelStore(Path(options.step0_runtime_dir) / "panel")
+    panel_root = Path(options.step0_runtime_dir) / "panel"
+    if not panel_root.is_dir():
+        # PanelStore's opener creates its root; a refusal must write nothing, so the missing
+        # panel is named and the directory is NOT created (fix round 2, review note).
+        raise StepFailedError(
+            "registration",
+            f"Step 0's panel {panel_root} is not a directory; the evening verifies C's registered "
+            "anchor against its trading calendar and refuses rather than create a missing runtime",
+        )
+    store = PanelStore(panel_root)
     stored = set(store.registered_years(TRADING_CALENDAR_DATASET))
     years = tuple(year for year in (commit_date.year, commit_date.year + 1) if year in stored)
     try:

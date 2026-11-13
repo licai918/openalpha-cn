@@ -2393,6 +2393,33 @@ def test_the_registered_evening_refuses_a_registration_whose_anchor_is_not_the_f
     assert _files(world.step0, skip_panel_locks=True) == before_step0
 
 
+def test_the_anchor_check_refuses_a_missing_step0_panel_without_creating_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N2's step-1 calendar read must not create a missing Step 0 panel (fix round 2).
+
+    PanelStore's opener creates its root; a refusal must write nothing, so the missing panel is
+    named before the store is opened and the directory is not created.
+    """
+    world = _world(tmp_path, monkeypatch)
+    missing = tmp_path / "missing-step0"
+    args = world.arguments()
+    args[args.index("--step0-runtime-dir") + 1] = str(missing)
+    transport = _RefusingTransport()
+
+    code = agent.main(args, clock=lambda: world.evening, transport=transport)
+    err = capsys.readouterr().err
+
+    assert code == agent.AgentEveningExit.refused
+    assert "step 1 (registration) failed" in err
+    assert "panel" in err
+    assert transport.calls == 0
+    assert not (missing / "panel").exists(), "the refusal must not create the panel directory"
+    assert not world.runtime.exists()
+
+
 def test_the_registered_evening_refuses_a_dry_week_marked_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

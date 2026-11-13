@@ -1329,6 +1329,35 @@ def test_refuses_a_power_row_whose_detectable_mean_is_not_its_own_design(
     assert not (repo / C_REGISTRATION).exists()
 
 
+def test_refuses_a_power_row_whose_sd_exceeds_the_calculators_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A row sd above 1 is impossible for a rank IC and cannot be the calculator's (fix round 2).
+
+    The shipped calculator caps every session sd at 1; the writer refuses a report row that
+    claims more even when its detectable_mean is internally consistent with it. (The row sd's
+    lower bound follows the frozen planning prior and is not re-derived here: the D1 branch tests
+    use a hypothetical internally consistent design, see `_testable_row`.)
+    """
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    row = _row(sd=1.2, periods=120, detectable_mean=_design_detectable(1.2, 120))
+    row["verdict"] = "testable"
+    power = _power_report(
+        tmp_path / "p7-c-power.json",
+        step0=_committed_step_zero(repo),
+        rows={"n300": row, "census": _testable_row()},
+    )
+
+    code, _, err = _run(capsys, *_arguments(power=power))
+
+    assert code == 2
+    assert "sd" in err
+    assert not (repo / C_REGISTRATION).exists()
+
+
 @pytest.mark.parametrize(
     "row",
     [
