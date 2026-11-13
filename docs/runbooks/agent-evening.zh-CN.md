@@ -329,7 +329,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
   不一致就按名拒绝——不会把错位的锚点当成窗口的一部分继续算。**第一晚的第 1 步用同一个共享函数做同一个
   检查**（不一致即拒绝、零请求零写入），所以排错的提交时间在第一天就暴露，不用等到 L6。
 - 窗口满、每个位置到期之前**没有 p 值、没有结论词**，只有计数与描述性均值；窗口满足之后才印那一次检验
-  （均值、双侧与单侧读数、检验水平、精确/随机）与五种结论之一。
+  （均值、双侧与单侧读数、检验水平、精确/随机）与五种结论之一。**若登记的 power 块是 `not_testable` + `register_untestable`，这一行改为描述性读数**：结论行前缀 `descriptive (registered not_testable):`，单侧 p 标注 `one-sided p (descriptive, not a test)`，不打印采纳规则块，`--json` 的 `reading` 为 `descriptive`；testable 登记的文本与措辞不变，`--json` 的 `reading` 为 `test`。
 - 五种结论的固定措辞：`not_yet`（未满/未到期）、`candidate_increment`（候选的增量）、
   `no_increment_detected`（没有检出增量）、`futility_stop`（中期无效性停止，sticky）、
   `not_measurable`（**不可测**，用评估器自己的措辞，**绝不读成「没有证据」**）。

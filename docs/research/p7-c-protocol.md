@@ -365,6 +365,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src" "$PWD/.venv/bin/python" scripts/
   样本数、可检出均值、弃权率与模型身份；**读数按描述性读**——即使窗口成熟、评估器按登记的检验给出数字，
   这段读数也不被当作这次登记的一次检验结论：没有通过/不通过的说法，不把 p 值写成结论，也不升级任何措辞。
   它是候选配置的描述性记录，不是证据。
+  这条由**绑定报告**（`scripts/agent_report.py`，登记绑定的两个脚本之一）直接执行，而不是只靠读者自觉：当登记的 power 块的 `register_untestable` 为真时，结论行以 `descriptive (registered not_testable):` 开头，p 值行标注 `one-sided p (descriptive, not a test)`，不打印采纳规则块（不把它当作本报告做出的决定），`--json` 的 `reading` 为 `descriptive`；testable 登记的措辞不变，`--json` 的 `reading` 为 `test`。
 - 这是**如实的设计结果，不是缺陷**：它说的是「在冻结的规划先验下，这个设计检不出均值 0.02 的增量」，
   不是「智能体没有增量」，更不是任何读数。**已登记的检验本身没有变**：通过 iff 窗口均值 > 0 且单侧读数
   ≤ 0.05（第 5.4 节）；但设计既已登记为「不可测」，它的读数不能被写成那次检验的结果。
@@ -615,3 +616,4 @@ L1 的 300 次上限里已经花掉 20 次：2026-11-12 修复轮中发生过一
   16:30 发布时刻在写入时已经过去的锚点。**文首与第 5.8 节同时更正**：登记提交之后本文件完全冻结，连第 14 节
   的追加也会改变绑定字节，协议修订是另一份文件加新的登记。**§5.2 的闸门、顺序与 issue 数都不变**；C 的登记
   仍未写出、前向窗口未开始、功效表仍是未运行。
+| 2026-11-13 | 修复轮 3（复审 N3）：把「登记为不可测时读数只作描述」从散文变成绑定报告的行为——`scripts/agent_report.py` 在 `register_untestable` 为真时打印 `descriptive (registered not_testable):` 结论、`one-sided p (descriptive, not a test)` 的单侧读数、不打印采纳规则块，并在 `--json` 里写 `reading: descriptive`；testable 登记的文本与措辞不变。另加一条真实 `_admit` 的晚间测试（抛掷仓库 + 子进程），覆盖提交时刻→锚点的接线。§5 的顺序、§5.2 的闸门与 issue 总数（254）不变。 |

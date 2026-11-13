@@ -8,7 +8,7 @@
 
 - 本批次做的是方案 C 的 BATCH 3（任务 3.1–3.6）：事件级功效计算、C 协议文档、C 登记写入器、链测试、C 报告命令、运行手册与文档波；外加用户 2026-11-12「按推荐」裁决的 `D1`、`D4`、`D5`、`D7`、`D8` 落地。
 - 实施计划是任务书，**不在版本库内**：`.superpowers/sdd/plan-c/plan.md`（BATCH 3 与 Global Constraints）与 `.superpowers/sdd/plan-c/batch3-brief.md`（用户的约束性裁决）。本文是它的版本化记录。
-- 代码在分支 `feat/v2-p7-c-batch-3` 上，**从 `879f420` 分出**（`879f420` 是批次 2 合入后的 main）。本批次 **6 个交付提交**（含 D5 采纳与共用接缝）：`85d3270`（D5 采纳、C 的伴随块读取器、`AGENT_SCRIPTS`、评估器的 dry-week 拒绝）、`40e27a5`（3.1 功效计算）、`f221fe7`（3.2 协议文档）、`4dc45b8`（3.3/3.4 登记写入器与链测试）、`5337512`（3.5 报告与 D7 干跑周），以及本文、路线图、决策链 §9、能力台账与运行手册所在的文档提交。**修复轮 2**（复审 `review-batch3-2.md` 的 N1/N2，见 §9）之后另有 9 个提交：`13c29b2`（共享的期望锚点规则 + 评估器测试）、`744be1e`（N1 功效侧：冻结 sd_between）、`507214a`（N1 写入器侧 + N2 已发布锚点拒绝）、`2dfbd8c`（N2 已登记晚间的第 1 步锚点检查）、`40752ab`（协议/运行手册的修复轮 2 文本）、`7dfff1f`（修复轮 2 记录 / §9 / 台账）、`ac93d4c`（共享锚点 helper 的格式化）、以及收尾核对轮的 2 个修复提交（行 sd 上限检查 + 缺失 panel 不被创建 + 本记录的更正）。**修复轮 1**（独立评审 `review-batch3-1.md` 的 9 条意见，见 §8）之后另有 5 个修复提交：`c469eb5`（F4/F9 功效模型）、`b3de60c`（F7 协议文档块读取器）、`b5c535c`（F3 写入器侧/F5/F7 登记写入器）、`98979a3`（F1/F2/F3 报告侧/F8 晚间命令与报告）、`3526f95`（协议/运行手册修复轮文本 + F6 的既有探针测试）。
+- 代码在分支 `feat/v2-p7-c-batch-3` 上，**从 `879f420` 分出**（`879f420` 是批次 2 合入后的 main）。本批次 **6 个交付提交**（含 D5 采纳与共用接缝）：`85d3270`（D5 采纳、C 的伴随块读取器、`AGENT_SCRIPTS`、评估器的 dry-week 拒绝）、`40e27a5`（3.1 功效计算）、`f221fe7`（3.2 协议文档）、`4dc45b8`（3.3/3.4 登记写入器与链测试）、`5337512`（3.5 报告与 D7 干跑周），以及本文、路线图、决策链 §9、能力台账与运行手册所在的文档提交。**修复轮 2**（复审 `review-batch3-2.md` 的 N1/N2，见 §9）之后另有 9 个提交：`13c29b2`（共享的期望锚点规则 + 评估器测试）、`744be1e`（N1 功效侧：冻结 sd_between）、`507214a`（N1 写入器侧 + N2 已发布锚点拒绝）、`2dfbd8c`（N2 已登记晚间的第 1 步锚点检查）、`40752ab`（协议/运行手册的修复轮 2 文本）、`7dfff1f`（修复轮 2 记录 / §9 / 台账）、`ac93d4c`（共享锚点 helper 的格式化）、以及收尾核对轮的 2 个修复提交（行 sd 上限检查 + 缺失 panel 不被创建 + 本记录的更正）。**修复轮 3**（复审 `review-batch3-3.md` 的 N3 与覆盖缺口，见 §10）之后另有 2 个代码/测试提交 `6cc60f8`（N3 描述性读数）、`40742d1`（真实 `_admit` 覆盖测试），以及本记录与协议/运行手册更新的文档提交。**修复轮 1**（独立评审 `review-batch3-1.md` 的 9 条意见，见 §8）之后另有 5 个修复提交：`c469eb5`（F4/F9 功效模型）、`b3de60c`（F7 协议文档块读取器）、`b5c535c`（F3 写入器侧/F5/F7 登记写入器）、`98979a3`（F1/F2/F3 报告侧/F8 晚间命令与报告）、`3526f95`（协议/运行手册修复轮文本 + F6 的既有探针测试）。
 - **未推送、未合并。** 全部测试跑在测试时生成的面板、抛掷 git 仓库、合成登记、构造的已存记录与脚本化传输上；pytest 的 socket 守卫全程开着。**没有任何真实数据、真实面板、真实模型**：`scripts/p7_c_power.py` 只在测试里对注入的读取器运行；`scripts/agent_report.py` 只对构造的已存记录运行；`agent_evening.py --dry-week` 只用脚本化传输。
 - **D5 已由用户采纳，PROVISIONAL 标签已移除**：批次 2 的评估器把 futility 形式与单侧读数标为 `PROVISIONAL pending D5`；用户 2026-11-12「按推荐」采纳后，本批次把它们改成 `adopted`（`AgentEvaluation.adopted`，`D5_WORDINGS`），**保留**其全部守卫（全部中期位置到期、按比例可测下限、sticky）。旧的「h1 ≥ 0.02 且 t ≥ 2，或 h5 ≥ 0.06」两检验措辞由决策链 §9 的**追加行**改写，旧行未动。
 - **没有任何 P7 登记存在**：`docs/research/p7-c-registration.json` 没有被写出；`docs/research/p7-registration.json`、`docs/research/p7-protocol.md`、`scripts/daily_selection.py`、`scripts/forward_report.py`、`scripts/p7_register.py` 与任何 `strategy_survivor_*` 模块的字节都没有被本批次改动（C 的晚间命令只 import `daily_selection` 的辅助函数；C 的报告与 Step 0 的周报是两个文件）。
@@ -193,7 +193,7 @@
 - **N1 的后果是设计层面的，不是缺陷**：冻结 0.15 之后，功效计算在任何真实面板上都会给出两行 `not_testable`（若观测/可测下限满足，reason 是 `detectable_above_threshold`；观测 < 20 时是 `too_few_observed_sessions`）。因此 L5 的实际路径是“登记为不可测的探索性候选（用户显式 `--register-untestable`）或干脆不登记”。协议/运行手册已按这个口径改写；这是**候选**登记，120 会话的读数只作描述，不当作一次检验的结论。
 - **保留的代码路径**：功效计算内部的 `event_power(sd_between=...)` 仍是测试专用参数（默认常量），因为判定逻辑仍要能被阈值测试覆盖；`power_report` 不接收 `sd_between`，操作者没有入口。写入器的 D1“n300/census testable”分支测试使用一份**假设的内部一致报告**（sd 0.02 → 可检出均值约 0.0045），因为冻结先验在真实面板上不可能产生 testable 行——分支逻辑仍需被钉住，原因写在测试 helper 的 docstring 里。
 - **N2 的共享规则**：`expected_forward_anchor` 由评估器模块拥有（两边 import，不复制逻辑）；晚间第 1 步用 Step 0 已存日历（只读，按已存分区取年）推导，若提交年份的日历不覆盖则按名拒绝（失败即关闭）。写入器只做“工作日 + 不早于今天 + 16:30 未过”，精确的“提交后第一个交易日”仍由晚间与报告用同一个函数核对；晚间在第 1 步就失败，因此错误锚点不会积累 120 个会话的记录。
-- **已知残留（记录，不在本轮修）**：评估器/报告在窗口成熟后仍会打印一次“primary test”与五值结论，即使登记的 power 块是 `not_testable` + `register_untestable=true`。本轮把“登记为不可测时读数只作描述”写成协议/运行手册的解释规则，而**没有**在代码里抑制或重标记这个输出；如果以后要让输出本身按登记状态改写措辞，那是另一次代码改动（应在 L5 之前或作为 L6 的前置决定）。
+- **已被修复轮 3 关闭的残留**：修复轮 2 时记录过“报告在窗口成熟后仍会打印 primary test 与五值结论，即使登记为 `not_testable`”；修复轮 3 的 N3 已让绑定报告在这种情况下只打印描述性读数（见 §10），因此该残留不再存在。
 - **协议文档的冻结语义**：§5.8/文件头新增：登记一经提交，协议文件的字节就被登记绑定（`agent_forward_protocol_document` 的 sha256），因此**提交之后连 §14 追加都会改变绑定字节**；登记后的修订 = 新文档 + 新登记。这条同时收紧了 F7 的边界。
 - **本轮没有改**：§5 的顺序、§5.2 的闸门、issue 总数（254）、D5 的检验规则（均值 > 0 且单侧 p ≤ 0.05）与窗口/中期/可测性数字；没有网络、没有真实数据、没有写出 C 的登记、没有发过任何模型请求。
 
@@ -215,3 +215,30 @@
 - 修复轮 2 触碰的五个测试文件一起（含收尾核对轮新增的 3 条硬化测试）：`tests/unit/scripts/test_p7_c_power.py`（27）、`test_p7_c_register.py`（74）、`test_agent_report.py`（27）、`test_agent_evening.py`（48）、`tests/integration/test_agent_incremental_ic.py`（49）：**225 passed**；收尾核对轮后另跑 `test_p7_c_register.py` + `test_agent_evening.py` + `test_documentation_tables.py`：**125 passed in 281.83s**。
 - `tests/unit/domain/test_contract_identity.py`（新增哈希站点审计；本轮 `src/` 无新 hashlib）与 `tests/unit/test_documentation_tables.py`（3 passed）按分派要求单独跑。
 - `ruff check .`、`ruff format --check .`（710 文件）、`mypy --cache-dir=/dev/null src scripts`（216 文件）、`PYTHONPATH=src lint-imports`（10 kept / 0 broken）、`scripts/verify_publication.py`（838 文件）、`scripts/build_feature_coverage.py --check`（244/239）在最终 tip 上跑；**串行全量闸门由控制者跑**（ed82255 上已绿：7433 passed；修复轮 2 的最终 tip 由控制者复跑）。本记录不把控制者的串行结果复制成自己的读数。
+
+## 10. 修复轮 3（复审 N3 与覆盖缺口）
+
+复审 `.superpowers/sdd/plan-c/review-batch3-3.md`（不入库）确认 N1/N2 全部关闭（含 revert 验证），但指出：**N3**（重要，必须在 L5 之前落地，因为 `scripts/agent_report.py` 在 `AGENT_SCRIPTS` 里、被登记绑定）——用户裁决的“登记为不可测时读数只作描述”只写在协议/运行手册里，绑定的报告在窗口成熟后仍会打印 `primary test`、`candidate_increment` / `no_increment_detected` 的通过/失败措辞与采纳规则块，等于由本该执行裁决的代码打印了裁决排除的读数；以及一条**覆盖缺口**（次要、非阻塞）——所有晚间测试都 monkeypatch 了 `_admit`，它从登记 settings/`committed_at` 推导锚点的接线从未被执行。
+
+| 项 | 修法 | 测试节点 |
+|---|---|---|
+| **N3**（重要，必须 L5 前） 绑定报告仍打印 `not_testable` 登记的通过/失败读数 | `scripts/agent_report.py` 现在读登记的 power 块：`register_untestable` 为真时（a）结论行前缀 **`descriptive (registered not_testable):`**，使用固定措辞，**不**出现 `passed at the registered level` / `did not pass at the registered level` / `candidate_increment` / `no_increment_detected` / `that is the test's answer`；（b）p 值行标注 **`one-sided p (descriptive, not a test)`**；（c）**不打印采纳规则块**（不把 D5 规则当作本报告的决定）；`--json` 增加 `"reading": "descriptive"`。testable 登记的打印文本**逐字节不变**，`--json` 的 `reading` 为 `"test"`。措辞仍不超过“候选/candidate” | `test_agent_report.py::test_a_register_untestable_registration_prints_a_descriptive_reading`、`::test_the_testable_path_keeps_the_registered_outcome_wording` |
+| **覆盖缺口**（次要） 真实 `_admit` 的锚点接线从未被执行 | 新增 `test_agent_evening.py::test_the_real_admission_derives_the_anchor_from_the_committed_registration`：把工作区的 `src`/`scripts` 与登记绑定的文件复制进抛掷 git 仓库（测试时生成，AGENTS.md 规则 6），先提交代码（`code_commit`），再提交真实的 Step 0 与 C 登记（C 的登记提交落在锚点会话 16:31）；测试时生成 Step 0 panel，用 `PYTHONPATH=<抛出仓库>/src` 在**子进程**里跑真实 `agent_evening`（不 monkeypatch `_admit`）——`admit_registered_code` 因此真实通过（登记已提交、绑定代码等于 `code_commit`、包与脚本从该仓库导入）。断言第 1 步按名拒绝（点名登记锚点、提交时刻、期望的下一个会话），零模型请求、零写入 | `test_agent_evening.py::test_the_real_admission_derives_the_anchor_from_the_committed_registration` |
+
+### 10.1 本轮的行为改变与记录
+
+- **N3 是“文本与代码一致性”的修复，不是新的研究判据**：用户 2026-11-13 的 N1 裁决已经规定 `not_testable` 登记是探索性候选、120 会话读数是描述性的；本轮让被登记的脚本真的这样打印。登记为 `not_testable` 时报告不再给出任何通过/失败、候选增量/无增量的措辞，也不把 D5 规则当作决定；`--json` 的 `reading` 让下游能区分两种读数。已登记的检验规则本身不变。
+- **testable 路径不变**：报告对 `testable` 登记的打印文本与之前完全相同（测试断言 `primary test` 行、`candidate_increment:` 固定措辞、`passed at the registered level` 仍在），只是 `--json` 多了 `reading: test` 字段；这是 N3 明确要求的“unchanged otherwise”。
+- **覆盖测试的做法与边界**：真实 `_admit` 不能在测试进程里通过（包必须从被登记的那个仓库导入，而测试进程从本 worktree 导入），所以测试复制一份抛掷仓库并在子进程里跑真实脚本。它不碰网络（拒绝发生在任何 provider 之前，且子进程注入的 transport 一旦被调用就抛错），不改 Step 0 数据（快照断言），也不创建运行目录（断言不存在）。这条测试是覆盖缺口的一对一修补，不是对实现的替身。
+- **文档**：协议 §6.2.3 增加一段，说明绑定报告如何执行描述性读数（结论前缀、p 值标注、不打印采纳块、`--json` 的 `reading`），并在 §14 追加一条修复轮 3 记录（只追加）；运行手册 L6 同步说明；§9 决策链没有新增行（N3 是 N1 裁决的实现，不改判据/顺序/闸门；§9 仍保持只追加、旧行未动）。
+- **本轮没有改**：§5 的顺序、§5.2 的闸门、issue 总数（254）、D5 的检验规则与 N1 的冻结 `sd_between`；没有网络、没有真实数据、没有写出 C 的登记、没有发过任何模型请求。
+
+### 10.2 本轮 TDD 首红
+
+- **N3**：先写两条测试（描述性 / testable 不变），暂时 stash `scripts/agent_report.py` 的修复后跑：**2 failed**，原因是旧报告没有 `reading` 键（`KeyError: 'reading'`）且打印了通过/失败措辞；恢复修复后 **29 passed**。
+- **覆盖测试**：这是覆盖缺口的补钉（对应行为在修复轮 2 已实现），不是新行为；它的价值由“真实 admission 路径被执行”证明——测试在抛掷仓库里真实通过 `admit_registered_code` 并观察到第 1 步拒绝；若 `_admit` 的 `registration_committed_at`/`registered_anchor` 接线被改成 `None`，第 1 步会以“登记没有 commit time/anchor”的失败关闭拒绝（测试会因期望的会话名缺失而红），这与评审说的“fail closed, not silent”一致。
+
+### 10.3 修复轮 3 之后跑过的门槛（定向；不跑目录级/全量）
+
+- 触碰的测试文件：`tests/unit/scripts/test_agent_report.py`（29）、`tests/unit/scripts/test_agent_evening.py`（49）——一起跑 **78 passed**；`tests/unit/domain/test_contract_identity.py`（44）与 `tests/unit/test_documentation_tables.py`（3）单独跑通过。
+- `ruff check .`、`ruff format --check .`、`mypy --cache-dir=/dev/null src scripts`、`PYTHONPATH=src lint-imports`、`scripts/verify_publication.py`、`scripts/build_feature_coverage.py --check` 在最终 tip 上跑；**串行全量闸门由控制者跑**（本记录不复制控制者的读数）。
