@@ -20,10 +20,12 @@ import dataclasses
 import hashlib
 import importlib
 import json
+import math
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 import pytest
 import research_repo
@@ -48,11 +50,17 @@ power = _script("p7_c_power")
 registry = _script("registry")
 
 from openalpha_cn import strategy_agent_evaluation as evaluation  # noqa: E402
+from openalpha_cn.domain.incremental_ic import detectable_mean  # noqa: E402
 from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH  # noqa: E402
 
 TODAY: Final[date] = date(2026, 11, 12)
-"""A Thursday: the writer's "today", pinned so the anchor bounds do not read the wall clock."""
-VALID_ANCHOR: Final[date] = date(2026, 11, 12)
+"""A Thursday: the writer's Shanghai calendar day, pinned so the anchor bounds do not read
+the wall clock."""
+NOW: Final[datetime] = datetime(2026, 11, 12, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+"""The pinned write-time clock, 20:00 Shanghai: today's 16:30 publication has already passed,
+so today can never be C's anchor (fix round 2, N2)."""
+VALID_ANCHOR: Final[date] = date(2026, 11, 13)
+"""A Friday: the next trading session after the pinned write clock."""
 SALT: Final[str] = "c-plan-2026-sample"
 STEP0: Final[str] = "docs/research/p7-registration.json"
 C_REGISTRATION: Final[str] = "docs/research/p7-c-registration.json"
@@ -359,7 +367,24 @@ def _commit_another_kind(repo: Path) -> str:
     return path
 
 
+def _session_sd(scored_names: int) -> float:
+    """The calculator's own row sd: `min(1, sqrt(0.15**2 + 1/(n-1)))` (fix round 1, F4)."""
+    if scored_names <= 1:
+        return 1.0
+    return min(1.0, math.sqrt(power.PLANNING_SD_BETWEEN**2 + 1.0 / (scored_names - 1)))
+
+
+def _design_detectable(sd: float, periods: int) -> float:
+    """The calculator's own detectable mean at the adopted level and power, capped at 1."""
+    return min(detectable_mean(sd=sd, periods=periods, level=0.05, power=0.8), 1.0)
+
+
 def _row(**overrides: Any) -> dict[str, Any]:
+    """A row the calculator itself could have written (fix round 2): its sd is the two-component
+    session sd from the scored count, its detectable mean is recomputed from that sd and its
+    periods, and its verdict is the one those fields support. Under the frozen 0.15 planning sd
+    this row is `not_testable` (N1); the D1 branch tests below use `_testable_row` for a
+    hypothetical design whose detector reaches the 0.02 threshold."""
     row: dict[str, Any] = {
         "sample": "n300",
         "sample_size": 300,
@@ -368,27 +393,75 @@ def _row(**overrides: Any) -> dict[str, Any]:
         "projected_scored_names": 18,
         "measurable_sessions": 72,
         "periods": 72,
-        "sd": 0.12,
-        "detectable_mean": 0.015,
-        "detectable_threshold": 0.02,
-        "reason": None,
-        "verdict": "testable",
     }
     row.update(overrides)
+    scored = row["projected_scored_names"]
+    if "sd" not in overrides:
+        row["sd"] = _session_sd(scored) if isinstance(scored, int) else None
+    sd = row["sd"]
+    periods = row["periods"]
+    if "detectable_mean" not in overrides:
+        row["detectable_mean"] = (
+            _design_detectable(float(sd), periods)
+            if isinstance(sd, int | float)
+            and not isinstance(sd, bool)
+            and float(sd) > 0
+            and isinstance(periods, int)
+            and not isinstance(periods, bool)
+            and periods >= 2
+            else None
+        )
+    row.setdefault("detectable_threshold", 0.02)
+    row.setdefault("reason", None)
+    if "verdict" not in overrides:
+        row["verdict"] = (
+            "testable"
+            if row["observed_sessions"] >= 20
+            and row["measurable_sessions"] >= 60
+            and row["detectable_mean"] is not None
+            and row["detectable_mean"] <= 0.02
+            else "not_testable"
+        )
     return row
 
 
 def _census_row(**overrides: Any) -> dict[str, Any]:
-    row: dict[str, Any] = _row(
-        sample="census",
-        sample_size=None,
-        projected_scored_names=118,
-        measurable_sessions=118,
-        periods=118,
-        detectable_mean=0.012,
-    )
-    row.update(overrides)
-    return row
+    fields: dict[str, Any] = {
+        "sample": "census",
+        "sample_size": None,
+        "projected_scored_names": 118,
+        "measurable_sessions": 118,
+        "periods": 118,
+    }
+    fields.update(overrides)
+    return _row(**fields)
+
+
+def _testable_row(**overrides: Any) -> dict[str, Any]:
+    """A hypothetical design whose detector reaches 0.02: the frozen 0.15 planning sd cannot
+    produce it (N1), but the writer's D1 branches must still be tested on a consistent report."""
+    fields: dict[str, Any] = {
+        "sd": 0.02,
+        "periods": 120,
+        "measurable_sessions": 118,
+        "detectable_mean": _design_detectable(0.02, 120),
+    }
+    fields.update(overrides)
+    return _row(**fields)
+
+
+def _testable_census_row(**overrides: Any) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "sample": "census",
+        "sample_size": None,
+        "projected_scored_names": 118,
+        "measurable_sessions": 118,
+        "periods": 118,
+        "sd": 0.02,
+        "detectable_mean": _design_detectable(0.02, 118),
+    }
+    fields.update(overrides)
+    return _row(**fields)
 
 
 def _planning(**overrides: Any) -> dict[str, Any]:
@@ -402,8 +475,8 @@ def _planning(**overrides: Any) -> dict[str, Any]:
         "min_measurable_sessions": 60,
         "detectable_mean_threshold": 0.02,
         "min_observed_sessions": 20,
-        "sd_between": 0.15,
-        "abstention_rate": 0.05,
+        "sd_between": power.PLANNING_SD_BETWEEN,
+        "abstention_rate": power.PLANNING_ABSTENTION_RATE,
     }
     planning.update(overrides)
     return planning
@@ -455,16 +528,16 @@ def _pin_world(
     monkeypatch: pytest.MonkeyPatch,
     repo: Path,
     *,
-    today: date = TODAY,
+    now: datetime = NOW,
     verified: bool = True,
 ) -> None:
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(register, "_today", lambda: today)
+    monkeypatch.setattr(register, "_now", lambda: now)
     if verified:
         monkeypatch.setattr(
             register,
             "DEEPSEEK_V4_1_FLASH",
-            dataclasses.replace(DEEPSEEK_V4_1_FLASH, verified_on=today),
+            dataclasses.replace(DEEPSEEK_V4_1_FLASH, verified_on=now.date()),
         )
 
 
@@ -528,7 +601,7 @@ def _success(
     capsys: pytest.CaptureFixture[str],
     *,
     rows: dict[str, Any] | None = None,
-    register_untestable: bool = False,
+    register_untestable: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
@@ -548,7 +621,7 @@ def test_dry_run_writes_nothing_and_prints_the_canonical_document(
     power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
     before_status, before_files = _status(repo), _files(repo)
 
-    code, out, err = _run(capsys, *_arguments(power=power, dry_run=True))
+    code, out, err = _run(capsys, *_arguments(power=power, dry_run=True, register_untestable=True))
 
     assert code == 0, err
     document = json.loads(out.split("config_id ")[0])
@@ -575,7 +648,9 @@ def test_a_relative_power_report_resolves_against_the_repository(
     _pin_world(monkeypatch, repo)
     _power_report(repo / "docs/research/p7-c-power.json", step0=_committed_step_zero(repo))
 
-    code, _, err = _run(capsys, *_arguments(power=Path("docs/research/p7-c-power.json")))
+    code, _, err = _run(
+        capsys, *_arguments(power=Path("docs/research/p7-c-power.json"), register_untestable=True)
+    )
 
     assert code == 0, err
     assert (repo / C_REGISTRATION).is_file()
@@ -590,11 +665,11 @@ def test_writes_once_never_commits_and_the_bytes_are_the_printed_digest(
     commits = research_repo.git(repo, "rev-list", "--count", "HEAD").strip()
     before = _status(repo)
 
-    dry = _run(capsys, *_arguments(power=power, dry_run=True))
+    dry = _run(capsys, *_arguments(power=power, dry_run=True, register_untestable=True))
     assert dry[0] == 0, dry[2]
     digest = _printed_digest(dry[1])
 
-    code, out, err = _run(capsys, *_arguments(power=power))
+    code, out, err = _run(capsys, *_arguments(power=power, register_untestable=True))
     assert code == 0, err
     content = (repo / C_REGISTRATION).read_bytes()
     assert hashlib.sha256(content).hexdigest() == digest
@@ -604,7 +679,7 @@ def test_writes_once_never_commits_and_the_bytes_are_the_printed_digest(
     assert set(after.splitlines()) - set(before.splitlines()) == {f"?? {C_REGISTRATION}"}
     assert research_repo.git(repo, "rev-list", "--count", "HEAD").strip() == commits
 
-    again = _run(capsys, *_arguments(power=power))
+    again = _run(capsys, *_arguments(power=power, register_untestable=True))
     assert again[0] == 0, again[2]
     assert digest in again[1]
     assert (repo / C_REGISTRATION).read_bytes() == content
@@ -646,8 +721,10 @@ def test_the_written_document_reads_back_with_every_companion_block(
 
     power = evaluation.read_agent_forward_power(settings)
     assert power.sample == "n300"
-    assert power.verdict == "testable"
-    assert power.register_untestable is False
+    assert power.verdict == "not_testable"
+    assert power.register_untestable is True
+    assert power.measurable_sessions == 72
+    assert power.detectable_mean == _design_detectable(_session_sd(18), 72)
 
     step0 = evaluation.read_agent_forward_step0(settings)
     assert step0.path == STEP0
@@ -681,7 +758,7 @@ def test_code_commit_is_head_passed_explicitly(
 
     monkeypatch.setattr(registry, "register", recording)
 
-    code, _, err = _run(capsys, *_arguments(power=power))
+    code, _, err = _run(capsys, *_arguments(power=power, register_untestable=True))
 
     assert code == 0, err
     assert captures == [research_repo.head(repo)]
@@ -696,8 +773,10 @@ def test_selects_n300_when_it_is_testable(
 ) -> None:
     power_path = tmp_path / "p7-c-power.json"
     rows = {
-        "n300": _row(verdict="testable", measurable_sessions=72, detectable_mean=0.015),
-        "census": _census_row(verdict="testable", measurable_sessions=118, detectable_mean=0.012),
+        "n300": _testable_row(
+            measurable_sessions=118, detectable_mean=_design_detectable(0.02, 120)
+        ),
+        "census": _testable_census_row(),
     }
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
@@ -712,8 +791,8 @@ def test_selects_n300_when_it_is_testable(
     assert block["sample"] == "n300"
     assert block["verdict"] == "testable"
     assert block["register_untestable"] is False
-    assert block["measurable_sessions"] == 72
-    assert block["detectable_mean"] == 0.015
+    assert block["measurable_sessions"] == 118
+    assert block["detectable_mean"] == _design_detectable(0.02, 120)
     assert block["report_sha256"] == hashlib.sha256(power_path.read_bytes()).hexdigest()
 
 
@@ -722,10 +801,10 @@ def test_falls_back_to_the_census_when_only_it_is_testable(
 ) -> None:
     power_path = tmp_path / "p7-c-power.json"
     rows = {
-        "n300": _row(verdict="not_testable", measurable_sessions=12, detectable_mean=None),
-        "census": _census_row(verdict="testable", measurable_sessions=118, detectable_mean=0.012),
+        "n300": _row(),
+        "census": _testable_census_row(),
     }
-    _repo, document = _success(tmp_path, monkeypatch, capsys, rows=rows)
+    _repo, document = _success(tmp_path, monkeypatch, capsys, rows=rows, register_untestable=False)
 
     assert document["config"]["primary_size"] == register.CENSUS_DRAW_SIZE
     block = document["settings"][evaluation.AGENT_FORWARD_POWER_KEY]
@@ -733,7 +812,7 @@ def test_falls_back_to_the_census_when_only_it_is_testable(
     assert block["verdict"] == "testable"
     assert block["register_untestable"] is False
     assert block["measurable_sessions"] == 118
-    assert block["detectable_mean"] == 0.012
+    assert block["detectable_mean"] == _design_detectable(0.02, 118)
     assert block["report_sha256"] == hashlib.sha256(power_path.read_bytes()).hexdigest()
 
 
@@ -742,14 +821,7 @@ def test_both_untestable_refuses_and_names_the_users_unmade_choice(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(
-        tmp_path / "p7-c-power.json",
-        step0=_committed_step_zero(repo),
-        rows={
-            "n300": _row(verdict="not_testable", detectable_mean=None),
-            "census": _census_row(verdict="not_testable", detectable_mean=None),
-        },
-    )
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
     code, _, err = _run(capsys, *_arguments(power=power))
 
@@ -763,29 +835,22 @@ def test_both_untestable_refuses_and_names_the_users_unmade_choice(
 def test_register_untestable_writes_a_not_testable_registration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    rows = {
-        "n300": _row(verdict="not_testable", measurable_sessions=12, detectable_mean=None),
-        "census": _census_row(verdict="not_testable", detectable_mean=None),
-    }
-    _repo, document = _success(tmp_path, monkeypatch, capsys, rows=rows, register_untestable=True)
+    _repo, document = _success(tmp_path, monkeypatch, capsys, register_untestable=True)
 
     assert document["config"]["primary_size"] == register.PRIMARY_SIZE
     block = document["settings"][evaluation.AGENT_FORWARD_POWER_KEY]
     assert block["sample"] == "n300"
     assert block["verdict"] == "not_testable"
     assert block["register_untestable"] is True
-    assert block["measurable_sessions"] == 12
-    assert block["detectable_mean"] is None
+    assert block["measurable_sessions"] == 72
+    assert block["detectable_mean"] == _design_detectable(_session_sd(18), 72)
 
 
 @pytest.mark.parametrize(
     "rows",
     [
-        {"n300": _row(verdict="testable", detectable_mean=0.015), "census": _census_row()},
-        {
-            "n300": _row(verdict="not_testable", detectable_mean=None),
-            "census": _census_row(verdict="testable", detectable_mean=0.012),
-        },
+        {"n300": _testable_row(), "census": _testable_census_row()},
+        {"n300": _row(), "census": _testable_census_row()},
     ],
 )
 def test_register_untestable_is_refused_when_the_chosen_set_is_testable(
@@ -828,12 +893,15 @@ def test_a_missing_or_malformed_power_report_is_refused(
     bad_count = _power_report(
         tmp_path / "count.json",
         step0=step0,
-        rows={"n300": _row(measurable_sessions="seventy"), "census": _census_row()},
+        rows={
+            "n300": _row(measurable_sessions="seventy", verdict="testable"),
+            "census": _census_row(),
+        },
     )
     bad_mean = _power_report(
         tmp_path / "mean.json",
         step0=step0,
-        rows={"n300": _row(detectable_mean="low"), "census": _census_row()},
+        rows={"n300": _row(detectable_mean="low", verdict="testable"), "census": _census_row()},
     )
 
     for path in (
@@ -943,11 +1011,45 @@ def test_a_future_weekday_anchor_is_accepted(
     power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
     future = date(2026, 11, 13)  # a Friday, the session after today
 
-    code, _, err = _run(capsys, *_arguments(power=power, anchor=future))
+    code, _, err = _run(capsys, *_arguments(power=power, anchor=future, register_untestable=True))
 
     assert code == 0, err
     anchor = _written(repo)["settings"][evaluation.AGENT_FORWARD_ANCHOR_KEY]
     assert anchor["session"] == future.isoformat()
+
+
+def test_refuses_an_anchor_whose_publication_instant_has_already_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N2: the commit can only come after the write, so an anchor already published at write
+    time is certain to precede it; fail on day 1, not at L6."""
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)  # 20:00 Shanghai: today's 16:30 has passed
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
+
+    code, _, err = _run(capsys, *_arguments(power=power, anchor=TODAY))
+
+    assert code == 2
+    assert "publication" in err.lower()
+    assert not (repo / C_REGISTRATION).exists()
+
+
+def test_a_todays_anchor_is_accepted_before_its_publication_instant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N2's boundary: at 10:00 today's 16:30 has not published, so today may anchor; a commit
+    landing after 16:30 is the report's exact check, not this writer's."""
+    repo = _repository(tmp_path)
+    _pin_world(
+        monkeypatch, repo, now=datetime(2026, 11, 12, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
+
+    code, _, err = _run(capsys, *_arguments(power=power, anchor=TODAY, register_untestable=True))
+
+    assert code == 0, err
+    anchor = _written(repo)["settings"][evaluation.AGENT_FORWARD_ANCHOR_KEY]
+    assert anchor["session"] == TODAY.isoformat()
 
 
 @pytest.mark.parametrize(
@@ -1004,7 +1106,7 @@ def test_refuses_an_existing_path_with_other_content(
     (repo / C_REGISTRATION).write_text("{}\n", encoding="utf-8")
     power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
-    code, _, err = _run(capsys, *_arguments(power=power))
+    code, _, err = _run(capsys, *_arguments(power=power, register_untestable=True))
 
     assert code == 2
     assert "different registration" in err
@@ -1159,15 +1261,81 @@ def test_refuses_a_power_report_without_the_planning_block_or_its_dispersion(
     assert not (repo / C_REGISTRATION).exists()
 
 
+@pytest.mark.parametrize("sd_between", [0.149, 0.151])
+def test_refuses_a_power_report_whose_sd_between_is_not_the_frozen_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    sd_between: float,
+) -> None:
+    """N1: the planning sd is the calculator's frozen constant, not an operator knob."""
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    power = _power_report(
+        tmp_path / "p7-c-power.json",
+        step0=_committed_step_zero(repo),
+        planning=_planning(sd_between=sd_between),
+    )
+
+    code, _, err = _run(capsys, *_arguments(power=power))
+
+    assert code == 2
+    assert "sd_between" in err.lower()
+    assert not (repo / C_REGISTRATION).exists()
+
+
+@pytest.mark.parametrize("abstention_rate", [1.0, -0.01])
+def test_refuses_a_power_report_whose_abstention_rate_is_not_a_fraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    abstention_rate: float,
+) -> None:
+    """N1: the abstention rate is a fraction in [0, 1), as the calculator's own bound says."""
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    power = _power_report(
+        tmp_path / "p7-c-power.json",
+        step0=_committed_step_zero(repo),
+        planning=_planning(abstention_rate=abstention_rate),
+    )
+
+    code, _, err = _run(capsys, *_arguments(power=power))
+
+    assert code == 2
+    assert "abstention" in err.lower()
+    assert not (repo / C_REGISTRATION).exists()
+
+
+def test_refuses_a_power_row_whose_detectable_mean_is_not_its_own_design(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N1: the detectable mean is recomputed from the row's sd and periods, never trusted."""
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    row = _row()
+    row["detectable_mean"] = 0.001
+    row["verdict"] = "testable"
+    power = _power_report(
+        tmp_path / "p7-c-power.json",
+        step0=_committed_step_zero(repo),
+        rows={"n300": row, "census": _census_row()},
+    )
+
+    code, _, err = _run(capsys, *_arguments(power=power))
+
+    assert code == 2
+    assert "detectable_mean" in err.lower()
+    assert not (repo / C_REGISTRATION).exists()
+
+
 @pytest.mark.parametrize(
     "row",
     [
-        _row(verdict="not_testable"),
-        _row(detectable_mean=0.03),
-        _row(observed_sessions=5),
-        _row(measurable_sessions=30),
-        _row(detectable_mean=None),
-        _row(detectable_mean=0.015, verdict="not_testable"),
+        _row(verdict="testable"),  # its own fields say not_testable
+        _row(observed_sessions=5, verdict="testable"),  # below the observed floor
+        _row(measurable_sessions=30, verdict="testable"),  # below the measurable floor
+        _testable_row(verdict="not_testable"),  # its own fields say testable
     ],
 )
 def test_refuses_a_power_row_whose_verdict_its_own_fields_do_not_support(
@@ -1224,7 +1392,7 @@ def test_a_digest_mismatch_removes_the_file_it_just_wrote(
     power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
     monkeypatch.setattr(register, "_document", lambda *arguments, **keywords: b"{}\n")
 
-    code, _, err = _run(capsys, *_arguments(power=power))
+    code, _, err = _run(capsys, *_arguments(power=power, register_untestable=True))
 
     assert code == 2
     assert "digest" in err
@@ -1244,7 +1412,7 @@ def test_another_registration_error_is_its_own_refusal(
 
     monkeypatch.setattr(registry, "register", refuse)
 
-    code, _, err = _run(capsys, *_arguments(power=power))
+    code, _, err = _run(capsys, *_arguments(power=power, register_untestable=True))
 
     assert code == 2
     assert "the registry said no" in err
@@ -1498,7 +1666,7 @@ def test_accepts_a_power_report_whose_source_path_is_absolute(
     source = {**_source(step0), "step0_registration": str((repo / STEP0).resolve())}
     power_report = _power_report(tmp_path / "p7-c-power.json", step0=step0, source=source)
 
-    code, _, err = _run(capsys, *_arguments(power=power_report))
+    code, _, err = _run(capsys, *_arguments(power=power_report, register_untestable=True))
 
     assert code == 0, err
     assert (repo / C_REGISTRATION).is_file()
@@ -1541,4 +1709,41 @@ def test_the_frozen_power_calculators_own_report_is_accepted(
     assert block["register_untestable"] is True
     assert block["measurable_sessions"] == 0
     assert block["detectable_mean"] is None
+    assert block["report_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_the_frozen_power_calculators_projected_report_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Cross-track N1: the calculator's own projected rows (with sd, periods, detectable and a
+    capped threshold verdict) are recomputed by the writer, not trusted, and still accepted."""
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    step0 = _committed_step_zero(repo)
+    first = date(2026, 1, 5)
+    counts = tuple(
+        power.SessionCount(session=first + timedelta(days=offset), survivors=2000, event_names=400)
+        for offset in range(30)
+    )
+    document = power.power_report(
+        counts, first=counts[0].session, last=counts[-1].session, source=_source(step0)
+    )
+    assert document["rows"]["n300"]["verdict"] == "not_testable"
+    assert document["rows"]["census"]["verdict"] == "not_testable"
+    path = tmp_path / "p7-c-power.json"
+    path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+    refused, _, err = _run(capsys, *_arguments(power=path))
+    assert refused == 2
+    assert "not_testable" in err
+
+    code, _, err = _run(capsys, *_arguments(power=path, register_untestable=True))
+    assert code == 0, err
+    block = _written(repo)["settings"][evaluation.AGENT_FORWARD_POWER_KEY]
+    row = document["rows"]["n300"]
+    assert block["sample"] == "n300"
+    assert block["verdict"] == "not_testable"
+    assert block["register_untestable"] is True
+    assert block["measurable_sessions"] == row["measurable_sessions"]
+    assert block["detectable_mean"] == row["detectable_mean"]
     assert block["report_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()

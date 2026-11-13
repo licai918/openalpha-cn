@@ -46,6 +46,14 @@ way to write that registration is the explicit `--register-untestable`, which th
 `--register-untestable` with a testable chosen set is refused in the other direction. The
 detectable mean is design information; D1 ruled no effect-size threshold.
 
+Fix round 2, N1: the planning values the decision was computed under are not the operator's to
+choose at L5. The report's `planning.sd_between` must equal the calculator's own frozen
+`PLANNING_SD_BETWEEN` (0.15), its abstention rate must be a fraction in [0, 1), and each row's
+`detectable_mean` is **recomputed** from that row's `sd` and `periods` (at the registered level and
+target power, capped at 1 as the calculator caps it) and refused on any mismatch. Under the frozen
+sd both rows are `not_testable` for every panel, so D1's real outcome is "register as not testable
+or do not register"; that is the user's L5 choice, and the writer records it.
+
 ## The signature deviation from the plan's sketch
 
 Plan C task 3.3 sketched `c_registration_body(*, salt, step0_registration)`; the body also needs
@@ -62,11 +70,13 @@ constructor is
   (`domain.agent_forward.refuse_a_salt_tied_to_the_book`), re-checked at read-back;
 - Step 0's registration absent, uncommitted, edited after its commit, or of another `config.kind`;
 - a missing or malformed power report, one that does not name this Step 0 registration or not the
-  adopted planning floors, a row whose verdict its own fields do not support, and both rows
+  adopted planning floors (including the frozen `sd_between` and an abstention rate in [0, 1)),
+  a row whose verdict or detectable mean its own fields do not support, and both rows
   `not_testable` without the user's flag (or the flag with a testable chosen set);
-- an anchor that is a weekend or before today (Shanghai): the anchor is the first trading session
-  strictly after C's registration commit's time, the writer can only check weekday and
-  not-before-today, and the report checks the exact session against the commit's calendar;
+- an anchor that is a weekend, before today (Shanghai), or whose 16:30 publication instant has
+  already passed at write time (N2: the commit can only come later, so that anchor is certain to
+  precede it); the anchor is the first trading session strictly after C's registration commit's
+  time, and the report checks the exact session against the commit's calendar;
 - an uncommitted, dirty or edited protocol document (F7: the registration freezes its committed
   bytes), and a path outside `docs/research/*.json`;
 - an uncommitted bound tree (`registry.REGISTERED_PATHS`, `AGENT_SCRIPTS` and the protocol text);
@@ -117,6 +127,7 @@ for _root in (_SCRIPTS, _SCRIPTS / "research"):
 
 import agent_evening  # noqa: E402
 import grid  # noqa: E402
+import p7_c_power  # noqa: E402
 import p7_register  # noqa: E402
 import registry  # noqa: E402
 
@@ -125,7 +136,9 @@ from openalpha_cn.domain.agent_forward import (  # noqa: E402
     AGENT_LLM_FAMILY,
     refuse_a_salt_tied_to_the_book,
 )
+from openalpha_cn.domain.incremental_ic import detectable_mean  # noqa: E402
 from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH  # noqa: E402
+from openalpha_cn.panel_ingest import session_publication_instant  # noqa: E402
 from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
     ADOPTED_INTERIM_SESSION,
     ADOPTED_LEVEL,
@@ -177,8 +190,10 @@ POWER_PLANNING: Final[dict[str, object]] = {
     "target_power": DETECTABLE_AT_POWER,
     "detectable_mean_threshold": POWER_DETECTABLE_MEAN_THRESHOLD,
     "min_observed_sessions": POWER_MIN_OBSERVED_SESSIONS,
+    "sd_between": p7_c_power.PLANNING_SD_BETWEEN,
 }
-"""The plan a `--power-report` must carry for D1 to decide C's sample (fix round 1, F5)."""
+"""The plan a `--power-report` must carry for D1 to decide C's sample (fix round 1, F5; the
+planning sd is frozen at the power calculator's own constant by fix round 2, N1)."""
 C_SCRIPTS: Final[tuple[str, ...]] = AGENT_SCRIPTS
 """C's two shipped scripts, one spelling with `strategy_agent_forward.AGENT_SCRIPTS`: the
 registration writer, the evening command's admission and the report all bind the same pair."""
@@ -503,10 +518,12 @@ class _PowerRow:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _PowerPlan:
-    """The two planning floors a row's verdict is recomputed under (fix round 1, F5)."""
+    """The planning values a row's verdict and detectable mean are recomputed under."""
 
     min_observed_sessions: int
     min_measurable_sessions: int
+    level: float
+    power: float
 
 
 def _is_iso_date(value: object) -> bool:
@@ -587,10 +604,46 @@ def _power_row(
             f"the power report {path}'s {label!r} row projected_scored_names is {projected!r}, "
             "not a non-negative integer or null"
         )
-    _finite_number(block.get("sd"), field="sd", label=label, path=path)
+    sd = _finite_number(block.get("sd"), field="sd", label=label, path=path)
+    if sd is not None and sd <= 0:
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row sd is {sd!r}, not a positive number; the "
+            "calculator's session sd has a positive planning part"
+        )
     mean = _finite_number(
         block.get("detectable_mean"), field="detectable_mean", label=label, path=path
     )
+    periods = counts["periods"]
+    recomputed: float | None = None
+    if sd is not None and periods >= 2:
+        try:
+            recomputed = min(
+                detectable_mean(sd=sd, periods=periods, level=planning.level, power=planning.power),
+                1.0,
+            )
+        except ValueError as error:
+            raise PowerReportRefusedError(
+                f"the power report {path}'s {label!r} row sd/periods do not form a design: {error}"
+            ) from error
+    if mean is None:
+        if recomputed is not None:
+            raise PowerReportRefusedError(
+                f"the power report {path}'s {label!r} row detectable_mean is null but its own sd "
+                f"{sd!r} and periods {periods} give {recomputed!r}; the field is recomputed from "
+                "the row, never trusted"
+            )
+    elif recomputed is None:
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row detectable_mean is {mean!r} but the row has "
+            f"no positive sd and at least two periods (sd {sd!r}, periods {periods}) to recompute "
+            "it from"
+        )
+    elif not math.isclose(mean, recomputed, rel_tol=1e-9, abs_tol=1e-12):
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row detectable_mean is {mean!r}, not the "
+            f"{recomputed!r} its own sd {sd!r} and periods {periods} give (fix round 2, N1: the "
+            "mean is recomputed, never trusted)"
+        )
     threshold = _finite_number(
         block.get("detectable_threshold"),
         field="detectable_threshold",
@@ -636,7 +689,7 @@ def _power_row(
 
 
 def _power_planning(document: Mapping[str, object], *, path: Path) -> _PowerPlan:
-    """The report's planning object, held to the adopted D1 plan (fix round 1, F5)."""
+    """The report's planning object, held to the adopted D1 plan (F5; frozen sd N1)."""
     planning = document.get("planning")
     if not isinstance(planning, Mapping):
         raise PowerReportRefusedError(
@@ -650,28 +703,26 @@ def _power_planning(document: Mapping[str, object], *, path: Path) -> _PowerPlan
                 f"the power report {path}'s planning.{key} is {value!r}, not the adopted "
                 f"{expected!r}"
             )
-    assumptions: dict[str, float] = {}
-    for key in ("sd_between", "abstention_rate"):
-        value = planning.get(key)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int | float)
-            or not math.isfinite(value)
-        ):
-            raise PowerReportRefusedError(
-                f"the power report {path}'s planning.{key} is {value!r}, not a finite number; "
-                "the planning model's dispersion and abstention assumptions are reported, not "
-                "defaulted"
-            )
-        assumptions[key] = float(value)
-    if not 0 <= assumptions["abstention_rate"] <= 1:
+    abstention = planning.get("abstention_rate")
+    if (
+        isinstance(abstention, bool)
+        or not isinstance(abstention, int | float)
+        or not math.isfinite(abstention)
+    ):
         raise PowerReportRefusedError(
-            f"the power report {path}'s planning.abstention_rate is "
-            f"{assumptions['abstention_rate']!r}, not a fraction between 0 and 1"
+            f"the power report {path}'s planning.abstention_rate is {abstention!r}, not a finite "
+            "number; the projection's abstention assumption is reported, not defaulted"
+        )
+    if not 0 <= abstention < 1:
+        raise PowerReportRefusedError(
+            f"the power report {path}'s planning.abstention_rate is {abstention!r}, not a fraction "
+            "in [0, 1): the calculator's own bound"
         )
     return _PowerPlan(
         min_observed_sessions=POWER_MIN_OBSERVED_SESSIONS,
         min_measurable_sessions=ADOPTED_MIN_MEASURABLE_SESSIONS,
+        level=ADOPTED_LEVEL,
+        power=DETECTABLE_AT_POWER,
     )
 
 
@@ -1018,9 +1069,9 @@ def c_read_back(
 # --- the command line's own refusals ------------------------------------------------------------
 
 
-def _today() -> date:
-    """Today on the Shanghai calendar: the anchor is a Shanghai session date."""
-    return datetime.now(_SHANGHAI).date()
+def _now() -> datetime:
+    """The write-time clock, aware in Shanghai: the anchor's 16:30 must still be ahead of it."""
+    return datetime.now(_SHANGHAI)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -1168,15 +1219,18 @@ def _checked_path(repo: Path, value: str) -> Path:
     return resolved
 
 
-def _checked_anchor(anchor: date, today: date) -> date:
-    """The registered first forward session: a weekday, and not before today.
+def _checked_anchor(anchor: date, now: datetime) -> date:
+    """The registered first forward session: a weekday, not before today, not yet published.
 
     Fix round 1, F3: the anchor is the first trading session **strictly after** C's registration
-    commit's time, so a future weekday is the ordinary case (the registration is written before
-    the window starts), not a refusal. The writer can only check that it is a weekday and not
-    before today (Shanghai); the report checks the exact session against the registration
-    commit's trading calendar.
+    commit's time, so a future weekday is the ordinary case, not a refusal. Fix round 2, N2: the
+    commit can only come after this write, so an anchor whose 16:30 publication instant has
+    already passed is certain to precede the commit and is refused on day 1 rather than found
+    wrong by the L6 report. The report still checks the exact session against the commit's
+    trading calendar.
     """
+    current = now if now.tzinfo is not None else now.replace(tzinfo=_SHANGHAI)
+    today = current.astimezone(_SHANGHAI).date()
     if anchor.weekday() >= 5:
         raise AnchorRefusedError(
             f"{anchor} is not a weekday: the anchor is the first trading session strictly after "
@@ -1186,8 +1240,16 @@ def _checked_anchor(anchor: date, today: date) -> date:
         raise AnchorRefusedError(
             f"{anchor} is before today ({today}, Shanghai): the anchor is the first trading "
             "session strictly after C's registration commit's time, so it cannot precede the "
-            "registration; the writer checks only weekday and not-before-today, and the report "
-            "checks the exact session against the commit's trading calendar"
+            "registration; the writer checks weekday, not-before-today and that it has not yet "
+            "published, and the report checks the exact session against the commit's trading "
+            "calendar"
+        )
+    published = session_publication_instant(anchor)
+    if published <= current:
+        raise AnchorRefusedError(
+            f"{anchor}'s 16:30 publication instant ({published.isoformat()}) has already passed "
+            f"at {current.isoformat()}: the registration commit can only come later, so this "
+            "anchor is certain to precede it"
         )
     return anchor
 
@@ -1231,7 +1293,7 @@ def _write(arguments: argparse.Namespace) -> None:
     _refuse_a_dirty_bound_tree(repo)
     _refuse_an_unverified_endpoint()
     path = _checked_path(repo, arguments.path)
-    anchor = _checked_anchor(arguments.anchor, _today())
+    anchor = _checked_anchor(arguments.anchor, _now())
     step0 = _step0_facts(repo, arguments.step0_registration)
     _refuse_a_salt_tied_to_the_seed(arguments.salt, step0.seed)
     protocol_document = _protocol_document(repo)
