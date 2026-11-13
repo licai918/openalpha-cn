@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -583,3 +584,38 @@ def test_an_unreadable_budget_file_refuses_by_name_and_sends_nothing(
     assert code != 0
     assert str(budget) in captured.err
     assert "nothing was sent" in captured.err
+
+
+DOCUMENTED_BUDGET_FILES: Final[tuple[str, ...]] = (
+    "docs/runbooks/agent-evening.zh-CN.md",
+    "docs/research/p7-c-protocol.md",
+)
+"""The two documents that tell the L1 operator what the starting budget file must contain."""
+
+
+@pytest.mark.parametrize("relative", DOCUMENTED_BUDGET_FILES)
+def test_the_documented_l1_budget_literal_is_a_file_the_probe_reads(
+    relative: str, tmp_path: Path
+) -> None:
+    """F6 (fix round 1): the documented L1 starting literal must be a budget file the probe reads.
+
+    The 2026-11-12 refused attempts count against L1's 300-request cap, so L1's budget file must
+    start at `spent` 20. The operator copies the literal the runbook/protocol prints; this test
+    extracts it and parses it with the probe's own reader, so a literal the reader would refuse
+    (the batch-3 first version documented `{"spent": 20}`, which lacks the schema) fails here
+    instead of at the gated L1 run. The live file is never created here.
+    """
+    text = (ROOT / relative).read_text(encoding="utf-8")
+    literals = re.findall(r'\{[^{}]*"spent"\s*:\s*20[^{}]*\}', text)
+
+    # A document may also quote the old, schema-less literal while explaining why it is
+    # refused; what it must contain is at least one literal the probe's own reader accepts.
+    valid = [literal for literal in literals if json.loads(literal).get("schema") == BUDGET_SCHEMA]
+    assert valid, (
+        f"{relative} documents no {BUDGET_SCHEMA} literal with spent 20; a literal the probe "
+        f"reader refuses cannot be the L1 starting budget (found {literals})"
+    )
+    for index, literal in enumerate(valid):
+        path = tmp_path / f"documented-budget-{index}.json"
+        path.write_text(literal + "\n", encoding="utf-8")
+        assert probe.read_probe_budget(path) == 20

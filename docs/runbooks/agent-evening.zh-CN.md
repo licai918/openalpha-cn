@@ -48,8 +48,10 @@ C 的读数由**另一条**命令 `scripts/agent_report.py` 出（D8；Step 0 �
 4. **环境**：`.env` 里的 `DEEPSEEK_API_KEY` **只在真要发请求时才需要**；已 file 完整一天的崩溃重跑、
    或 `--no-llm` 的一天，不需要 key（回放模式）。`--env-file` 用相对的 `.env`（uv 会按空格拆分路径；
    主检出的路径含空格）。
-5. **C 的运行目录是它自己的新目录**，不与 Step 0 共用；C 的东西（`predictions/`、`evidence/`、
-   `model_exchanges/`、`state.sqlite3`、`agent_evening/`）只写在这个目录里。
+5. **C 的运行目录是它自己的新目录**，不与 Step 0 共用，也**不能带 D7 干跑周的标记**
+   （`c-dry-week-scratch.json`）；第 1 步与 `--pin-worktree` 都对带标记的目录按名拒绝——否则 C 的 120 个
+   前向会话会 file 进一个 L6 报告会整份拒绝的 scratch 目录。C 的东西（`predictions/`、`evidence/`、
+   `model_exchanges/`、`state.sqlite3/`、`agent_evening/`）只写在这个目录里。
 6. **定时任务不安装。** `--print-launchd` 只打印，`--pin-worktree` 只建一个分离 HEAD 的 worktree 并在里面
    离线建环境；`~/Library` 下什么都不动。
 
@@ -78,7 +80,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 | `--max-model-requests N` | 本晚模型请求硬上限，默认 600（D7 的预算） |
 | `--deadline HH:MM` | 模型请求的上海墙钟期限，默认 `23:30` |
 | `--dry-week` | D7 干跑周模式：见「干跑周」，不需要 C 的登记，file 零预测 |
-| `--pin-worktree DIR` | 在 C 登记的提交上创建或移动分离 HEAD 的 worktree，再离线建它自己的环境并链接 `.env`；脏/外来 worktree 按名拒绝 |
+| `--pin-worktree DIR` | 在 C 登记的提交上创建或移动分离 HEAD 的 worktree，再离线建它自己的环境并链接 `.env`；脏/外来 worktree、或带 D7 干跑标记的运行目录，都按名拒绝 |
 | `--uv PATH` | `--pin-worktree` 用的 uv |
 | `--print-launchd` | 只打印工作日 20:30 的 launchd 配置；需要 `--worktree` 与 `--step0-runtime-dir`；**不安装、不建目录** |
 | `--worktree DIR` | 打印的 launchd 要跑的钉住 worktree |
@@ -93,7 +95,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 | 步 | 做什么 | 失败时 |
 |---|---|---|
-| 1 registration | 读 C 的登记并准入；校验绑定代码，读 `salt`/`primary_size`，读 Step 0 的登记；在读写当天之前拒绝与 Step 0 种子耦合的盐 | 登记文件不存在/读不出退出 2；登记未提交/与 `HEAD` 不同、或代码不是登记的代码退出 3 |
+| 1 registration | 读 C 的登记并准入；校验绑定代码，读 `salt`/`primary_size`，读 Step 0 的登记；在读写当天之前拒绝与 Step 0 种子耦合的盐、拒绝带 D7 干跑标记的运行目录 | 登记文件不存在/读不出退出 2；登记未提交/与 `HEAD` 不同、或代码不是登记的代码退出 3；干跑标记的目录按名拒绝（退出 2） |
 | 2 step0_record | 找恰好一条受绑定、准时的 Step 0 合成分记录；用 `record_scope` 重建当日幸存者；从 Step 0 日志的 `result` 读持仓与观察名单 | 按名拒绝 `Step 0 has not filed <会话>`，零写入 |
 | 3 evidence | `limit_events_on`（as_of = 会话 16:30）→ 事件快照 → 拒绝被重述的会话 → 追加到 C 的证据库 | 步拒绝；什么都不写；同一会话重跑不追加 |
 | 4 rule_family | 主集 ∪ 覆盖集逐名 `run_cycle`；两条批次 file；覆盖集为空时不 file 覆盖批次、日志记 `coverage_absent: "empty_set"` | 步拒绝（引擎/记录错误）；规则家族要么完整 file，要么没有这一晚 |
@@ -150,7 +152,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 | 步骤 | 请求 | 前置 | 产出 | 状态 |
 |---|---|---|---|---|
-| L1 `V2-P7-010` 探针 live | ≤ 300 次 Tushare（硬上限） | 探针工具已合入 | 只含元数据的报告；不落盘数据 | **未运行** |
+| L1 `V2-P7-010` 探针 live | ≤ 300 次 Tushare（硬上限） | 探针工具已合入；预算文件已按下面的**完整字面量**就位 | 只含元数据的报告；不落盘数据 | **未运行** |
 | L2 DeepSeek 端点核实 | 0 | 用户确认事实文件 | `DEEPSEEK_V4_1_FLASH` 填值、`verified_on` 设置；四份面向用户文档的模型/用量措辞与两个散文守卫同步改 | **未运行**（值仍是占位） |
 | L3 DeepSeek live 探针 | ≤ 5 次模型请求 | L2；`.env` 里的 `DEEPSEEK_API_KEY` | scratch 运行目录里的模型/指纹/用量/空白/JSON 有效性报告 | **未运行** |
 | L4 LLM 干跑周（D7） | ≤ 5 × 600 模型请求；0 Tushare | `006b` 已登记、Step 0 晚间在跑；批次 2–3 已合入；L3 ok | 只含运维指标的报告；记录只留在 scratch 目录 | **未运行** |
@@ -159,9 +161,15 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 **L1 的 300 次上限已经花掉 20 次。** 2026-11-12 的修复轮里发生过一次受闸之外的 `--live` 运行：用假 token
 向 `api.tushare.pro` 发出 **20 次**被拒绝的请求尝试（无数据返回、无仓库文件；见批次 2 收尾记录 §7.2）。
-保守记账把这 20 次计入上限，所以 **L1 的预算文件必须从 `{"spent": 20}` 开始**（预算文件是
-`openalpha-p7-event-probe-budget/v1` 的 `{"spent": N}`；**不要自己创建那个 live 文件**，等 L1 的 go）。
-它们没有返回数据、没有进任何面板/证据/研究记录，因此不影响任何研究结论。
+保守记账把这 20 次计入上限，所以 **L1 的预算文件必须从一开始就是下面这个完整字面量**——探针拒绝没有
+`schema` 键的预算文件，缺文件又按 0 读，少了 `schema` 就等于把 20 次记账丢掉：
+
+```json
+{"schema": "openalpha-p7-event-probe-budget/v1", "spent": 20}
+```
+
+**不要自己创建那个 live 文件**（等 L1 的 go）；上面只是它必须长的样子。它们没有返回数据、没有进任何
+面板/证据/研究记录，因此不影响任何研究结论。
 
 ## 干跑周（D7、L4）：`--dry-week`
 
@@ -172,8 +180,9 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 ```
 
 - **一个一次性的 scratch 运行目录**，与 C 的正式运行目录分开；`--dry-week` 在该目录根上写标记文件
-  `c-dry-week-scratch.json`（schema `openalpha-c-dry-week-scratch/v1`，`evenings` 列出已跑的会话，
-  至多 5 个），**这正是它永远不进确认性样本的凭据**。
+  `c-dry-week-scratch.json`（schema `openalpha-c-dry-week-scratch/v1`，`evenings` 列出已开始的会话），
+  **这正是它永远不进确认性样本的凭据**。标记在**第一个模型请求之前**写/刷新，所以一个失败或中途崩溃的
+  晚上也留下标记：失败或崩溃的运行目录不会因为「没跑完」而被当成一个干净的 C 前向目录。
 - 每晚在 `<scratch 运行目录>/dry_week/<会话>.json` 写一份**运维日志**（schema
   `openalpha-c-dry-week-evening/v1`），键：`schema`、`session`、`status`、`names`、`requests`、`scored`、
   `abstained`、`not_routed`、`invalid_output`、`blank_responses`、`invalid_json_responses`、
@@ -183,26 +192,49 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
   的一天与它的证据。`--dry-week` 拒绝一个已经有登记晚间日志或已 file 预测记录的运行目录——它**不会**
   把 C 的正式运行目录标成一次性 scratch。
 - 每晚至多 **600 次**模型请求（`--max-model-requests` 在干跑周里是 0..600，默认 600）、同一个
-  23:30 上海期限；**至多 5 个晚上**——第 6 个晚上按名拒绝，**已记录过的那个晚上重跑也拒绝**（一个晚上只测一次）。
+  23:30 上海期限；**至多 5 个已开始的晚上**——在读完 Step 0 当日记录、发出第一个请求之前就算开始；
+  **失败、超上限、过期限、中途崩溃的晚上都计入**（不能靠失败重来把 5 个上限变成更多），第 6 个已开始的
+  晚上按名拒绝；**已记录过的那个晚上重跑也拒绝**（一个晚上只测一次）。连 Step 0 当日记录都读不到的晚上
+  没有花过请求，不算一次测量、不消耗一个 scratch 晚上。
 - **file 零预测、写零 C 晚间日志与零 C 证据**。它只测：失败率、空白率、弃权率、无效输出率、延迟、tokens。
   **绝不算任何 IC、任何收益、任何结论词**；干跑周的任何数字都不是证据，也不进协议文档。
 - 这些记录**永远不被读成 C 的前向样本**：`scripts/agent_report.py` 与 `strategy_agent_evaluation.evaluate`
-  对带该标记的运行目录**按名拒绝**（标记读不出也是拒绝，失败即关闭）。
+  对带该标记的运行目录**按名拒绝**（标记读不出也是拒绝，失败即关闭）。**正式晚间与 `--pin-worktree`
+  也在第 1 步拒绝带标记的运行目录**：否则 C 会把 120 个前向会话 file 进一个 L6 会整份拒绝的目录。
 - 干跑周跑完后 **C 才登记（L5）**；顺序不能倒过来。
 
 ## L5：写 C 的登记、钉住 worktree、打印 launchd
 
 1. **功效先跑**（零请求，只读已存面板；D1）。命令与表格见 `docs/research/p7-c-protocol.md` §6；
    把打印的两行粘贴进协议 §6.3，替代那里的「未运行」。要写登记时给功效命令加 `--json <路径>`，
-   那份 `openalpha-p7-c-power/v1` 报告就是下一步的 `--power-report`。
-2. **写登记（先 `--dry-run`）**：
+   那份 `openalpha-p7-c-power/v1` 报告就是后面的 `--power-report`。命令带两个规划参数：
+
+   ```bash
+   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src" "$PWD/.venv/bin/python" scripts/p7_c_power.py \
+     --panel-dir <已存面板目录> \
+     --step0-registration docs/research/p7-registration.json \
+     --first <首个会话 YYYY-MM-DD> --last <最后会话 YYYY-MM-DD> \
+     --sd-between 0.15 --abstention-rate 0.10 \
+     --json <功效报告 JSON>
+   ```
+
+   **默认 `--sd-between 0.15` 的后果要提前知道**：可检出均值的下界约
+   `2.4865 × 0.15 / sqrt(120) ≈ 0.034`，大于 0.02 的规划门槛，所以只要观测历史会话 ≥ 20 且投影可测
+   会话 ≥ 60，默认参数下 n300 与 census **两行都会是 `not_testable`（原因 `detectable_above_threshold`）**。
+   这是如实的规划结果，不是缺陷；D1 因此落到「两行都不可测」的分支（登记为不可测需要 `--register-untestable`，
+   或者不登记，选择是用户的）。L5 可以用 D7 干跑周实测的离散度/弃权率覆盖
+   `--sd-between`/`--abstention-rate` 后重跑，再决定登记。
+2. **先提交协议文件。** `docs/research/p7-c-protocol.md` 必须已提交且工作区里没有未提交改动：写入器把它的
+   **已提交字节 sha256** 记进登记（`settings.agent_forward_protocol_document`），并拒绝未提交或有改动的
+   协议文件。若第 1 步把功效表粘贴进了协议，先把那一处改动按 `V2-P7-013`/`014` 提交，再跑写入器。
+3. **写登记（先 `--dry-run`）**：
 
    ```bash
    PYTHONPATH="$PWD/src" "$PWD/.venv/bin/python" scripts/p7_c_register.py \
      --salt <人工选定的盐> \
      --step0-registration docs/research/p7-registration.json \
      --power-report <功效报告 JSON> \
-     --anchor <登记提交之后 C 时钟的第一个前向会话 YYYY-MM-DD> \
+     --anchor <提交时刻之后严格意义上的第一个交易日 YYYY-MM-DD> \
      --dry-run
    ```
 
@@ -210,31 +242,38 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
    `未写入：--dry-run only prints; nothing was written`——**什么都不写**；确认之后去掉 `--dry-run`
    才写 `docs/research/p7-c-registration.json`（`--path` 默认就是它；成功时打印 `wrote <路径>`、
    `config_id`、`sha256` 与下一句「只 stage/commit 这一个文件」）。**写入器从不 stage、从不 commit**。
-   它写出的 `settings` 带四个封闭的块（评估器与报告都按名读、都有失败即关闭的语义）：
+   它写出的 `settings` 带五个封闭的块（评估器与报告都按名读、都有失败即关闭的语义）：
    `agent_forward_protocol`（第 5 节的判据）、`agent_forward_power`（D1 的样本与判定、
    `register_untestable`、功效报告 sha256）、`agent_forward_step0`（C 评估的 Step 0 登记）、
-   `agent_forward_anchor`（窗口锚点）。
-3. **`--anchor` 的约束**：必须是星期一到星期五、**不晚于今天（上海）**、且距今不超过 **16 个日历日**；
-   它是登记提交（含提交当天）之后 C 时钟的第一个前向会话——精确的交易日检查在报告侧。锚点太旧就换一个
-   最近的工作日，不要改系统日期。
-4. **写入器会拒绝**（每条退出 2、什么都不写）：DeepSeek 端点未核实（`verified_on` 仍是 `None`——所以 L2
+   `agent_forward_anchor`（窗口锚点）与 `agent_forward_protocol_document`（协议文件的已提交 sha256）。
+4. **`--anchor` 的规则**：它是**C 的登记提交时刻之后严格意义上的第一个交易日**——交易日 d 的 16:30 上海
+   发布时刻严格晚于提交时刻：周末/节假日提交 → 下一个交易日；交易日 16:30 之前提交 → 当天；16:30 之后 →
+   下一个交易日。写入器只检查工作日与**不早于今天（上海）**（允许一个未来工作日；没有回看窗口，也不再
+   要求「星期一」）；**报告在 L6 用提交时刻精确核对锚点，不一致即拒绝**。所以：先计划好登记提交的时间，
+   再据此选锚点；不要在登记之后改锚点。
+5. **写入器会拒绝**（每条退出 2、什么都不写）：DeepSeek 端点未核实（`verified_on` 仍是 `None`——所以 L2
    之后才能写）、盐与 Step 0 的种子相同或由它派生、Step 0 的登记未提交/提交后被改过/是别的 `kind`、
-   功效报告缺失或不合 `openalpha-p7-c-power/v1`、报告里没有任何一行 `testable` 而没有传
-   `--register-untestable`（两行都不可测时，登记为「不可测」还是不登记，是用户的选择）、锚点不合上一条、
-   `--path` 不在 `docs/research/*.json` 里、该路径上已有一份不同的登记、受绑定代码或两个 C 脚本有未提交
-   改动、写入的字节与打印的 sha256 不符（刚写的文件删掉）。写入器按 D1 自动选样本（`n300` 可测则
-   `primary_size = 300`；只有普查可测则 `primary_size = 1000000`，即 `CENSUS_DRAW_SIZE`，抽样函数在容量
-   ≥ 当日幸存者数时返回普查），**没有** `--sample` 参数。
-5. **用户提交登记文件**（提交信息点名 `V2-P7-013`/`014`）；提交本身就是 C 时钟的起点。
-6. **钉住 worktree**（从提交了登记的检出）：
+   功效报告缺失或不合 `openalpha-p7-c-power/v1`、功效报告的 `source` 为空或不是本写入器绑定的那份 Step 0
+   登记（`registration_sha256`、`config_id`、路径不符）、报告的 `planning` 窗口/记分下限/可测下限/检验水平/
+   目标功效/可检出门槛不等于已采纳常量（写入器还会按行字段重算判定，与报告的 `verdict` 不一致即拒绝）、
+   报告里没有任何一行 `testable` 而没有传 `--register-untestable`（两行都不可测时，登记为「不可测」还是
+   不登记，是用户的选择）、锚点不合上一条、协议文件未提交或有改动、`--path` 不在 `docs/research/*.json`
+   里、该路径上已有一份不同的登记、受绑定代码或两个 C 脚本有未提交改动、写入的字节与打印的 sha256 不符
+   （刚写的文件删掉）。写入器按 D1 自动选样本（`n300` 可测则 `primary_size = 300`；只有普查可测则
+   `primary_size = 1000000`，即 `CENSUS_DRAW_SIZE`，抽样函数在容量 ≥ 当日幸存者数时返回普查），
+   **没有** `--sample` 参数。
+6. **用户提交登记文件**（提交信息点名 `V2-P7-013`/`014`）；提交本身就是 C 时钟的起点，锚点是它之后严格
+   意义上的第一个交易日。
+7. **钉住 worktree**（从提交了登记的检出）：
 
    ```bash
    "$PWD/.venv/bin/python" scripts/agent_evening.py --pin-worktree <目录> --repo "$PWD"
    ```
 
    它在**登记的提交**上建分离 HEAD 的 worktree，再用它自己的 `uv.lock` **离线**建环境，并把 `.env`
-   符号链接过去；已有的目录必须是同一仓库的干净 worktree，否则按名拒绝，**从不覆盖**。
-7. **打印 launchd**（只打印、不安装）：
+   符号链接过去；已有的目录必须是同一仓库的干净 worktree，带 D7 干跑标记的运行目录也按名拒绝，
+   **从不覆盖**。
+8. **打印 launchd**（只打印、不安装）：
 
    ```bash
    "$PWD/.venv/bin/python" scripts/agent_evening.py --print-launchd --worktree <钉住 worktree> --runtime-dir <C 运行目录> --step0-runtime-dir <Step 0 运行目录>
@@ -243,7 +282,8 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
    任务是工作日 20:30（label `com.openalpha.agent-evening`），参数里带绝对的 `--step0-runtime-dir`。
    安装与否是运维的决定，本仓库只打印。
 
-**第一个晚间必须在 `--anchor` 指定的那个会话上跑**：窗口的位置从锚点起数，锚点之前的记录不进窗口。
+**第一个晚间必须在 `--anchor` 指定的那个会话上跑**：窗口的位置从锚点起数，锚点之前的记录不进窗口；
+第一个晚上的会话必须与锚点一致，报告在 L6 会核对。
 
 ## L6：读数报告
 
@@ -269,6 +309,10 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
   然后是见证与缺失的记录（缺失逐条给评估器的原因）、样本数 `n`、功效（0.8 功效下可检出的均值，设计的性质）
   与登记里的 D1 判定；再是弃权率（读 LLM 主集记录）、模型别名变化（C 的晚间日志里出现的
   `(response.model, system_fingerprint)` 身份、是否跨会话变化、哪些应有而缺失的日志）。
+  **弃权率与模型别名只统计 `anchor_session <= session <= through` 的记录**：它们与主臂同一个窗口，
+  不读窗口之前或 `--through` 之后的记录。
+- **锚点核对**：报告用登记提交的时刻精确核对登记的锚点（提交之后严格意义上的第一个交易日），
+  不一致就按名拒绝——不会把错位的锚点当成窗口的一部分继续算。
 - 窗口满、每个位置到期之前**没有 p 值、没有结论词**，只有计数与描述性均值；窗口满足之后才印那一次检验
   （均值、双侧与单侧读数、检验水平、精确/随机）与五种结论之一。
 - 五种结论的固定措辞：`not_yet`（未满/未到期）、`candidate_increment`（候选的增量）、
@@ -298,9 +342,39 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
    登记；它们**不是** C 的抽样盐（盐是另一个登记值，与 Step 0 的种子耦合即拒绝）。
 5. **C 的脚本是登记绑定的一部分**：`scripts/agent_report.py` 与 `scripts/agent_evening.py` 在登记提交之后
    改任何字节，第 1 步准入就拒绝——修报告要走新登记，不是热修。
-6. **2026-11-12 的 20 次被拒 Tushare 尝试**计入 L1 的 300 次上限（预算文件从 `spent: 20` 开始），
-   是本仓库的一次过程违规记录，不是 C 的请求；详见批次 2 收尾记录 §7.2。
+6. **2026-11-12 的 20 次被拒 Tushare 尝试**计入 L1 的 300 次上限（预算文件从
+   `{"schema": "openalpha-p7-event-probe-budget/v1", "spent": 20}` 开始），是本仓库的一次过程违规记录，
+   不是 C 的请求；详见批次 2 收尾记录 §7.2。
 7. **2027-01-04 之前的硬闸门**属于 Step 0（登记簿/年份分区），不属于 C；但它决定 C 的时钟最早能什么时候
    开始，所以排在一起看。
 8. **真钱闸门仍关着**：C 不交易，本手册的任何输出都不是下单建议；打印出来的单（来自 Step 0 的晚间命令）
    一律标「这些单不要下」。
+
+## 修复轮 1（2026-11-13，评审 9 条意见）
+
+初版评审是 Spec FAIL / CHANGES REQUESTED。本轮的正文与行为更正（设计、顺序与闸门不变；C 的登记仍未写出，
+前向窗口未开始）：
+
+- **F3 锚点**：改为「提交时刻之后严格意义上的第一个交易日」（交易日 16:30 发布时刻严格晚于提交时刻；
+  周末/节假日提交 → 下一个交易日，16:30 前提交 → 当天，16:30 后 → 下一个交易日）。写入器只检查工作日与
+  不早于今天（上海），允许未来工作日，删去旧的「星期一日 / 16 个日历日」；L6 报告用提交时刻精确核对，
+  不一致即拒绝。
+- **F4 功效**：两分量 sd `min(1, sqrt(sd_between^2 + 1/(n-1)))`（`sd_between` 是非抽样部分的规划假设 0.15），
+  判定 = 观测历史会话 ≥ 20 且投影可测会话 ≥ 60 且可检出均值 ≤ 0.02；每行打印 sd、可检出均值与 0.02 阈值；
+  not_testable 的原因有 `too_few_observed_sessions` / `below_measurable_floor` /
+  `detectable_above_threshold`。0.02 只是规划的检出阈值（旧 G-C 的 h1 门槛），不是已登记检验的量级门槛。
+  **默认 `--sd-between 0.15` 下两行都会 not_testable**（见 L5 第 1 步）——如实的设计结果，不是缺陷。
+- **F9 期望计数与弃权**：投影用期望记分数，并在 10 名下限之前按规划弃权率（默认 0.10，`--abstention-rate`）
+  收缩；两者都是声明的简化 / 规划假设，不是测量值。真实弃权率由 D7 干跑周测，L5 可以覆盖。
+- **F5 功效报告校验**：写入器要求报告的 `source` 绑定同一份 Step 0 登记（sha256、`config_id`、路径），
+  `planning` 的窗口/下限/水平/功效/阈值等于已采纳常量，并按行字段重算判定。
+- **F7 协议文件绑定**：登记新增 `agent_forward_protocol_document`（`docs/research/p7-c-protocol.md` 的
+  已提交 sha256）；写登记前先提交协议，写入器拒绝未提交或有改动的协议文件。
+- **F6 L1 预算字面量**：预算文件必须是 `{"schema": "openalpha-p7-event-probe-budget/v1", "spent": 20}`
+  （旧的 `{"spent": 20}` 会被探针拒绝）。
+- **F1/F2 干跑周计数与隔离**：干跑周按**已开始的晚上**计数（失败的也计入 5 个上限），标记在第一个模型请求
+  之前写；正式晚间在第 1 步、`--pin-worktree` 也拒绝带干跑标记的运行目录。
+- **F8 报告窗口**：弃权率与模型别名统计只覆盖 `anchor..through`。
+
+评审原文在 `.superpowers/sdd/plan-c/review-batch3-1.md`（不入库）；本轮没有真实数据、没有网络请求，
+`DEEPSEEK_V4_1_FLASH.verified_on` 仍是 `None`，真钱闸门仍关着。
