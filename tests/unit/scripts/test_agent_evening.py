@@ -303,6 +303,8 @@ def _world(
     holdings: tuple[str, ...] | None = None,
     watch: tuple[str, ...] | None = None,
     c_salt: str | None = None,
+    committed_at: datetime | None = None,
+    registered_anchor: date | None = None,
 ) -> World:
     """Step 0's runtime -- generated panel, filed record, complete day journal -- and C's seam."""
     # The provider in record mode names the credential's environment variable; the value is a
@@ -374,8 +376,22 @@ def _world(
         "primary_size": C_PRIMARY_SIZE,
     }
     c_body = {**C_BODY, "config": c_config}
-    c = agent.read_agent_registration(
-        c_body, content=json.dumps(c_body, sort_keys=True).encode(), commit="b" * 40
+    # N2's seam: the anchor the registration froze and the commit instant the real admission
+    # would report. By default the commit is before the anchor session's 16:30 publication, so
+    # the anchor the evening derives is exactly the registered one and every other test keeps
+    # its registered-evening path. A test that wants a mis-planned registration moves either.
+    anchor_session = session if registered_anchor is None else registered_anchor
+    registered_at = (
+        datetime.combine(anchor_session, time(9, 0), tzinfo=SHANGHAI)
+        if committed_at is None
+        else committed_at
+    )
+    c = dataclasses.replace(
+        agent.read_agent_registration(
+            c_body, content=json.dumps(c_body, sort_keys=True).encode(), commit="b" * 40
+        ),
+        registration_committed_at=registered_at,
+        registered_anchor=anchor_session,
     )
     registration = tmp_path / "c-registration.json"
 
@@ -2338,6 +2354,43 @@ def test_five_failed_evenings_exhaust_the_scratch_runtime_and_the_sixth_spends_n
     assert "5" in err and "dry-week" in err
     assert transport.calls == 0, "the cap is checked before any request is constructed"
     assert not agent.dry_week_journal_path(scratch, sixth).exists()
+
+
+def test_the_registered_evening_refuses_a_registration_whose_anchor_is_not_the_first_session_after_the_commit(  # noqa: E501
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N2: a mis-planned commit time fails closed on day 1, not at L6 six months later.
+
+    The registration is written before the commit exists; the anchor is right only if it is the
+    first trading session whose 16:30 publication is after the commit's time. Here the commit
+    landed after the anchor session's close, so the first session after it is the next trading
+    day: the registered evening must refuse in step 1 with nothing written and no model request.
+    """
+    world = _world(tmp_path, monkeypatch)
+    expected = world.panel.sessions[LIMIT_STREAK_FIRST_SESSION_INDEX + 2]
+    after_the_close = datetime.combine(world.session, time(16, 31), tzinfo=SHANGHAI)
+    misplanned = dataclasses.replace(world.c, registration_committed_at=after_the_close)
+    monkeypatch.setattr(agent, "_admit", lambda options: (world.repo, misplanned))
+    assert world.session != expected, "the fixture's next session must differ from the anchor's"
+    before_step0 = _files(world.step0, skip_panel_locks=True)
+    transport = _RefusingTransport()
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=transport)
+    err = capsys.readouterr().err
+
+    assert code == agent.AgentEveningExit.refused
+    assert "step 1 (registration) failed" in err
+    assert world.session.isoformat() in err, "the registered anchor is named"
+    assert expected.isoformat() in err, "the expected first session after the commit is named"
+    assert after_the_close.isoformat() in err, "the commit instant is named"
+    assert transport.calls == 0, "the refusal comes before any model request"
+    assert not world.runtime.exists(), "a step-1 refusal writes nothing"
+    assert not world.journal_path().exists()
+    assert not (world.runtime / "predictions").exists()
+    assert not (world.runtime / "evidence").exists()
+    assert _files(world.step0, skip_panel_locks=True) == before_step0
 
 
 def test_the_registered_evening_refuses_a_dry_week_marked_runtime(

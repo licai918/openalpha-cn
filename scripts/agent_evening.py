@@ -9,6 +9,11 @@ command is where both are produced. It runs six steps, named by `AGENT_STEPS`:
    against the command's own bytes (`C_SCRIPTS`), so the code filing a forward result is the code
    the registration binds. `kind` must be `agent_forward/v1`; the registration names the sample
    salt and the primary set's size, which are research parameters and are never defaulted here.
+   The step also verifies the frozen window anchor (fix round 2's N2): the anchor must be the
+   first trading session whose 16:30 publication falls after the admission's commit time -- the
+   same shared rule `strategy_agent_evaluation.expected_forward_anchor` gives the L6 report --
+   read off Step 0's stored trading calendar. A mis-planned commit time therefore fails closed on
+   day 1, before any record is filed and before any model request is spent.
 2. **step-0 record** -- Step 0's prediction store and panel are opened **read-only**: the session
    must hold exactly one bound, on-time `survivor_book_composite/v1` record, and Step 0's day
    journal must be complete, or the command refuses `Step 0 has not filed {session}` and writes
@@ -131,7 +136,10 @@ from openalpha_cn.domain.alpha_model import PredictionBatch  # noqa: E402
 from openalpha_cn.domain.json_value import canonical_json_bytes  # noqa: E402
 from openalpha_cn.domain.run_mode import RunMode  # noqa: E402
 from openalpha_cn.domain.run_request import ResearchRunRequest  # noqa: E402
-from openalpha_cn.domain.trading_calendar import TradingCalendar  # noqa: E402
+from openalpha_cn.domain.trading_calendar import (  # noqa: E402
+    TRADING_CALENDAR_DATASET,
+    TradingCalendar,
+)
 from openalpha_cn.evidence.limit_events import (  # noqa: E402
     PANEL_DERIVED_PROVIDER_ID,
     limit_event_snapshots,
@@ -145,7 +153,10 @@ from openalpha_cn.models.openai_compatible import (  # noqa: E402
 )
 from openalpha_cn.models.recording import ModelExchangeNotStoredError  # noqa: E402
 from openalpha_cn.panel.store import PanelStore  # noqa: E402
-from openalpha_cn.panel_ingest import session_publication_instant  # noqa: E402
+from openalpha_cn.panel_ingest import (  # noqa: E402
+    load_trading_calendar,
+    session_publication_instant,
+)
 from openalpha_cn.panel_limit_events import limit_events_on  # noqa: E402
 from openalpha_cn.runtime.composition import (  # noqa: E402
     agent_journal_dir_at,
@@ -160,6 +171,8 @@ from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
     DRY_WEEK_SCRATCH_MARKER,
     DRY_WEEK_SCRATCH_SCHEMA,
     AgentEvaluationError,
+    expected_forward_anchor,
+    read_agent_forward_anchor,
     refuse_a_dry_week_runtime,
 )
 from openalpha_cn.strategy_agent_forward import (  # noqa: E402
@@ -292,7 +305,15 @@ class AgentRegistrationError(ValueError):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentRegistration:
-    """C's committed registration, read once: identity, seed, and the two sample parameters."""
+    """C's committed registration, read once: identity, seed, and the sample parameters.
+
+    `registration_committed_at` and `registered_anchor` are the N2 seam: the commit time the
+    admission reports (`_Admitted.committed_at`) and the anchor the registration froze in its
+    `agent_forward_anchor` block. `_admit` always fills them; `read_agent_registration` leaves
+    them `None` for its other caller (`scripts/p7_c_register.py`'s read-back, which runs before
+    the commit exists and never files a forward session). The registered evening refuses a body
+    whose two facts disagree with the calendar's first session after the commit.
+    """
 
     config_id: str
     registration_sha256: str
@@ -302,6 +323,8 @@ class AgentRegistration:
     salt: str
     primary_size: int
     config: Mapping[str, Any]
+    registration_committed_at: datetime | None = None
+    registered_anchor: date | None = None
 
     @property
     def registered(self) -> RegisteredConfiguration:
@@ -367,7 +390,12 @@ def _seed_of(settings: object) -> int:
 
 
 def read_agent_registration(
-    body: Mapping[str, Any], *, content: bytes, commit: str
+    body: Mapping[str, Any],
+    *,
+    content: bytes,
+    commit: str,
+    registration_committed_at: datetime | None = None,
+    registered_anchor: date | None = None,
 ) -> AgentRegistration:
     """C's registration body as `AgentRegistration`, or a refusal naming the missing fact.
 
@@ -409,6 +437,8 @@ def read_agent_registration(
         salt=salt,
         primary_size=primary_size,
         config=dict(config),
+        registration_committed_at=registration_committed_at,
+        registered_anchor=registered_anchor,
     )
 
 
@@ -448,9 +478,29 @@ def _admit(options: argparse.Namespace) -> tuple[Path, AgentRegistration]:
             f"{type(error).__name__}: {error}",
             exit_code=AgentEveningExit.code_not_registered,
         ) from error
+    settings = admitted.registered.get("settings")
+    if not isinstance(settings, Mapping):
+        raise StepFailedError(
+            "registration",
+            f"{registration} names no settings object; C's registration freezes the window "
+            "anchor in its settings and the evening refuses an anchor it cannot read",
+            exit_code=AgentEveningExit.no_registration,
+        )
+    try:
+        anchor = read_agent_forward_anchor(settings)
+    except AgentEvaluationError as error:
+        raise StepFailedError(
+            "registration",
+            f"{type(error).__name__}: {error}",
+            exit_code=AgentEveningExit.no_registration,
+        ) from error
     try:
         registration_read = read_agent_registration(
-            admitted.registered, content=admitted.content, commit=admitted.commit
+            admitted.registered,
+            content=admitted.content,
+            commit=admitted.commit,
+            registration_committed_at=admitted.committed_at,
+            registered_anchor=anchor.session,
         )
     except AgentRegistrationError as error:
         raise StepFailedError(
@@ -497,6 +547,62 @@ def _step0_registration(options: argparse.Namespace, root: Path) -> StepZeroRegi
         book=survivor.book,
         exchange=survivor.adapter.exchange,
     )
+
+
+def _refuse_a_misplanned_anchor(
+    options: argparse.Namespace,
+    admitted: AgentRegistration,
+    step0: StepZeroRegistration,
+    *,
+    clock: Callable[[], datetime],
+) -> None:
+    """N2: step 1 refuses a registration whose frozen anchor is not after its commit's time.
+
+    D5's window is 120 forward sessions after C's registration commit. The anchor is frozen
+    before the commit exists, so its correctness depends on the commit's wall time against the
+    16:30 publication and the trading calendar. The L6 report checks the same rule from the same
+    shared function; checking it here too makes a mis-planned commit time fail closed on day 1,
+    before any record is filed and before any model request is spent. Reading Step 0's stored
+    calendar is a read: it writes nothing.
+    """
+    if admitted.registration_committed_at is None or admitted.registered_anchor is None:
+        raise StepFailedError(
+            "registration",
+            "C's admitted registration carries no commit time or registered anchor; the evening "
+            "cannot verify D5's window start and refuses rather than file a session it cannot "
+            "place",
+        )
+    if not options.step0_runtime_dir:
+        raise StepFailedError(
+            "registration",
+            "no --step0-runtime-dir was given; the evening verifies the registered anchor "
+            "against Step 0's stored trading calendar and cannot do so without its panel",
+        )
+    committed = admitted.registration_committed_at.astimezone(SHANGHAI)
+    commit_date = committed.date()
+    store = PanelStore(Path(options.step0_runtime_dir) / "panel")
+    stored = set(store.registered_years(TRADING_CALENDAR_DATASET))
+    years = tuple(year for year in (commit_date.year, commit_date.year + 1) if year in stored)
+    try:
+        calendar = load_trading_calendar(store, exchange=step0.exchange, years=years, as_of=clock())
+    except (RuntimeError, ValueError) as error:
+        raise StepFailedError(
+            "registration",
+            f"cannot read Step 0's trading calendar to verify C's registered window anchor: "
+            f"{type(error).__name__}: {error}",
+        ) from error
+    try:
+        expected = expected_forward_anchor(calendar, committed_at=committed)
+    except AgentEvaluationError as error:
+        raise StepFailedError("registration", str(error)) from error
+    if admitted.registered_anchor != expected:
+        raise StepFailedError(
+            "registration",
+            f"C's registered anchor session is {admitted.registered_anchor.isoformat()}, but "
+            f"the first trading session after C's registration commit at "
+            f"{committed.isoformat()} is {expected.isoformat()}; D5's window starts there, so "
+            "the evening refuses to file a session outside the registered window",
+        )
 
 
 def _step0_day(
@@ -1864,6 +1970,9 @@ def _run(
         raise StepFailedError("registration", str(error)) from error
     root, admitted = _admit(options)
     step0 = _step0_registration(options, root)
+    # N2: a mis-planned commit time is found on day 1, not at L6. Step 1 refuses an anchor that
+    # is not the first trading session after the commit; it reads Step 0's stored calendar only.
+    _refuse_a_misplanned_anchor(options, admitted, step0, clock=wall)
     # Plan C Review Focus 2's coupling, enforced at the only place both salts are known: C's
     # draw salt is its own registered value, never Step 0's seed or a string carrying it. The
     # registration writer refuses this too (plan C task 3.3); this is the forward-run half, and

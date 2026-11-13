@@ -20,11 +20,12 @@ and the registered Step 0 configuration, and this script only states what it ans
 
 - **Candidate wording first.** `候选 / candidate`, not traded, and a passing run is not evidence.
 - The registration's identity, and the registered window. **The anchor is checked exactly**
-  (F3, D5): it must be the first trading session whose 16:30 publication instant falls after C's
-  registration commit -- the same session for a commit before the close, the next session for a
-  commit after it, on a weekend or on a holiday. A window that starts anywhere else would make
-  the first positions permanent gaps or skip sessions the registration covers, so the report
-  refuses instead of reading it. Then through and as-of.
+  (F3, D5) against the shared `expected_forward_anchor` rule the registered evening also checks in
+  its step 1 (N2): it must be the first trading session whose 16:30 publication instant falls
+  after C's registration commit -- the same session for a commit before the close, the next
+  session for a commit after it, on a weekend or on a holiday. A window that starts anywhere else
+  would make the first positions permanent gaps or skip sessions the registration covers, so the
+  report refuses instead of reading it. Then through and as-of.
 - The records **witnessed** and the records **missing**, the latter with the evaluator's own
   reason per session, plus the sample size `n`, the power (the mean detectable at 0.8 from the
   window's measured dispersion -- a property of the design, never observed power) and the
@@ -69,7 +70,7 @@ import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -81,13 +82,8 @@ for _root in (_SCRIPTS, _SCRIPTS / "research"):
 import registry  # noqa: E402
 
 from openalpha_cn.domain.agent_forward import AGENT_LLM_FAMILY  # noqa: E402
-from openalpha_cn.domain.trading_calendar import (  # noqa: E402
-    CalendarHorizonError,
-    TradingCalendar,
-)
 from openalpha_cn.model_view import LabelReach, OutcomeLabels  # noqa: E402
 from openalpha_cn.panel.store import PanelStore  # noqa: E402
-from openalpha_cn.panel_ingest import session_publication_instant  # noqa: E402
 from openalpha_cn.runtime.composition import (  # noqa: E402
     agent_journal_dir_at,
     prediction_store_at,
@@ -101,6 +97,7 @@ from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
     AgentForwardStep0,
     AgentProtocol,
     evaluate,
+    expected_forward_anchor,
     read_agent_forward_anchor,
     read_agent_forward_power,
     read_agent_forward_step0,
@@ -306,35 +303,6 @@ def _labels(
     return OutcomeLabels(
         PanelStore(Path(step0_runtime_dir) / "panel"),
         LabelReach(as_of=as_of, years=tuple(sorted(years)), exchange=exchange),
-    )
-
-
-def _expected_anchor(calendar: TradingCalendar, *, committed_at: datetime) -> date:
-    """The first trading session whose 16:30 publication instant is after C's commit (D5).
-
-    The window is "120 forward sessions **after C's registration commit**": an anchor on the
-    commit's own session is right when the commit landed before that session's 16:30 publication
-    (the session's outcome had not published), and the next trading session is right when it
-    landed after the close, on a weekend or on a holiday. A date outside the calendar's horizon
-    means no session can be named, which is a refusal and not a guess.
-    """
-    committed = committed_at.astimezone(SHANGHAI)
-    day = committed.date()
-    for offset in range(0, 371):
-        candidate = day + timedelta(days=offset)
-        try:
-            trading = calendar.is_trading_day(candidate)
-        except CalendarHorizonError as error:
-            raise AgentReportError(
-                f"the label calendar cannot say whether {candidate.isoformat()} traded "
-                f"({error}); the first session after C's registration commit at "
-                f"{committed.isoformat()} cannot be named"
-            ) from error
-        if trading and session_publication_instant(candidate) > committed:
-            return candidate
-    raise AgentReportError(
-        f"no trading session's 16:30 publication falls after C's registration commit at "
-        f"{committed.isoformat()} within 370 days; the registered window anchor cannot be named"
     )
 
 
@@ -702,7 +670,12 @@ def _report(options: argparse.Namespace, *, clock: Callable[[], datetime]) -> in
     # commit's first trading session would make the window's first positions permanent gaps (no
     # C record can exist before the registration); an anchor later than it would skip sessions
     # the registration covers. The registered value is checked against the calendar exactly.
-    expected_anchor = _expected_anchor(labels.calendar, committed_at=committed)
+    # N2: one shared rule with the registered evening (`expected_forward_anchor`), never a
+    # second copy of it here.
+    try:
+        expected_anchor = expected_forward_anchor(labels.calendar, committed_at=committed)
+    except AgentEvaluationError as error:
+        raise AgentReportError(f"{type(error).__name__}: {error}") from error
     if anchor.session != expected_anchor:
         raise AgentReportError(
             f"C's registered agent_forward_anchor.session is {anchor.session.isoformat()}, but "
