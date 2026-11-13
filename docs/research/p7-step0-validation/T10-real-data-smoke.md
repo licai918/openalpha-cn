@@ -40,6 +40,8 @@
 | r3-9 | 2026-11-12 | 08:32:18–08:32:19 | `evening`（G7 文件级复核） | 0 | — | 0 / 182 / 260 | `{}` | — | — | — | — | — | — | 重跑前后 `RT/paper`、`RT/daily_survivor` 下 6 个文件的 sha256 逐一相同：G7 过（文件级） |
 | r3-10 | — | 08:32:28 | `weekly`（G4，提前跑） | 0 | — | 0 / 182 / 260 | `{}` | — | — | — | — | — | — | `records: 1 witnessed … 0 missing`；`not tested: 0 of 2 pre-registered periods matured`；次要族 `not applied: … no p-value`：G4 过。G2 的「周报列出缺失」要在第 4 晚后再跑一次周报 |
 | r3-11 | 2026-11-12 | 19:33:06–19:33:21（北京 11-13 08:33） | `morning`（G3） | 0 | — | 1 / 183 / 260 | namechange 1 | — | — | — | — | — | — | 复核 11-12 的计划：advice 无变化、notices 无；运行前后 `RT/paper/snapshots` 列表（2 个文件）与 `ledger.sqlite3` sha256 逐一相同：G3 过 |
+| r3-12 | 2026-11-13 | 08:26:02–08:34:58 | `evening` | 0 | — | 16 / 199 / 260 | adj_factor 2、daily 2、daily_basic 2、index_daily 3、namechange 1、stk_limit 2、stock_basic 1、suspend_d 2、trade_cal 1 | — | — | 0 / 0 / 0 | 无 / 600519.SH、002371.SZ | 3194 / 3184 / 0.996869 / 1272 | — | 第二晚（周五，下单日 11-16）；昨晚 10 笔买单全部 filled；今晚无新单；screen eligible 2111 / survivors 1689；预测 `prd_3b5520fc188116af94585028` forward |
+| r3-13 | 2026-11-13 | 08:35:08–08:35:10 | `evening`（G7） | 0 | — | 0 / 199 / 260 | `{}` | — | — | 同上 | — | — | — | `the day was already complete; nothing was run`；重跑前后 `RT/paper`、`RT/daily_survivor` 下 9 个文件 sha256 逐一相同：G7 过（文件级） |
 
 ## 3. 逐类拒绝
 
