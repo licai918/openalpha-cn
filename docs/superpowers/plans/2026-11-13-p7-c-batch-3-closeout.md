@@ -8,7 +8,7 @@
 
 - 本批次做的是方案 C 的 BATCH 3（任务 3.1–3.6）：事件级功效计算、C 协议文档、C 登记写入器、链测试、C 报告命令、运行手册与文档波；外加用户 2026-11-12「按推荐」裁决的 `D1`、`D4`、`D5`、`D7`、`D8` 落地。
 - 实施计划是任务书，**不在版本库内**：`.superpowers/sdd/plan-c/plan.md`（BATCH 3 与 Global Constraints）与 `.superpowers/sdd/plan-c/batch3-brief.md`（用户的约束性裁决）。本文是它的版本化记录。
-- 代码在分支 `feat/v2-p7-c-batch-3` 上，**从 `879f420` 分出**（`879f420` 是批次 2 合入后的 main）。本批次 **6 个交付提交**（含 D5 采纳与共用接缝）：`85d3270`（D5 采纳、C 的伴随块读取器、`AGENT_SCRIPTS`、评估器的 dry-week 拒绝）、`40e27a5`（3.1 功效计算）、`f221fe7`（3.2 协议文档）、`4dc45b8`（3.3/3.4 登记写入器与链测试）、`5337512`（3.5 报告与 D7 干跑周），以及本文、路线图、决策链 §9、能力台账与运行手册所在的文档提交。**修复轮 2**（复审 `review-batch3-2.md` 的 N1/N2，见 §9）之后另有 9 个提交：`13c29b2`（共享的期望锚点规则 + 评估器测试）、`744be1e`（N1 功效侧：冻结 sd_between）、`507214a`（N1 写入器侧 + N2 已发布锚点拒绝）、`2dfbd8c`（N2 已登记晚间的第 1 步锚点检查）、`40752ab`（协议/运行手册的修复轮 2 文本）、`7dfff1f`（修复轮 2 记录 / §9 / 台账）、`ac93d4c`（共享锚点 helper 的格式化）、以及收尾核对轮的 2 个修复提交（行 sd 上限检查 + 缺失 panel 不被创建 + 本记录的更正）。**修复轮 3**（复审 `review-batch3-3.md` 的 N3 与覆盖缺口，见 §10）之后另有 2 个代码/测试提交 `6cc60f8`（N3 描述性读数）、`40742d1`（真实 `_admit` 覆盖测试），以及本记录与协议/运行手册更新的文档提交。**修复轮 1**（独立评审 `review-batch3-1.md` 的 9 条意见，见 §8）之后另有 5 个修复提交：`c469eb5`（F4/F9 功效模型）、`b3de60c`（F7 协议文档块读取器）、`b5c535c`（F3 写入器侧/F5/F7 登记写入器）、`98979a3`（F1/F2/F3 报告侧/F8 晚间命令与报告）、`3526f95`（协议/运行手册修复轮文本 + F6 的既有探针测试）。
+- 代码在分支 `feat/v2-p7-c-batch-3` 上，**从 `879f420` 分出**（`879f420` 是批次 2 合入后的 main）。本批次 **6 个交付提交**（含 D5 采纳与共用接缝）：`85d3270`（D5 采纳、C 的伴随块读取器、`AGENT_SCRIPTS`、评估器的 dry-week 拒绝）、`40e27a5`（3.1 功效计算）、`f221fe7`（3.2 协议文档）、`4dc45b8`（3.3/3.4 登记写入器与链测试）、`5337512`（3.5 报告与 D7 干跑周），以及本文、路线图、决策链 §9、能力台账与运行手册所在的文档提交。**修复轮 2**（复审 `review-batch3-2.md` 的 N1/N2，见 §9）之后另有 9 个提交：`13c29b2`（共享的期望锚点规则 + 评估器测试）、`744be1e`（N1 功效侧：冻结 sd_between）、`507214a`（N1 写入器侧 + N2 已发布锚点拒绝）、`2dfbd8c`（N2 已登记晚间的第 1 步锚点检查）、`40752ab`（协议/运行手册的修复轮 2 文本）、`7dfff1f`（修复轮 2 记录 / §9 / 台账）、`ac93d4c`（共享锚点 helper 的格式化）、以及收尾核对轮的 2 个修复提交（行 sd 上限检查 + 缺失 panel 不被创建 + 本记录的更正）。**修复轮 3**（复审 `review-batch3-3.md` 的 N3 与覆盖缺口，见 §10）之后另有 2 个代码/测试提交 `6cc60f8`（N3 描述性读数）、`40742d1`（真实 `_admit` 覆盖测试），以及本记录与协议/运行手册更新的文档提交。**修复轮 4**（复审 `review-batch3-4.md` 的 N4/N5，见 §11）之后另有 2 个提交：`7a42cb4`（`--json` 描述性 outcome）与 `922342f`（测试 git helper 加固），以及本记录/协议/运行手册的文档提交。**修复轮 1**（独立评审 `review-batch3-1.md` 的 9 条意见，见 §8）之后另有 5 个修复提交：`c469eb5`（F4/F9 功效模型）、`b3de60c`（F7 协议文档块读取器）、`b5c535c`（F3 写入器侧/F5/F7 登记写入器）、`98979a3`（F1/F2/F3 报告侧/F8 晚间命令与报告）、`3526f95`（协议/运行手册修复轮文本 + F6 的既有探针测试）。
 - **未推送、未合并。** 全部测试跑在测试时生成的面板、抛掷 git 仓库、合成登记、构造的已存记录与脚本化传输上；pytest 的 socket 守卫全程开着。**没有任何真实数据、真实面板、真实模型**：`scripts/p7_c_power.py` 只在测试里对注入的读取器运行；`scripts/agent_report.py` 只对构造的已存记录运行；`agent_evening.py --dry-week` 只用脚本化传输。
 - **D5 已由用户采纳，PROVISIONAL 标签已移除**：批次 2 的评估器把 futility 形式与单侧读数标为 `PROVISIONAL pending D5`；用户 2026-11-12「按推荐」采纳后，本批次把它们改成 `adopted`（`AgentEvaluation.adopted`，`D5_WORDINGS`），**保留**其全部守卫（全部中期位置到期、按比例可测下限、sticky）。旧的「h1 ≥ 0.02 且 t ≥ 2，或 h5 ≥ 0.06」两检验措辞由决策链 §9 的**追加行**改写，旧行未动。
 - **没有任何 P7 登记存在**：`docs/research/p7-c-registration.json` 没有被写出；`docs/research/p7-registration.json`、`docs/research/p7-protocol.md`、`scripts/daily_selection.py`、`scripts/forward_report.py`、`scripts/p7_register.py` 与任何 `strategy_survivor_*` 模块的字节都没有被本批次改动（C 的晚间命令只 import `daily_selection` 的辅助函数；C 的报告与 Step 0 的周报是两个文件）。
@@ -241,4 +241,30 @@
 ### 10.3 修复轮 3 之后跑过的门槛（定向；不跑目录级/全量）
 
 - 触碰的测试文件：`tests/unit/scripts/test_agent_report.py`（31；含描述性读数保留 `not_measurable`/`futility_stop` 实质措辞的两条）、`tests/unit/scripts/test_agent_evening.py`（49）——一起跑 **80 passed**；`tests/unit/domain/test_contract_identity.py`（44）与 `tests/unit/test_documentation_tables.py`（3）单独跑通过。
+- `ruff check .`、`ruff format --check .`、`mypy --cache-dir=/dev/null src scripts`、`PYTHONPATH=src lint-imports`、`scripts/verify_publication.py`、`scripts/build_feature_coverage.py --check` 在最终 tip 上跑；**串行全量闸门由控制者跑**（本记录不复制控制者的读数）。
+
+## 11. 修复轮 4（复审 N4/N5）
+
+复审 `.superpowers/sdd/plan-c/review-batch3-4.md`（不入库）确认核心行为正确（`3cfea85` 之后运行 `test_agent_report.py` 31 passed、`test_agent_evening.py` 49 passed，ruff/format 干净，真实 `_admit` 覆盖测试被确认），但指出两项：**N4**（重要）绑定报告在描述性读数下 `--json` 的 `outcome` 仍写 `candidate_increment`/`no_increment_detected`，且 `primary.test` 的 p 值没有描述性标注——下游若读 `outcome` 会得到被裁决排除的通过/失败读数；**N5**（次要）真实 `_admit` 测试的两个 git helper 没有完全隔离环境（`_git_unpinned` 把整个进程环境传给 git、`_git_at` 未设 `GIT_CONFIG_GLOBAL`/`NOSYSTEM`），以及子进程传输桩定义的是 `post` 而不是代码实际调用的 `post_json`。
+
+| 项 | 修法 | 测试节点 |
+|---|---|---|
+| **N4**（重要）描述性读数的 `--json` 仍带通过/失败 `outcome`，p 值块无描述性标注 | 描述性读数下 `--json` 的 `outcome` 换成描述性取值：`candidate_increment` → `descriptive_positive_mean`，`no_increment_detected` → `descriptive_nonpositive_mean`；`not_measurable`/`futility_stop` 保留自身取值（与第 10 节文本一致）；`primary.test` 块加 `reading: "descriptive"`。**testable 的 `--json` 与打印文本逐字节不变**（testable 的 `test` 块没有新键，`outcome` 仍是评估器标签）。描述性 JSON 里不再出现 `candidate_increment`/`no_increment_detected` 任何一处 | `test_agent_report.py::test_a_register_untestable_registration_prints_a_descriptive_reading`（断言 `outcome`、`primary.test.reading` 与整份 JSON 不含该两串）、`::test_the_descriptive_reading_keeps_the_not_measurable_wording`、`::test_the_descriptive_reading_keeps_the_futility_wording`、`::test_the_testable_path_keeps_the_registered_outcome_wording`（断言 testable 的 `test` 块没有 `reading` 键） |
+| **N5**（次要）真实 `_admit` 测试的 git helper 不完全隔离；传输桩方法名错误 | 两个 helper 改为复用测试套件已有的 `research_repo.git`：丢弃全部 `GIT_*`、`GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=os.devnull`、固定 author/committer，并额外传 `-C <tmp repo>` 与 `-c user.name/user.email`；子进程传输桩改名为 `post_json`（代码实际调用的方法），网络路径一旦被走到就会大声失败 | `test_agent_evening.py::test_the_real_admission_git_helpers_are_hermetic`（在 `GIT_DIR`/`GIT_WORK_TREE`/`GIT_CONFIG_GLOBAL` 被故意污染的环境下仍只在 tmp 仓库上操作）、`::test_the_real_admission_derives_the_anchor_from_the_committed_registration`（传输桩改为 `post_json` 后仍零请求） |
+
+### 11.1 本轮的行为改变与记录
+
+- **N4 是 `--json` 与裁决的一致性修复**：第 10 节已经把打印文本改成描述性；本轮把同一判断落实到机器可读的 `--json`，因为 `openalpha-agent-report/v1` 的 `outcome` 是文档化的字段，下游/仪表盘/后来的智能体会把它当作答案。描述性读数的 `outcome` 只表达“已存窗口的均值方向”（`descriptive_positive_mean`/`descriptive_nonpositive_mean`），`not_measurable`/`futility_stop` 保留实质结论；`primary.test` 的 p 值带 `reading: descriptive`。testable 登记的 JSON 与文本都没有变化。
+- **N5 是测试卫生**：复用的是套件既有的 `research_repo.git`（它已经丢弃 `GIT_*` 并遮蔽系统/全局配置），再加显式 `-C` 与固定的 `-c` 身份；这与 `test_p7_registration_chain` 的 hardened helper 同一做法。新增的 hermetic 测试在故意设置 `GIT_DIR` 指向外部路径、`GIT_CONFIG_GLOBAL` 指向一个 `commit.gpgsign=true` 的恶意配置时，仍然只在 tmp 仓库上 init/add/commit，证明 helper 不再受继承环境影响。
+- **文档**：协议 §6.2.3 与运行手册 L6 各补一句 `--json` 的描述性取值（`outcome` 与 `primary.test.reading`），使绑定文档在 L5 之前与代码一致；协议 §14 追加一条修复轮 4 记录（只追加）。
+- **本轮没有改**：§5 的顺序、§5.2 的闸门、issue 总数（254）、D5 检验规则、N1 的冻结 `sd_between`；没有网络、没有真实数据、没有写出 C 的登记、没有发过任何模型请求。
+
+### 11.2 本轮 TDD 首红
+
+- **N4**：先扩展四条测试（断言描述性 `outcome`、`primary.test.reading`、整份 JSON 不含两串、testable 的 `test` 块无新键），在未改代码时跑出 **1 failed**：`assert 'candidate_increment' not in {'candidate_increment','no_increment_detected'}`；实现后 **31 passed**。
+- **N5**：先写 hermetic helper 测试，在旧的 `_git_unpinned`/`_git_at` 上跑到 **1 failed**（`subprocess.CalledProcessError: git commit ... exit status 128`，继承的 `GIT_DIR` 与恶意全局配置生效）；改为 `research_repo.git` 基础实现后 **2 passed**（hermetic + 真实 admission）。
+
+### 11.3 修复轮 4 之后跑过的门槛（定向；不跑目录级/全量）
+
+- 触碰的测试文件：`tests/unit/scripts/test_agent_report.py`（31）、`tests/unit/scripts/test_agent_evening.py`（50）；`tests/unit/domain/test_contract_identity.py`（44）与 `tests/unit/test_documentation_tables.py`（3）单独跑。
 - `ruff check .`、`ruff format --check .`、`mypy --cache-dir=/dev/null src scripts`、`PYTHONPATH=src lint-imports`、`scripts/verify_publication.py`、`scripts/build_feature_coverage.py --check` 在最终 tip 上跑；**串行全量闸门由控制者跑**（本记录不复制控制者的读数）。
