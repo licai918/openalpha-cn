@@ -103,7 +103,7 @@ import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Final, Literal, Protocol
 
@@ -127,7 +127,7 @@ from openalpha_cn.domain.incremental_ic import (
 from openalpha_cn.domain.labels import LabelWindow, OutcomeLabel
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
-from openalpha_cn.domain.trading_calendar import TradingCalendar
+from openalpha_cn.domain.trading_calendar import CalendarHorizonError, TradingCalendar
 from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.strategy_agent_forward import REGISTRATION_HYPERPARAMETER
 from openalpha_cn.strategy_registration import (
@@ -260,6 +260,39 @@ def refuse_a_dry_week_runtime(runtime_dir: Path) -> None:
         "its evenings measured only the model family's operational behaviour and filed no "
         "prediction, so they are never part of C's forward sample and this evaluator refuses "
         "to read them as one"
+    )
+
+
+ANCHOR_SEARCH_DAYS: Final[int] = 370
+"""How far past a registration commit `expected_forward_anchor` searches for the next session."""
+
+
+def expected_forward_anchor(calendar: TradingCalendar, *, committed_at: datetime) -> date:
+    """C's registered first forward session: the first trading session after the commit's time.
+
+    N2 (fix round 2): the window anchor is the first trading session whose 16:30 publication
+    instant is **strictly after** the registration commit's time. A commit on a trading day before
+    16:30 makes that same session the anchor (its data becomes knowable after the registration);
+    a commit after 16:30, on a weekend or on a holiday is followed to the next trading session.
+    The report checks the registered anchor against this rule at L6, and the registered evening
+    checks it again in step 1 so a mis-planned commit time fails on day 1, not on day 120.
+    """
+    point = committed_at.astimezone(SHANGHAI)
+    day = point.date()
+    try:
+        for _ in range(ANCHOR_SEARCH_DAYS):
+            if calendar.is_trading_day(day) and session_publication_instant(day) > point:
+                return day
+            day += timedelta(days=1)
+    except CalendarHorizonError as error:
+        raise AgentEvaluationError(
+            f"the anchor cannot be derived: the calendar does not cover the commit's year "
+            f"({error})"
+        ) from error
+    raise AgentEvaluationError(
+        f"the trading calendar names no session in the {ANCHOR_SEARCH_DAYS} days after the "
+        f"registration commit {point.isoformat()}, so it cannot state C's first forward session; "
+        "the anchor cannot be derived: the calendar does not cover the commit's year"
     )
 
 

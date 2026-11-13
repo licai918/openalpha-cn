@@ -65,6 +65,7 @@ from openalpha_cn.strategy_agent_evaluation import (
     AgentEvaluationError,
     AgentProtocol,
     evaluate,
+    expected_forward_anchor,
     read_agent_forward_anchor,
     read_agent_forward_power,
     read_agent_forward_protocol_document,
@@ -365,6 +366,35 @@ def test_a_missing_or_malformed_protocol_document_block_is_refused_by_name() -> 
         read_agent_forward_protocol_document(
             {AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY: {**PROTOCOL_DOCUMENT_BLOCK, "extra": 1}}
         )
+
+
+# --- the expected window anchor (fix round 2, N2) ---------------------------------------------
+
+
+def test_the_expected_anchor_is_the_first_trading_session_after_the_commit_time() -> None:
+    """N2: both the report and the evening derive the anchor with this one function.
+
+    A session is C's first forward session when its 16:30 publication instant is strictly after
+    the registration commit's time: a commit before that day's 16:30 makes the same trading day the
+    anchor, a commit after it (or on a weekend/holiday) is followed to the next trading session.
+    """
+    calendar = calendar_over(SESSIONS)
+
+    same_day = datetime(2026, 1, 9, 10, 0, tzinfo=SHANGHAI)
+    after_close = datetime(2026, 1, 9, 17, 0, tzinfo=SHANGHAI)
+    saturday = datetime(2026, 1, 10, 12, 0, tzinfo=SHANGHAI)
+    sunday = datetime(2026, 1, 11, 12, 0, tzinfo=SHANGHAI)
+
+    assert expected_forward_anchor(calendar, committed_at=same_day) == date(2026, 1, 9)
+    assert expected_forward_anchor(calendar, committed_at=after_close) == date(2026, 1, 12)
+    assert expected_forward_anchor(calendar, committed_at=saturday) == date(2026, 1, 12)
+    assert expected_forward_anchor(calendar, committed_at=sunday) == date(2026, 1, 12)
+
+
+def test_the_expected_anchor_refuses_a_calendar_that_never_opens_again() -> None:
+    calendar = calendar_over(SESSIONS)
+    with pytest.raises(AgentEvaluationError, match="anchor"):
+        expected_forward_anchor(calendar, committed_at=datetime(2031, 1, 1, 12, 0, tzinfo=SHANGHAI))
 
 
 # --- the stored records, the labels, and the evaluator ---------------------------------------
