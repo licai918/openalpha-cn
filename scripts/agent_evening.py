@@ -24,13 +24,23 @@ command is where both are produced. It runs six steps, named by `AGENT_STEPS`:
    (`c-primary`, `c-coverage`) through `strategy_agent_forward.file_agent_batch`. Deterministic:
    a rerun files the same bytes and the same journal document.
 5. **llm family** -- skipped by `--no-llm` and journalled `no_record: llm_disabled`. Otherwise
-   `llm_provider(DEEPSEEK_V4_1_FLASH, replay=False)` with the `json_object` prompt, an evidence
-   roster of `{"market_event"}`, `max_attempts=2`, a hard `--max-model-requests` cap (default
-   600) and a wall `--deadline` (default 23:30 Shanghai). A transport failure, the cap or the
-   deadline leaves **no batch for that set** and journals the reason (decision D6); an invalid
-   answer after its retries is an abstention coded `model_invalid_output`, never a zero. Each
-   stored exchange's `response.model` and `system_fingerprint` are journalled.
-6. **summary** -- the write-once journal and the printed candidate lines (`候选`, "not traded").
+   the **same engine as step 4** runs one `ResearchRunRequest` per name with
+   `StructuredSignalAgent(prompt=V2, include_facts=True, evidence_families={"market_event"})`
+   and `max_attempts=2` over `llm_provider(DEEPSEEK_V4_1_FLASH, replay=False)`. The engine path
+   is what makes 015's `refuse_llm_agents_in_history` history/72-hour guard structural on the
+   only production model path and what stores a run manifest recording the model and prompt
+   versions. The provider's transport is a request budget applied **inside**
+   `RecordingJsonTransport`: the hard `--max-model-requests` cap (default 600) and the wall
+   `--deadline` (default 23:30 Shanghai) are spent only on requests that would reach the
+   endpoint, and every HTTP attempt -- a provider retry included -- is one request, while a
+   replayed answer costs none and is not deadline-gated. A missing or blank credential, any
+   other `ModelConfigurationError`, a transport failure, the cap or the deadline leaves **no
+   batch for that set** and journals the reason (decision D6, fix round 1's F1/F2/F8); an
+   invalid answer after its retries is an abstention coded `model_invalid_output`, never a zero.
+   Each stored exchange's `response.model` and `system_fingerprint` are journalled.
+6. **summary** -- the write-once journal and the printed candidate lines (`候选`, "not traded"),
+   the counts, and -- when the model family was not filed -- the distinct number of names left
+   unscored, labelled with the family's `no_record` reason.
 
 ## The journal is write-once, and a rerun must agree with it
 
@@ -43,7 +53,10 @@ exchanges, so a replayed rerun journals the same identities as the live run.
 
 A journal that recorded `no_record` for the model family is the day's account, and a rerun keeps
 it: the family is not fileable that session (D6), so the rerun makes no model request and
-journals the same reason.
+journals the same reason. A day that *did* file is different: its rerun walks the stored
+exchanges and the engine's completed runs, so it spends nothing against the cap, is not stopped
+by the wall deadline, and reproduces the journal byte for byte -- including a rerun after a
+crash that filed the batches but died before step 6.
 
 ## What it never does
 
@@ -66,7 +79,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final
 
 _SCRIPTS: Final[Path] = Path(__file__).resolve().parent
 for _root in (_SCRIPTS, _SCRIPTS / "research"):
@@ -77,7 +90,6 @@ import daily_selection  # noqa: E402  (helpers only; this script never edits it)
 import registry  # noqa: E402
 from p7_smoke_requests import CappedCounter, RequestCapReached  # noqa: E402
 
-from openalpha_cn.agents.base import AgentContext  # noqa: E402
 from openalpha_cn.agents.baseline import baseline_agents  # noqa: E402
 from openalpha_cn.agents.model import ModelProviderFailure, StructuredSignalAgent  # noqa: E402
 from openalpha_cn.agents.prompts import STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT  # noqa: E402
@@ -103,7 +115,11 @@ from openalpha_cn.evidence.limit_events import (  # noqa: E402
     refuse_a_restated_session,
 )
 from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH  # noqa: E402
-from openalpha_cn.models.openai_compatible import JsonTransport, ModelTransportError  # noqa: E402
+from openalpha_cn.models.openai_compatible import (  # noqa: E402
+    JsonTransport,
+    ModelConfigurationError,
+    ModelTransportError,
+)
 from openalpha_cn.panel.store import PanelStore  # noqa: E402
 from openalpha_cn.panel_ingest import session_publication_instant  # noqa: E402
 from openalpha_cn.panel_limit_events import limit_events_on  # noqa: E402
@@ -115,6 +131,10 @@ from openalpha_cn.runtime.composition import (  # noqa: E402
     model_exchange_store_at,
     prediction_store_at,
     research_engine,
+)
+from openalpha_cn.runtime.engine import (  # noqa: E402
+    EVERY_ROUTED_AGENT_ABSTAINED,
+    NO_AGENT_WAS_ROUTED,
 )
 from openalpha_cn.strategy_agent_forward import (  # noqa: E402
     AgentScore,
@@ -182,7 +202,17 @@ NO_RECORD_LLM_DISABLED: Final[str] = "llm_disabled"
 NO_RECORD_TRANSPORT_ERROR: Final[str] = "transport_error"
 NO_RECORD_REQUEST_CAP_REACHED: Final[str] = "request_cap_reached"
 NO_RECORD_DEADLINE_REACHED: Final[str] = "deadline_reached"
-"""The four `no_record` reasons the journal may carry for the model family (decision D6)."""
+NO_RECORD_CREDENTIAL_MISSING: Final[str] = "credential_missing"
+NO_RECORD_CONFIGURATION_ERROR: Final[str] = "configuration_error"
+"""The six `no_record` reasons the journal may carry for the model family (decision D6).
+
+`credential_missing` and `configuration_error` are F1's ruled addition: a deployment fault is a
+family failure, never an answer. `credential_missing` is the endpoint's named environment
+variable unset or blank before anything was asked; `configuration_error` is any other
+`ModelConfigurationError` from the provider assembly or the request path (an unverified endpoint,
+a malformed base URL or extra payload, a credential that vanished mid-run). Only a genuine
+invalid answer after its retries is `model_invalid_output`.
+"""
 
 _EMPTY_SET: Final[str] = "empty_set"
 """Why a scoring set filed no batch: there is nothing in it. Never a `no_record` gap."""
@@ -572,47 +602,71 @@ class _DeadlineReached(RuntimeError):
     """The wall deadline passed while the model family was being scored."""
 
 
-class _BudgetedProvider:
-    """A provider that refuses to forward a request past the cap or the deadline.
+class _ModelBudget:
+    """One evening's model-request allowance and its wall deadline, spent per HTTP request.
 
-    The counter increments **before** the call and `CappedCounter` refuses the increment past its
-    allowance, so the request beyond the cap is never forwarded -- the same ordering the P7
-    smoke's request budget uses. A replay hit costs no request: `RecordingJsonTransport` answers
-    it inside `llm_provider` before the inner transport, and this wrapper sits outside the
-    provider because wrapping the inner transport would make `llm_provider` read its wrapper as a
-    live transport and bypass the unverified-endpoint gate. The cap therefore bounds provider
-    calls; a retryable transport error the provider retries inside one call is not counted twice.
+    The budget is applied **inside** `RecordingJsonTransport`, through `llm_provider`'s
+    `wrap_transport` hook: a request the exchange store can answer -- a rerun, a crash-and-retry,
+    a repeated request -- is answered before this decorator exists on the path, so it costs no
+    request and is not deadline-gated (F2). Only a request that would be sent reaches `spend`,
+    and every such request is counted -- a retryable transport error that the provider retries is
+    another HTTP attempt and therefore another request against D7's ceiling (F8).
     """
 
     def __init__(
         self,
-        provider: Any,
         *,
         allowance: int,
         deadline: datetime,
         clock: Callable[[], datetime],
     ) -> None:
-        self._provider = provider
         self._deadline = deadline
         self._clock = clock
         self.counter = CappedCounter(allowance)
 
     @property
-    def metadata(self) -> Any:
-        return self._provider.metadata
-
-    @property
     def requests(self) -> int:
+        """How many requests reached (or would have reached) the vendor's endpoint."""
         return self.counter.sent
 
-    def generate_json(self, **arguments: Any) -> dict[str, Any]:
+    def decorate(self, inner: JsonTransport) -> JsonTransport:
+        """`llm_provider`'s hook: wrap the inner HTTP transport, not the provider."""
+        return _BudgetedTransport(inner, budget=self)
+
+    def spend(self) -> None:
+        """Check the deadline and count one HTTP request; refuse past either bound."""
         if self._clock() >= self._deadline:
             raise _DeadlineReached(
                 f"the model family's wall deadline {self._deadline.isoformat()} passed at "
                 f"{self._clock().isoformat()}; no further request was sent"
             )
+        # The increment itself refuses past the allowance (`CappedCounter`), and it happens
+        # before the call, so the request beyond the cap is never forwarded.
         self.counter["model"] = self.counter.get("model", 0) + 1
-        return cast("dict[str, Any]", self._provider.generate_json(**arguments))
+
+
+class _BudgetedTransport:
+    """A `JsonTransport` that spends the evening's budget before forwarding one HTTP request."""
+
+    def __init__(self, inner: JsonTransport, *, budget: _ModelBudget) -> None:
+        self._inner = inner
+        self._budget = budget
+
+    def post_json(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        self._budget.spend()
+        return self._inner.post_json(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def _stable_block(block: Mapping[str, Any]) -> dict[str, Any]:
@@ -749,8 +803,14 @@ def _rule_family(
     )
 
 
-def _exchange_session(exchange: Any) -> str | None:
-    """The `as_of` a stored exchange's user payload names, or `None` when it cannot be read."""
+def _exchange_as_of(exchange: Any) -> datetime | None:
+    """The `as_of` instant a stored exchange's user payload names, or `None` if unreadable.
+
+    Compared as an instant, not as a string: the engine normalises a request's `as_of` to UTC
+    (`domain.time.ensure_aware`), so the same 16:30 Shanghai publication is stored as
+    `08:30+00:00` and a string comparison against the session's Shanghai spelling would report a
+    recorded answer as missing.
+    """
     request = exchange.request
     if not isinstance(request, Mapping):
         return None
@@ -770,7 +830,13 @@ def _exchange_session(exchange: Any) -> str | None:
     if not isinstance(payload, Mapping):
         return None
     as_of = payload.get("as_of")
-    return as_of if isinstance(as_of, str) else None
+    if not isinstance(as_of, str):
+        return None
+    try:
+        point = datetime.fromisoformat(as_of)
+    except ValueError:
+        return None
+    return point if point.tzinfo is not None else None
 
 
 def _token_count(value: object) -> int:
@@ -792,7 +858,7 @@ def _session_exchanges(
         return found, tokens
     for path in sorted(directory.glob("*.json")):
         exchange = store.get(path.stem)
-        if exchange is None or _exchange_session(exchange) != published.isoformat():
+        if exchange is None or _exchange_as_of(exchange) != published:
             continue
         response = exchange.response if isinstance(exchange.response, Mapping) else {}
         found.append(
@@ -847,6 +913,21 @@ def _prior_reason(runtime: Path, session: date) -> str | None:
     return None
 
 
+def _aggregate_abstention(result: Any) -> str:
+    """Which coded abstention an engine aggregate is (F6).
+
+    The engine named its own two abstentions in `runtime/engine.py`; C's closed vocabulary codes
+    them separately so a reader can tell "nothing was routed that could read this subject" from
+    "the one agent that ran declined". The fallback is the rule family's own reading: no agent
+    results means nothing was routed, any results means everything that ran abstained.
+    """
+    if result.signal.abstention_reason == NO_AGENT_WAS_ROUTED:
+        return ABSTAIN_NOT_ROUTED
+    if result.signal.abstention_reason == EVERY_ROUTED_AGENT_ABSTAINED:
+        return ABSTAIN_ALL_ABSTAINED
+    return ABSTAIN_NOT_ROUTED if not result.agent_results else ABSTAIN_ALL_ABSTAINED
+
+
 def _llm_family(
     runtime: Path,
     admitted: AgentRegistration,
@@ -858,7 +939,16 @@ def _llm_family(
     options: argparse.Namespace,
     transport: JsonTransport | None,
 ) -> FamilyDay:
-    """Step 5: the model-backed family, capped, deadlined and journalled per exchange."""
+    """Step 5: the model-backed family through the research engine, capped and journalled.
+
+    Three orderings are load-bearing. The credential is checked before the provider is
+    assembled, so a missing key can never become an invalid answer (F1). The request budget is
+    handed to `llm_provider` as `wrap_transport`, so it decorates the HTTP transport inside the
+    exchange recorder and a replay costs nothing (F2/F8). And every cycle goes through
+    `ResearchEngine.run_cycle`, so `refuse_llm_agents_in_history` runs before the agent does and
+    every run id names a stored manifest (F6). The engine's aggregate decides the score; its
+    two named abstentions map to C's closed vocabulary through `_aggregate_abstention`.
+    """
     if options.no_llm:
         return _no_record(NO_RECORD_LLM_DISABLED)
     prior = _prior_reason(runtime, session)
@@ -871,6 +961,16 @@ def _llm_family(
             "requests one evening may spend, zero or more",
         )
     deadline = _parse_deadline(options.deadline, session)
+    # F1: a credential that is unset or blank has asked the model nothing, so no answer can have
+    # been invalid. Checked before the provider is assembled and before any transport exists.
+    key_env = DEEPSEEK_V4_1_FLASH.api_key_env
+    if key_env is not None and not os.environ.get(key_env, "").strip():
+        return _no_record(NO_RECORD_CREDENTIAL_MISSING)
+    budget = _ModelBudget(
+        allowance=options.max_model_requests,
+        deadline=deadline,
+        clock=clock,
+    )
     try:
         provider = llm_provider(
             DEEPSEEK_V4_1_FLASH,
@@ -878,27 +978,35 @@ def _llm_family(
             clock=clock,
             replay=False,
             transport=transport,
+            wrap_transport=budget.decorate,
         )
-    except ValueError as error:
-        # `llm_provider` refuses a live request to an endpoint whose reading has not been
-        # recorded (`verified_on`), and a malformed endpoint (base URL, extra payload) at
-        # construction: a deployment fault, named as this step's rather than a crash.
-        raise StepFailedError("llm_family", f"{type(error).__name__}: {error}") from error
-    budget = _BudgetedProvider(
-        provider,
-        allowance=options.max_model_requests,
-        deadline=deadline,
-        clock=clock,
-    )
+    except ModelConfigurationError:
+        # F1: an endpoint whose reading has not been recorded or a malformed endpoint is a
+        # deployment fault, and a deployment fault is a family gap -- never an answer and never
+        # a step refusal that leaves the day with no account.
+        return _no_record(NO_RECORD_CONFIGURATION_ERROR)
     agent = StructuredSignalAgent(
         agent_id=AGENT_ID,
         evidence_families=_MARKET_EVENT_FAMILIES,
-        provider=budget,
+        provider=provider,
         max_attempts=2,
         prompt=STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT,
         include_facts=True,
     )
+    # F6: the model family runs through the same engine the rule family uses, one cycle per
+    # name. That is what makes 015's `refuse_llm_agents_in_history` and the 72-hour lag guard
+    # structural on the only production model path, and what stores a run manifest whose
+    # `model_versions`/`prompt_versions` name the model and the prompt that answered.
+    storage = build_storage(runtime_dir=runtime, clock=clock)
+    engine = research_engine(
+        repository=storage.repository,
+        memory=storage.memory,
+        recovery_store=storage.recovery_store,
+        clock=clock,
+        agents=[agent],
+    )
     published = session_publication_instant(session)
+    config_digest = hashlib.sha256(canonical_json_bytes(dict(admitted.config))).hexdigest()
     primary = primary_of(admitted, day, session)
     coverage = coverage_of(day)
     names = sorted(set(primary) | set(coverage))
@@ -912,30 +1020,41 @@ def _llm_family(
             family=AGENT_LLM_FAMILY,
             ts_code=ts_code,
         )
-        subject_evidence = tuple(evidence.by_subject.get(ts_code, ()))
-        if not subject_evidence:
-            scores[ts_code] = AgentScore(
-                ts_code=ts_code, score=None, abstention=ABSTAIN_NOT_ROUTED, run_id=run_id
-            )
-            continue
-        context = AgentContext(
-            run_id=run_id, subject=ts_code, as_of=published, evidence=subject_evidence
+        request = ResearchRunRequest(
+            run_id=run_id,
+            mode=RunMode.daily,
+            subject=ts_code,
+            as_of=published,
+            evidence=tuple(evidence.by_subject.get(ts_code, ())),
+            code_commit=admitted.code_commit,
+            config_digest=config_digest,
+            random_seed=admitted.seed,
         )
         try:
-            result = agent.analyze(context)
+            result = engine.run_cycle(request)
         except ModelProviderFailure:
+            # A genuine invalid answer after its retries is C's coded abstention, never a zero
+            # (D6); it is the one model failure that is still the family's answer.
             scores[ts_code] = AgentScore(
                 ts_code=ts_code, score=None, abstention=ABSTAIN_INVALID_OUTPUT, run_id=run_id
             )
             continue
         except ModelTransportError:
             return _no_record(NO_RECORD_TRANSPORT_ERROR)
+        except ModelConfigurationError:
+            return _no_record(NO_RECORD_CONFIGURATION_ERROR)
         except RequestCapReached:
             return _no_record(NO_RECORD_REQUEST_CAP_REACHED)
         except _DeadlineReached:
             return _no_record(NO_RECORD_DEADLINE_REACHED)
+        except (RuntimeError, ValueError) as error:
+            # Everything else the engine raises is a refusal of the day, not a family gap: 015's
+            # history/72h guard lands here, and the operator sees step 5 refuse by name.
+            raise StepFailedError(
+                "llm_family", f"{ts_code}: {type(error).__name__}: {error}"
+            ) from error
         if result.signal.direction == "abstain":
-            score, abstention = score_of("abstain", 0.0, ABSTAIN_ALL_ABSTAINED)
+            score, abstention = score_of("abstain", 0.0, _aggregate_abstention(result))
         else:
             score, abstention = score_of(result.signal.direction, result.signal.strength, None)
         scores[ts_code] = AgentScore(
@@ -943,7 +1062,7 @@ def _llm_family(
         )
     blocks: dict[str, Mapping[str, Any] | None] = {"primary": None, "coverage": None}
     absent: str | None = None
-    prediction_store = build_storage(runtime_dir=runtime, clock=clock).prediction_store
+    prediction_store = storage.prediction_store
     for scoring_set, set_names in (("primary", primary), ("coverage", coverage)):
         if not set_names:
             absent = _EMPTY_SET
@@ -1152,7 +1271,10 @@ def _run(
         transport=transport,
     )
     filed = options.no_llm or llm.block.get("status") == "filed"
-    failed = 0 if filed else len(primary) + len(coverage)
+    # F11: the count is of names, not set memberships -- a name drawn into primary and held in
+    # the coverage set is one name the day did not score, and `--no-llm` is a decision, not a
+    # failed family.
+    failed = 0 if filed else len(set(primary) | set(coverage))
     document = _journal_document(
         admitted=admitted,
         day=day,
@@ -1186,7 +1308,12 @@ def _print_summary(
     path: Path,
     requests: int,
 ) -> None:
-    """The printed lines step 6 owes: candidate wording, counts, tokens and requests."""
+    """The printed lines step 6 owes: candidate wording, counts, tokens and requests.
+
+    When the model family was not filed the failure count is the number of distinct names the
+    day left unscored and the line names the family's `no_record` reason (F11); a filed day and
+    `--no-llm` print `failed 0`, because a decision is not a failure.
+    """
     summary = document["summary"]
     status = "filed" if llm.block.get("status") == "filed" else "no_record"
     reason = llm.block.get("reason")
@@ -1195,9 +1322,14 @@ def _print_summary(
         f"{NOT_TRADED}: these are candidate signals only; nothing was traded, and a passing "
         "suite is not evidence that the family has an increment"
     )
-    print(
-        f"scored {summary['scored']}, abstained {summary['abstained']}, failed {summary['failed']}"
-    )
+    failed = int(summary["failed"])
+    if failed:
+        print(
+            f"scored {summary['scored']}, abstained {summary['abstained']}, "
+            f"not scored (family not filed: {reason}): {failed}"
+        )
+    else:
+        print(f"scored {summary['scored']}, abstained {summary['abstained']}, failed 0")
     print(
         f"model requests   {requests} this run "
         f"({len(llm.block.get('exchanges') or ())} held for the session)"
@@ -1212,13 +1344,31 @@ def _print_summary(
 
 
 def _launchd_plist(options: argparse.Namespace) -> str:
-    """The printed launchd job: weekdays at 20:30, from the pinned worktree, never installed."""
+    """The printed launchd job: weekdays at 20:30, from the pinned worktree, never installed.
+
+    Every argument the evening's step 2 refuses without is in the job: `--step0-runtime-dir`
+    (F3 -- a printed job without it exits 2 at step 2 on every scheduled evening) as an absolute
+    path, and `--step0-registration` when the operator named one. The command prints and never
+    installs: nothing under `~/Library` is touched and no directory named here is created.
+    """
     worktree = Path(_required(options, "worktree", step="registration")).resolve()
     runtime = Path(_required(options, "runtime_dir", step="registration"))
+    step0_runtime = Path(_required(options, "step0_runtime_dir", step="registration")).resolve()
     named = options.registration
     registration = Path(named) if named else worktree / REGISTRATION_IN_REPOSITORY
     if not registration.is_absolute():
         registration = worktree / registration
+    step0_registration: list[str] = []
+    if options.step0_registration:
+        named_step0_registration = Path(options.step0_registration)
+        if not named_step0_registration.is_absolute():
+            # Relative to the repository the evening runs from, exactly as `_step0_registration`
+            # resolves a named path against its admission root.
+            named_step0_registration = worktree / named_step0_registration
+        step0_registration = [
+            "--step0-registration",
+            str(named_step0_registration.resolve()),
+        ]
     logs = Path(options.log_dir) if options.log_dir else worktree / "logs"
     arguments = [
         str(worktree / ".venv" / "bin" / "python"),
@@ -1227,6 +1377,9 @@ def _launchd_plist(options: argparse.Namespace) -> str:
         str(registration),
         "--runtime-dir",
         str(runtime),
+        "--step0-runtime-dir",
+        str(step0_runtime),
+        *step0_registration,
         "--repo",
         str(worktree),
     ]

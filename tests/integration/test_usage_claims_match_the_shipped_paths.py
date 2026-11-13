@@ -704,24 +704,6 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
         "The same gated construction counted again as a call (the `D12`-review rule). Nothing "
         "runs here in the shipped tree for the reason above.",
     ),
-    UsageSite(
-        "scripts/agent_evening.py", "_BudgetedProvider.generate_json", MODEL_CALL_NAMED
-    ): Counted(
-        1,
-        "The budget wrapper's `generate_json` forwards to the provider it wraps. It is only "
-        "reached from the gated `_llm_family` loop, so the shipped tree never calls it while the "
-        "endpoint constant is unverified -- the model family journals `no_record` and files "
-        "nothing in that case.",
-    ),
-    UsageSite(
-        "scripts/agent_evening.py",
-        "_BudgetedProvider.generate_json",
-        CALLED_KINDS[MODEL_CALL_NAMED],
-    ): Counted(
-        1,
-        "The same forwarded call counted again as a call. Its reachability is the gated "
-        "`_llm_family` loop above.",
-    ),
 }
 """Every `UsageSite` outside `tests/`, with how often it occurs and why it neither calls a model
 nor records usage."""

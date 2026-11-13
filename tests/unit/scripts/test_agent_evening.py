@@ -24,6 +24,7 @@ import importlib
 import json
 import subprocess
 import sys
+import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -46,13 +47,18 @@ from openalpha_cn.domain.agent_forward import (
     primary_sample,
 )
 from openalpha_cn.domain.alpha_model import AlphaModelArtifact, Prediction, PredictionBatch
+from openalpha_cn.domain.llm_contamination import HistoricalLLMRefusedError
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
 from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH
-from openalpha_cn.models.openai_compatible import ModelTransportError
+from openalpha_cn.models.openai_compatible import ModelConfigurationError, ModelTransportError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import session_publication_instant
-from openalpha_cn.runtime.composition import prediction_store_at, run_repository_at
+from openalpha_cn.runtime.composition import (
+    build_storage,
+    prediction_store_at,
+    run_repository_at,
+)
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_forward_session import file_forward_record, outcome_calendar
 from openalpha_cn.strategy_registration import SHANGHAI, RegisteredConfiguration
@@ -568,6 +574,47 @@ def test_the_step0_runtime_is_never_written(
 # --- the model-backed family --------------------------------------------------------------------
 
 
+def _evening_clock(world: World) -> Any:
+    """A clock pinned to `world.evening`, bound once so a loop cannot capture a stale world."""
+    return lambda: world.evening
+
+
+def test_a_missing_or_blank_credential_is_a_family_failure_never_an_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F1: a deployment failure is `no_record`, not a whole day of `model_invalid_output`.
+
+    `llm_provider` needs the credential named by the endpoint's `api_key_env`; when the variable
+    is unset or blank the evening has not asked the model anything, so no answer can have been
+    invalid. The rule family is still filed, the model family journals the gap by name, and a
+    transport that would have answered is never reached.
+    """
+    for blank in ("unset", "blank"):
+        case = tmp_path / blank
+        case.mkdir()
+        world = _world(case, monkeypatch)
+        if blank == "unset":
+            monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        else:
+            monkeypatch.setenv("DEEPSEEK_API_KEY", "   ")
+        model = ScriptedModel("valid")
+
+        code = agent.main(world.arguments(), clock=_evening_clock(world), transport=model)
+        capsys.readouterr()
+
+        assert code == 0
+        assert model.calls == 0, "a missing credential must prevent every request"
+        journal = _journal(world)
+        assert journal["llm_family"]["status"] == "no_record"
+        assert journal["llm_family"]["reason"] == "credential_missing"
+        assert journal["llm_family"]["primary"] is None
+        assert journal["llm_family"]["coverage"] is None
+        assert _records(world, AGENT_LLM_FAMILY) == []
+        assert len(_records(world, AGENT_RULE_FAMILY)) == 2
+
+
 class ScriptedModel:
     """A model transport whose answers are scripted: `valid`, `invalid` or a transport failure."""
 
@@ -589,6 +636,8 @@ class ScriptedModel:
     ) -> dict[str, Any]:
         self.requests.append(payload)
         action = self.script[min(len(self.requests) - 1, len(self.script) - 1)]
+        if action == "retryable":
+            raise ModelTransportError("the scripted transport failed", retryable=True)
         if action == "error":
             raise ModelTransportError("the scripted transport failed", retryable=False)
         content = "not a json object" if action == "invalid" else json.dumps(self._answer(payload))
@@ -622,6 +671,18 @@ class ScriptedModel:
 
 def _journal(world: World) -> dict[str, Any]:
     return json.loads(world.journal_path().read_text(encoding="utf-8"))
+
+
+def _instant_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The provider's backoff does not sleep in tests: HTTP attempts are what the cap counts."""
+    real = agent.llm_provider
+
+    def provider(*args: Any, **kwargs: Any) -> Any:
+        built = real(*args, **kwargs)
+        built.sleeper = lambda _seconds: None
+        return built
+
+    monkeypatch.setattr(agent, "llm_provider", provider)
 
 
 def test_llm_rerun_replays_stored_exchanges_with_zero_inner_calls_and_is_unchanged(
@@ -720,30 +781,72 @@ def test_the_deadline_stops_the_llm_family_and_journals_no_record(
     assert _records(world, AGENT_LLM_FAMILY) == []
 
 
-def test_an_unverified_endpoint_is_a_named_llm_family_refusal(
+class ConfigurationFailingModel:
+    """A transport that raises `ModelConfigurationError`: a deployment fault mid-run."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def post_json(self, **arguments: Any) -> dict[str, Any]:
+        self.calls += 1
+        raise ModelConfigurationError("the credential vanished between the check and the call")
+
+
+def test_a_configuration_error_on_the_request_path_is_also_a_family_gap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A live request from an endpoint nobody has read is refused by name, not attempted.
+    """F1: the catch beside `ModelTransportError` covers a config error raised on the call path.
 
-    The refusal is `llm_provider`'s: while `DEEPSEEK_V4_1_FLASH.verified_on` is `None` a real
-    request would spend money against an invented model id. The rule family is still filed (the
-    deterministic family is the one that is always filed), the journal is not written, and
-    nothing reached a transport. Once the endpoint is verified -- at gated step L2 -- this test
-    skips: it pins the placeholder's refusal, not a fact about the deployment.
+    The provider is assembled (the credential pre-check passed) but the request path raises a
+    `ModelConfigurationError`; it is refused as a deployment fault before any retry, never filed
+    as an invalid answer.
+    """
+    world = _world(tmp_path, monkeypatch)
+    model = ConfigurationFailingModel()
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=model)
+    capsys.readouterr()
+
+    assert code == 0
+    assert model.calls == 1, "a configuration error is not retried as an invalid answer"
+    journal = _journal(world)
+    assert journal["llm_family"]["status"] == "no_record"
+    assert journal["llm_family"]["reason"] == "configuration_error"
+    assert _records(world, AGENT_LLM_FAMILY) == []
+    assert len(_records(world, AGENT_RULE_FAMILY)) == 2
+
+
+def test_an_unverified_endpoint_is_a_configuration_gap_not_an_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F1's controller ruling: any `ModelConfigurationError` from the assembly is a family gap.
+
+    `llm_provider` still refuses the live request by name while `DEEPSEEK_V4_1_FLASH.verified_on`
+    is `None` -- nothing reaches a transport and the placeholder model id is never spent -- but
+    the evening now records that deployment failure as `no_record: configuration_error` and goes
+    on: the rule family is filed, no model batch exists, and exit is 0. Before this ruling the
+    same error was a step-5 refusal and the day had no journal at all; that is the F1 ruled
+    behaviour change, not a silent adaptation. Once the endpoint is verified -- at gated step L2
+    -- this test skips: it pins the placeholder's gap, not a fact about the deployment.
     """
     if DEEPSEEK_V4_1_FLASH.verified_on is not None:
-        pytest.skip("the endpoint has been verified; the unverified-refusal path is unreachable")
+        pytest.skip("the endpoint has been verified; the unverified path is unreachable")
     world = _world(tmp_path, monkeypatch)
 
     code = agent.main(world.arguments(), clock=lambda: world.evening)
+    capsys.readouterr()
 
-    err = capsys.readouterr().err
-    assert code != 0
-    assert "step 5 (llm_family) failed" in err
-    assert "has not been verified" in err
-    assert not world.journal_path().exists()
+    assert code == 0
+    journal = _journal(world)
+    assert journal["llm_family"]["status"] == "no_record"
+    assert journal["llm_family"]["reason"] == "configuration_error"
+    assert journal["llm_family"]["primary"] is None
+    assert journal["llm_family"]["coverage"] is None
+    assert _records(world, AGENT_LLM_FAMILY) == []
     assert len(_records(world, AGENT_RULE_FAMILY)) == 2
 
 
@@ -772,6 +875,263 @@ def test_an_invalid_answer_after_retries_is_an_abstention_coded_model_invalid_ou
     ]
     assert invalid
     assert {prediction.abstention for prediction in invalid} == {ABSTAIN_INVALID_OUTPUT}
+
+
+# --- the deadline and the cap are spent on HTTP requests only (F2/F8) ---------------------------
+
+
+def test_a_post_deadline_rerun_of_a_filed_day_replays_with_zero_inner_calls_and_is_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F2: the 23:30 wall deadline is not a gate on a rerun of a day already answered.
+
+    The first evening filed the model family; every request of a rerun is answered by the
+    exchange store (or by the engine's completed run), so the deadline never applies and the
+    day's account is reproduced byte for byte.
+    """
+    world = _world(tmp_path, monkeypatch)
+    live = ScriptedModel("valid")
+
+    assert agent.main(world.arguments(), clock=lambda: world.evening, transport=live) == 0
+    capsys.readouterr()
+    journal_after_first = world.journal_path().read_bytes()
+    answers_after_first = _answers(world.runtime)
+    assert _journal(world)["llm_family"]["status"] == "filed"
+
+    after_deadline = datetime.combine(world.session, time(23, 45), tzinfo=SHANGHAI)
+    replay = ScriptedModel()
+
+    code = agent.main(world.arguments(), clock=lambda: after_deadline, transport=replay)
+    printed = capsys.readouterr().out
+
+    assert code == 0
+    assert replay.calls == 0, "a replay of a filed day costs no request, whatever the hour"
+    assert world.journal_path().read_bytes() == journal_after_first
+    assert _answers(world.runtime) == answers_after_first
+    assert _journal(world)["llm_family"]["status"] == "filed"
+    assert "unchanged" in printed
+
+
+def test_a_crash_after_filing_before_the_journal_is_finished_by_a_post_deadline_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F2's second failure scenario: the batches are filed, the evening dies before step 6.
+
+    The rerun after the wall deadline must finish the day from the stored exchanges -- filing
+    nothing new and spending no request -- and journal the family `filed` with the same records.
+    """
+    world = _world(tmp_path, monkeypatch)
+    live = ScriptedModel("valid")
+    real_write_journal = agent._write_journal
+
+    def crash_after_filing(path: Path, document: Any) -> str:
+        raise agent.StepFailedError("summary", "scripted crash after the batches were filed")
+
+    monkeypatch.setattr(agent, "_write_journal", crash_after_filing)
+    assert (
+        agent.main(world.arguments(), clock=lambda: world.evening, transport=live)
+        == agent.AgentEveningExit.refused
+    )
+    capsys.readouterr()
+    assert not world.journal_path().exists()
+    first_records = {record.record_id for record in _records(world, AGENT_LLM_FAMILY)}
+    assert len(first_records) == 2, "both LLM batches were filed before the crash"
+
+    monkeypatch.setattr(agent, "_write_journal", real_write_journal)
+    after_deadline = datetime.combine(world.session, time(23, 45), tzinfo=SHANGHAI)
+    replay = ScriptedModel()
+
+    code = agent.main(world.arguments(), clock=lambda: after_deadline, transport=replay)
+    capsys.readouterr()
+
+    assert code == 0
+    assert replay.calls == 0
+    journal = _journal(world)
+    assert journal["llm_family"]["status"] == "filed"
+    assert {record.record_id for record in _records(world, AGENT_LLM_FAMILY)} == first_records
+
+
+def test_a_zero_request_cap_rerun_of_a_filed_day_replays_and_is_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F2: `--max-model-requests 0` bounds a rerun's new requests, not its replays."""
+    world = _world(tmp_path, monkeypatch)
+    live = ScriptedModel("valid")
+
+    assert agent.main(world.arguments(), clock=lambda: world.evening, transport=live) == 0
+    capsys.readouterr()
+    journal_after_first = world.journal_path().read_bytes()
+
+    replay = ScriptedModel()
+
+    code = agent.main(
+        world.arguments("--max-model-requests", "0"),
+        clock=lambda: world.evening,
+        transport=replay,
+    )
+    printed = capsys.readouterr().out
+
+    assert code == 0
+    assert replay.calls == 0
+    assert world.journal_path().read_bytes() == journal_after_first
+    assert _journal(world)["llm_family"]["status"] == "filed"
+    assert "unchanged" in printed
+
+
+def test_provider_retries_count_every_http_attempt_against_the_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F8: the cap is D7's ceiling on HTTP requests, so a provider retry is a second request.
+
+    Two retryable transport failures then a valid answer are three requests sent, and the
+    printed spend says three even though one exchange is held.
+    """
+    world = _world(tmp_path, monkeypatch)
+    _instant_retries(monkeypatch)
+    model = ScriptedModel("retryable", "retryable", "valid")
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=model)
+    printed = capsys.readouterr().out
+
+    assert code == 0
+    assert model.calls == 3, "each provider retry is another HTTP request"
+    journal = _journal(world)
+    assert journal["llm_family"]["status"] == "filed"
+    assert "model requests   3 this run" in printed
+    assert len(journal["llm_family"]["exchanges"]) == 1, "one successful answer is held"
+
+
+def test_the_cap_counts_http_attempts_so_retries_past_the_allowance_are_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F8: the request past the allowance is never sent, retries included."""
+    world = _world(tmp_path, monkeypatch)
+    _instant_retries(monkeypatch)
+    model = ScriptedModel("retryable", "retryable", "valid")
+
+    code = agent.main(
+        world.arguments("--max-model-requests", "2"),
+        clock=lambda: world.evening,
+        transport=model,
+    )
+    capsys.readouterr()
+
+    assert code == 0
+    assert model.calls == 2, "the third HTTP attempt crossed the allowance and was not sent"
+    journal = _journal(world)
+    assert journal["llm_family"]["status"] == "no_record"
+    assert journal["llm_family"]["reason"] == "request_cap_reached"
+    assert _records(world, AGENT_LLM_FAMILY) == []
+    assert len(_records(world, AGENT_RULE_FAMILY)) == 2
+
+
+# --- the model family runs through the engine (F6) ----------------------------------------------
+
+
+def test_the_llm_family_runs_through_the_engine_so_the_history_guard_refuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F6: 015's history/72h guard is structural on the model path, because the engine runs it.
+
+    The engine's own `refuse_llm_agents_in_history` is patched to refuse an `llm_backed` roster
+    (the deterministic rule roster still passes through): a day that could only be produced by a
+    historical replay must refuse at step 5, file no journal and spend no model request.
+    """
+    import openalpha_cn.runtime.engine as engine_module
+
+    world = _world(tmp_path, monkeypatch)
+
+    def refusing_guard(
+        *,
+        path: str,
+        mode: Any,
+        as_of: datetime,
+        ran_at: datetime,
+        agents: Any,
+    ) -> None:
+        if any(kind == "llm_backed" for _agent_id, kind in agents):
+            raise HistoricalLLMRefusedError(
+                "engine refuses the model roster: this cycle follows the patched history guard"
+            )
+
+    monkeypatch.setattr(engine_module, "refuse_llm_agents_in_history", refusing_guard)
+    model = ScriptedModel("valid")
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=model)
+    err = capsys.readouterr().err
+
+    assert code != 0
+    assert "step 5 (llm_family) failed" in err
+    assert "HistoricalLLMRefusedError" in err
+    assert model.calls == 0, "the guard runs before the agent, so no request is spent"
+    assert not world.journal_path().exists()
+    assert _records(world, AGENT_LLM_FAMILY) == []
+    assert len(_records(world, AGENT_RULE_FAMILY)) == 2, "the deterministic family was filed"
+
+
+def test_the_llm_runs_have_stored_manifests_recording_model_and_prompt_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F6: every model run is an engine run, so its manifest names the model and the prompt.
+
+    Before this fix the LLM family called `agent.analyze` directly and the `run_id` given to it
+    named no stored run. The evidence-bearing subject's run must now hold a manifest whose
+    `model_versions` and `prompt_versions` are the endpoint's model and the V2 prompt; a subject
+    with no routable evidence still holds a manifest, with empty provenance because no agent ran.
+    """
+    world = _world(tmp_path, monkeypatch)
+    model = ScriptedModel("valid")
+
+    assert agent.main(world.arguments(), clock=lambda: world.evening, transport=model) == 0
+    capsys.readouterr()
+
+    storage = build_storage(runtime_dir=world.runtime, clock=lambda: world.evening)
+    names = sorted(set(world.primary) | set(world.coverage))
+    run_ids = {
+        name: agent.agent_run_id(
+            config_id=world.c.registered.config_id,
+            session=world.session,
+            family=AGENT_LLM_FAMILY,
+            ts_code=name,
+        )
+        for name in names
+    }
+    manifests = {name: storage.repository.get_run(run_id) for name, run_id in run_ids.items()}
+    assert all(manifest is not None for manifest in manifests.values()), (
+        "every LLM run must be stored; a run id that names no run is not a declared run"
+    )
+
+    evidence_manifest = manifests[world.evidence_subject]
+    assert evidence_manifest is not None
+    assert evidence_manifest.model_versions, "the model that answered is not recorded"
+    assert [(ref.component, ref.version) for ref in evidence_manifest.model_versions] == [
+        (DEEPSEEK_V4_1_FLASH.provider_id, DEEPSEEK_V4_1_FLASH.model)
+    ]
+    assert evidence_manifest.prompt_versions, "the prompt that was sent is not recorded"
+    assert evidence_manifest.prompt_versions[0].component.endswith(
+        agent.STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT.name
+    )
+
+    for name, manifest in manifests.items():
+        if name == world.evidence_subject:
+            continue
+        assert manifest is not None
+        assert manifest.model_versions == ()
+        assert manifest.prompt_versions == ()
 
 
 # --- the two scoring sets -----------------------------------------------------------------------
@@ -821,7 +1181,67 @@ def test_coverage_and_primary_are_filed_separately_and_overlap_reuses_one_run_id
     assert len(filed) == len(union)
 
 
+# --- the summary's failure count (F11) -----------------------------------------------------------
+
+
+def test_a_no_record_day_counts_distinct_names_and_labels_them_not_scored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F11: the count is of names a filed family would have scored, not of set memberships.
+
+    The fixture's coverage set overlaps the primary draw; a transport failure leaves the model
+    family unfiled, and a name in both sets is one name that was not scored. The printed line
+    says why, so "failed 5" is not read as five bad answers.
+    """
+    world = _world(tmp_path, monkeypatch)
+    assert set(world.primary) & set(world.coverage), "the fixture must overlap the two sets"
+    model = ScriptedModel("error")
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=model)
+    printed = capsys.readouterr().out
+
+    assert code == 0
+    distinct = len(set(world.primary) | set(world.coverage))
+    assert distinct < len(world.primary) + len(world.coverage)
+    journal = _journal(world)
+    assert journal["llm_family"]["status"] == "no_record"
+    assert journal["summary"]["failed"] == distinct
+    assert f"not scored (family not filed: transport_error): {distinct}" in printed
+
+
+def test_a_no_llm_day_reports_zero_not_scored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F11: `--no-llm` is a decision, not a failed family, so it reports 0."""
+    world = _world(tmp_path, monkeypatch)
+
+    assert agent.main(world.arguments("--no-llm"), clock=lambda: world.evening) == 0
+    printed = capsys.readouterr().out
+
+    journal = _journal(world)
+    assert journal["summary"]["failed"] == 0
+    assert "failed 0" in printed
+
+
 # --- the operator commands ----------------------------------------------------------------------
+
+
+def _plist_program_arguments(printed: str) -> list[str]:
+    """The `ProgramArguments` strings of a printed plist, read with a real XML parser."""
+    root = ElementTree.fromstring(printed.split("</plist>")[0] + "</plist>")
+    dictionary = root.find("dict")
+    assert dictionary is not None, "the printed plist has no top-level dictionary"
+    children = list(dictionary)
+    for index, child in enumerate(children):
+        if child.tag == "key" and child.text == "ProgramArguments":
+            array = children[index + 1]
+            assert array.tag == "array"
+            return [str(element.text) for element in array]
+    raise AssertionError("the printed plist has no ProgramArguments")
 
 
 def test_the_launchd_plist_is_printed_never_installed(
@@ -829,6 +1249,7 @@ def test_the_launchd_plist_is_printed_never_installed(
 ) -> None:
     worktree = tmp_path / "pinned"
     runtime = tmp_path / "runtime"
+    step0 = tmp_path / "step0"
 
     code = agent.main(
         [
@@ -837,6 +1258,8 @@ def test_the_launchd_plist_is_printed_never_installed(
             str(worktree),
             "--runtime-dir",
             str(runtime),
+            "--step0-runtime-dir",
+            str(step0),
             "--registration",
             str(worktree / "docs" / "research" / "p7-c-registration.json"),
         ]
@@ -854,6 +1277,75 @@ def test_the_launchd_plist_is_printed_never_installed(
     assert "never installed" in printed
     assert not runtime.exists()
     assert not worktree.exists()
+    assert not step0.exists()
+
+
+def test_the_launchd_arguments_satisfy_the_evening_step2_precondition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F3: the printed job carries `--step0-runtime-dir` (absolute) and step 0's registration.
+
+    Without that argument every scheduled evening exits 2 at step 2, so the operator's installed
+    job would file nothing. The arguments are fed back through the command's own parser: the
+    installed job runs the evening, not another `--print-launchd`.
+    """
+    worktree = tmp_path / "pinned"
+    runtime = tmp_path / "runtime"
+    monkeypatch.chdir(tmp_path)
+
+    code = agent.main(
+        [
+            "--print-launchd",
+            "--worktree",
+            str(worktree),
+            "--runtime-dir",
+            str(runtime),
+            "--step0-runtime-dir",
+            "step0",
+            "--step0-registration",
+            "docs/research/p7-registration.json",
+        ]
+    )
+    printed = capsys.readouterr().out
+
+    assert code == 0
+    arguments = _plist_program_arguments(printed)
+    assert [Path(arguments[0]).name, Path(arguments[0]).parent.name] == ["python", "bin"]
+    assert Path(arguments[1]).name == "agent_evening.py"
+
+    options = agent._parser().parse_args(arguments[2:])
+    assert options.print_launchd is False, "the installed job runs the evening, not the printer"
+    assert options.step0_runtime_dir == str((tmp_path / "step0").resolve())
+    assert Path(options.step0_runtime_dir).is_absolute()
+    assert options.step0_registration == str(
+        (worktree / "docs" / "research" / "p7-registration.json").resolve()
+    )
+    assert options.runtime_dir == str(runtime)
+
+
+def test_print_launchd_refuses_without_the_step0_runtime_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F3: a job that could never run step 2 is not printed at all."""
+    worktree = tmp_path / "pinned"
+    runtime = tmp_path / "runtime"
+
+    code = agent.main(
+        [
+            "--print-launchd",
+            "--worktree",
+            str(worktree),
+            "--runtime-dir",
+            str(runtime),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == agent.AgentEveningExit.refused
+    assert captured.out == ""
+    assert "--step0-runtime-dir is required" in captured.err
+    assert not worktree.exists()
+    assert not runtime.exists()
 
 
 def _pin_world(tmp_path: Path) -> tuple[Path, Path]:
