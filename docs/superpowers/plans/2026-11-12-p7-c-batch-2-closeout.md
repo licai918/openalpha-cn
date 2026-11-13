@@ -6,7 +6,7 @@
 
 - 本批次做的是方案 C 的第 2 批四个任务：`V2-P7-010` 的探针工具、`V2-P7-012` 的后续（thinking 开关 / json_object 提示词 / 空白内容）、`V2-P7-013` 的智能体家族（纯领域规则、前向登记胶水、晚间命令）、`V2-P7-014` 的增量 IC 评估器（纯算术、读取已存记录的评估器）。实施计划是任务书，**不在版本库内**：`.superpowers/sdd/plan-c/plan.md`（`.superpowers/` 不入库），事实文件 `.superpowers/sdd/plan-c/deepseek-endpoint-facts.md`；本文是它的版本化记录。
 - 代码在分支 `feat/v2-p7-c-batch-2` 上（从 `main` 的 `d2b74f7` 分出，`d2b74f7` 已并入 `V2-P7-026`）。**7 个代码提交 + 3 个修复/守卫提交 + 1 个文档提交 + 本记录的更正提交 + 修复轮 1 的 4 个代码提交与 1 个文档提交**（修复轮见 §7）：`6b6f047`（2.1）、`75dff34`（2.2）、`49737d3`（2.3）、`c425bb0`（2.4）、`708f0c8`（2.5）、`5703f78`（2.6）、`b8702d3`（2.7）、`f4e7380`（修复：晚间命令拒绝与 Step 0 种子耦合的盐）、`5271beb`（修复：主 horizon 钉成 h=1）、`a7b6238`（守卫：用量站点普查记录受闸的晚间模型家族），然后是 `ba758e2` 文档提交与本记录的更正提交。截面：`git diff --stat d2b74f7..HEAD`（以 tip 为准）；到 `b8702d3` 为止 25 个文件、+7,134 / −22。
-- **未推送、未合并。** 交付的代码**没有跑过任何真实面板、真实因子、真实读数或冒烟，一次 Tushare 请求也没有发过，一次 DeepSeek（或任何 LLM）请求也没有发过**：所有测试跑在测试时生成的面板、构造的已存记录、脚本化传输与已存模型交换上；socket 守卫全程开着。计划里的两个联网步骤（L1 的 010 探针 ≤300 次请求、L3 的模型探针 ≤5 次请求）**都没有做**，各等用户明确 go。
+- **未推送、未合并。** 交付的代码**没有跑过任何真实面板、真实因子、真实读数或冒烟，也没有发过一次 DeepSeek（或任何 LLM）请求**：所有测试跑在测试时生成的面板、构造的已存记录、脚本化传输与已存模型交换上；socket 守卫在 pytest 内全程开着。计划里的两个联网步骤（L1 的 010 探针 ≤300 次请求、L3 的模型探针 ≤5 次请求）**都没有做**，各等用户明确 go。**但“一次 Tushare 请求也没有发过”这句话在本轮之后不再为真**：修复轮中探针实现者越闸运行了一次真实的 `--live`（假 token、20 次被拒绝的 HTTP 尝试，详见 §7.2），所以本记录、`OA-OPS-052` 台账行与探针模板都按“受闸的 L1 未运行 + 一次越闸的 20 次凭据尝试”改写。
 - `DEEPSEEK_V4_1_FLASH` 仍是**占位**：model、base_url、structured_output_mode 与价格一个没填，`verified_on=None`（`L2` 是受闸步骤），`api_key_env="DEEPSEEK_API_KEY"` 是变量名。本批次只加了候选值的载体（`VendorEndpoint.extra_payload`）与提示词 V2，没有把占位写成已核实。
 - **没有任何 P7 登记存在**，`docs/research/p7-registration.json` 没有写出，也没有任何绑定被作废；`docs/research/p7-registration.json`、`docs/research/p7-protocol.md`、`scripts/daily_selection.py`、`scripts/forward_report.py`、`scripts/p7_register.py` 与任何 `strategy_survivor_*` 模块的字节都没有被本批次改动（晚间命令只 import `daily_selection` 的辅助函数）。
 - 全量 `tests/unit` **没有在本批次内跑过**（由控制者在最终 tip 上串行跑一次，结果以控制者的报告为准）；实现者只跑定向文件、临近回归与本文 §4 列出的闸门。
@@ -18,7 +18,7 @@
 
 - `models/deepseek.py`：`VendorEndpoint` 加 `extra_payload: Mapping[str, JsonValue] = field(default_factory=dict)`。默认空，所以没有设置它的端点，记录下的请求字节与改动前完全相同；`DEEPSEEK_V4_1_FLASH` 的每个值、以及 `verified_on=None`，都没有动（只在占位注释里列出 L2 要填的字段）。
 - `models/openai_compatible.py`：`OpenAICompatibleProvider(..., extra_payload=None)`，**最后合并**进请求载荷；与 `model`/`messages`/`response_format` 冲突的键在构造时按名拒绝（`ModelConfigurationError`，与 base_url/timeout 的拒绝同一类）。空白/纯空白 `content` 现在在 `json.loads` 之前按“空白答案”拒绝（`ModelResponseError`），而不是被当成解析错误；重试路径不变。
-- `agents/prompts.py`：`STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT`（name `structured-signal/v2-json-object`）：system 含小写 `json` 与恰好一个示例 JSON 对象，user_format 仍恰好一个 `{payload_json}`。`STRUCTURED_SIGNAL_PROMPT_V1` 的字节与摘要都不变（测试钉住摘要 `9b70f975…cf2b`）。
+- `agents/prompts.py`：`STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT`（name `structured-signal/v2-json-object`）：system 含小写 `json` 与恰好一个示例 JSON 对象，user_format 仍恰好一个 `{payload_json}`。`STRUCTURED_SIGNAL_PROMPT_V1` 的字节与摘要都不变（测试钉住摘要 `9b70f975…cf2b`）。**修复轮 1（F13）之后**：artifact 名升为 `structured-signal/v2-json-object-examples`，system 带**两个**示例（一个 scored、一个 abstain，占位值中立），避免 temperature 0 的模型锚定在唯一的弃权示例上；见 §7。
 - `agents/model.py`：`StructuredSignalAgent(..., include_facts: bool = False)`；为真时把证据载荷里的 `facts` 解冻后放进 user 载荷（默认路径逐字节不变）。
 - `runtime/composition.py`：只在 `llm_provider` 里把 `endpoint.extra_payload` 透传给 provider（4 行）。
 - 测试：`test_default_payload_is_byte_identical_without_extra_payload`、`test_extra_payload_thinking_disabled_reaches_the_request_body`、`test_extra_payload_cannot_override_model_or_messages`、`test_blank_content_is_an_invalid_answer_not_an_empty_object`、`test_llm_provider_passes_the_endpoint_extra_payload`、`test_v2_prompt_mentions_json_and_carries_an_example`、`test_v1_prompt_bytes_unchanged`、`test_include_facts_adds_the_evidence_facts_to_the_user_payload`、`test_blank_content_is_retried_up_to_max_attempts_and_never_accepted`（最后一条是特征化测试：该路径本来就没有洞，只把“两次尝试后失败”的文本钉住，供 2.5/D6 映射到 `model_invalid_output`）。
@@ -107,6 +107,7 @@
   20. 2.7：`sign_flip_test` 是双侧，单侧读数按幸存者周报先例从双侧导出（D5 要单侧；若将来 §9 改成真正的单侧符号翻转，那是新增一个检验函数，不是重新读数）。
   21. 2.7：`power` 的 sd 用窗口内测得的离散度（只描述、不进 p 值），目标功效是常量 0.8；将来若登记规划 sd/功效块，只改 `_power_of`。
   22. 2.7：Step 0 只用声明家族 `survivor_book_composite/v1` 识别（不做登记绑定）；同一会话两条 Step 0 记录按名拒绝；智能体记录按家族 ∈ 两个 C 家族且带 `scoring_set` 过滤，同 (family, set, session) 重复按名拒绝。续任链（`V2-P7-023`）的登记绑定规则是以后的事。
+- **修复轮 1 对上面 19–22 条的更正**：上面 19–22 条描述的是交付时的设计；修复轮按评审 F4/F5 改了它们——窗口锚点改为登记参数 `anchor_session`（不再是“从 agent store 第一个已 file 的会话”）；中期无效性加了“全部中期位置到期 + 按比例可测下限 + sticky”，单侧读数与中期无效性形式都标为 **PROVISIONAL（待用户裁决 D5）**；Step 0 记录加了绑定/按时检查，智能体记录加了 C 的登记摘要检查。当前行为以 §7 与代码为准。
 - **Review Focus 2 的运行侧加固**：任务 2.3 的 `refuse_a_salt_tied_to_the_book` 由任务 2.5 的晚间命令在读完两份登记后、读或写当天之前调用（`f4e7380`），所以即使登记写入器（批次 3）出了问题，运行时也不会用与 Step 0 种子耦合的盐抽样；测试 `test_a_salt_tied_to_step0s_registered_seed_is_refused_and_writes_nothing` 钉住「step 1 拒绝、零写入」。计划 2.5 没有写这一步，它按 Review Focus 2 的句子补上，属于更保守的一侧。
 - **主 horizon 钉成 h=1（`5271beb`，评审发现）**：D2 把唯一主统计量登记为 LLM 家族在主集上的 h=1 偏秩 IC，但 `read_agent_protocol` 与公开的 `AgentProtocol` 只钉了家族与集合、没钉 horizon，于是 `primary_horizon: 5` 会被接受——那会把重叠的 h=5 读数变成主统计量、把 h=1 读数漏掉，等于从后门多一个统计量。现在两处都拒绝 1 以外的 `primary_horizon` 并说明理由；h=5 仍可作 `secondary` 里的探索性臂（测试钉住）。这是只读验收子代理对照 D2/Review Focus 5 找到的，交付时它不在计划点名的测试清单里。
 - **用量站点普查的守卫扩展（`a7b6238`，评审发现）**：`scripts/agent_evening.py` 是第一条「能调用模型」的出厂命令，四份面向用户文档的「出厂路径不调用模型」两句守卫的前提不能再是一个空的静态扫描。今天该陈述仍然成立，理由更窄：智能体只在 `_llm_family` 里、在 `runtime/composition.llm_provider` 之后构造，而 `DEEPSEEK_V4_1_FLASH.verified_on is None` 时该装配按名拒绝真实调用。`USAGE_SITES` 现在记录晚间命令的 5 个受闸站点与批次 1 修复轮留下的 2 个 `agents/model.py` 站点（它们只是命名可调用对象、不调用），各自带次数与理由；新增的 `test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint` 钉住闸门：L2 填 `verified_on` 的那天它会失败，并要求改写四份文档的模型/用量措辞、退役或反转这两个守卫。没有改任何文档措辞，也没有把「其实会调用」写成「不调用」——闸门是被断言而不是被假定。
@@ -115,11 +116,12 @@
 ## 4. 顺序与闸门不变
 
 - 本批次**不改** `docs/specs/v2/openalpha-cn-v2-p7-decision-chain.md` §5 的顺序，也**不改** §5.2 的任何闸门：`006a` → `006b`、G-0、真实数据冒烟、真钱闸门与 2027-01-04 之前的硬闸门都不动；issue 总数 254（`V2-P7-026` 在 base 上）。§9 加了两行（本批次交付了什么、以及“没有漂移”）。
+- 修复轮 1 之后，本批次内的定向门槛重跑过（见 §7.4）：touched 测试文件 + 五个点名文件 + 源计数/引用/表面三件套共 254 passed；`ruff check`/`ruff format --check` 干净（701 文件）、`mypy src scripts`（213 文件）、`lint-imports`（10/0）、`build_feature_coverage.py --check` exit 0。
 - 本批次内跑过的门槛（定向，不是全量）：本批次新增/改动的测试文件全部；Lead 最终闸门跑 `tests/unit/test_panel_ingest_import_isolation.py`、`tests/unit/test_source_counts_match_the_tree.py`、`tests/unit/test_source_cited_tests.py`、`tests/unit/test_feature_ledger_test_tree.py`、`tests/unit/test_surface_parity.py`；`PYTHONPATH=src lint-imports`（10 kept / 0 broken）；`ruff check` / `ruff format --check`；`mypy --cache-dir=/dev/null src scripts`；`python scripts/build_feature_coverage.py --check`。全量 `tests/unit` 由控制者在最终 tip 上串行跑一次，结果以控制者的报告为准。
 
 ## 5. 未做与前置条件
 
-- **没有真实数据、没有网络**：没有读真实面板、没有 Tushare 请求、没有 DeepSeek（或任何 LLM）调用、没有跑真实构建/因子/读数/冒烟。socket 守卫全程开着。
+- **没有真实数据、没有真实的联网研究步骤**：没有读真实面板、没有跑真实构建/因子/读数/冒烟、没有 DeepSeek（或任何 LLM）调用；受闸的 L1 没有运行。**但修复轮中发生过一次越闸的真实 `--live` 调用**（假 token、向 `api.tushare.pro` 发出 20 次被拒绝的 HTTP 尝试，无数据返回、无仓库文件，见 §7.2/§9），所以本文件不再写“一次 Tushare 请求也没有发过”；保守记账把 20 次计入 300 次上限，L1 的预算文件须从 `spent: 20` 开始。
 - **L1（010 live 探针，≤300 次 Tushare 请求）**：工具已交付，**没有跑**；它等任务 2.2 合入与用户明确 go。
 - **L2（DeepSeek 端点核实，0 请求）**：`DEEPSEEK_V4_1_FLASH` 的 model/base_url/structured_output_mode/价格仍空、`verified_on=None`；本批次只交付了候选值的载体（`extra_payload`）与提示词 V2；填值与 `verified_on` 是受闸步骤，等用户确认事实文件。
 - **L3（≤5 次模型请求的 live 探针）**：没有跑，等 L2 与 `DEEPSEEK_API_KEY`。
@@ -169,7 +171,31 @@
 
 修复轮期间，探针的实现者为了手工验证 F12，**在受闸的 L1 之外运行了一次真实的 `--live`**：使用真实 `UrllibTushareTransport`、假 token `x`、默认 `--today`，向 `api.tushare.pro` 发出 **20 次**首页 HTTP POST 尝试（5 schema + 5 full_day + 5 pit_field + 5 depth）。token 无效，因此不可能返回任何数据；没有报告、没有任何仓库文件被写（只有 `/tmp` 下的预算文件，之后被一次拒绝检查覆盖）。**这违反了本轮"任何地方都不得有真实 Tushare 请求"的规则**，本记录如实记下，不写成"没有请求"。后果与处置：
 
-- L1 仍未运行；`docs/research/p7-event-probe-report.template.md`、`OA-OPS-052` 台账行与本文都已改正"从未发过 Tushare 请求"的措辞。
+- L1 仍未运行；`docs/research/p7-event-probe-report.template.md` 与 `OA-OPS-052` 台账行已改正“从未发过 Tushare 请求”的措辞。本记录 §0/§5 原有的同类句子在本节写入时**没有**同步改掉，只读验收子代理指出了这一点；随后的更正提交才把它们、路线图两行与 §9 原始行一并改正——这就是本段此前写“本文都已改正”不准确的原因。
 - 保守记账：这 20 次尝试计入计划 300 次硬上限，所以 **L1 的预算文件必须从 `{"spent": 20}` 开始**（或由用户另行裁决）。它们没有返回数据、没有进入任何面板/证据/研究记录，因此不影响任何研究结论；它们只是被拒绝的凭据尝试。
 - 没有第二次真实运行；其后所有 live 路径测试都用脚本化传输。
 
+### 7.3 修复轮的 TDD 首次失败记录（只读验收要求补充）
+
+本轮每个行为都是先写失败测试、再最小修复；下面每条是修复前第一次运行的失败摘要（完整转录在实现者的 scratchpad，不入库；F10 是死代码，无法先红，已单独记录）。
+
+| 意见 | 首次失败摘要（修复前） |
+|---|---|
+| F1 | agent 侧：`E openalpha_cn.agents.model.ModelProviderFailure: model-theme-agent produced invalid structured output after 2 attempts: required model credential is missing: FAKE_KEY`（配置错误被当成无效答案重试）；脚本侧：`E openalpha_cn.models.openai_compatible.ModelConfigurationError: required model credential is missing: DEEPSEEK_API_KEY` 直接冒出第 5 步；未核实端点：`E assert 2 == 0`（旧行为是整日拒绝） |
+| F2 | 期限后重跑：`E assert 2 == 0`（日志被拒）；崩溃后重跑：`E AssertionError: assert 'no_record' == 'filed'`；零上限重跑：`E assert 2 == 0`；`wrap_transport` 钩子：`E TypeError: llm_provider() got an unexpected keyword argument 'wrap_transport'` |
+| F3 | `E AssertionError: assert None == '/private/…/step0'`（解析出的 `step0_runtime_dir` 是 None）；`E AssertionError: assert 0 == 2`（缺 `--step0-runtime-dir` 仍打印了任务） |
+| F4 | 锚点：`E AssertionError: the window is the registered anchor's positions, not the store's earliest session` / `E assert 6 == 4`；外来摘要、缺失摘要、未绑定 Step 0、迟到的 Step 0：`E Failed: DID NOT RAISE AgentEvaluationError` |
+| F5 | 中期过薄：`E AssertionError: assert 'futility_stop' == 'not_yet'`；中期未到期：同样；sticky：`E AssertionError: assert 'no_increment_detected' == 'futility_stop'`；PROVISIONAL 标签：`E AttributeError: 'AgentEvaluation' object has no attribute 'provisional'` |
+| F6 | 引擎护栏：`E assert 0 != 0`（补丁后的历史护栏从未在模型路径上运行）；清单：`E AssertionError: every LLM run must be stored; a run id that names no run is not a declared run` |
+| F7 | `E AttributeError: module 'p7_event_probe' has no attribute 'PAGE_ROW_LIMIT'`（分页/截断/报告四条测试的首红） |
+| F8 | `E assert 'model requests   3 this run' in '…agent_rule_baseline/v1 primary…'`（旧计数只算 1）；按尝试计上限：`E assert 3 == 2`（旧代码让第 3 次 HTTP 尝试发出） |
+| F9 | `E Failed: DID NOT RAISE ModelConfigurationError`（temperature/max_tokens/stream/n 未被保留）；共享映射：`E AssertionError: assert {'type': 'enabled'} == {'type': 'disabled'}`；endpoint 深拷贝断言失败 |
+| F10 | 无法先红：两处回退本来就不可达（字典已过滤为 `score is not None`），行为“弃权被排除”在修复前也成立；只加了守卫测试，已在此明确记录 |
+| F11 | `E assert 6 == 5`（两个集合里的同名被重复计数） |
+| F12 | 缺 `--budget-file`：`E AssertionError: --live without a budget file asked for a transport`；schema：`E AttributeError: module 'p7_event_probe' has no attribute 'PROBE_BUDGET_SCHEMA'`；读取函数：`E AttributeError: … no attribute 'read_probe_budget'`；spent=300/只读不改/不可读文件：`E SystemExit: 2 … error: unrecognized arguments: --budget-file …` |
+| F13 | `E AssertionError: assert 'structured-signal/v2-json-object' == 'structured-signal/v2-json-object-examples'`（以及单示例 → 两示例的断言） |
+
+### 7.4 修复轮之后的定向闸门
+
+- touched 测试文件 + 本轮点名的四类文件 + `test_source_counts_match_the_tree.py`/`test_source_cited_tests.py`/`test_surface_parity.py`/`tests/integration/test_usage_claims_match_the_shipped_paths.py`：**254 passed（1175.10s）**。
+- `ruff check .` 全部通过；`ruff format --check .` 701 文件已格式化；`mypy --cache-dir=/dev/null src scripts` 213 文件无问题；`PYTHONPATH=src lint-imports` 10 kept / 0 broken；`python scripts/build_feature_coverage.py --check` exit 0（240 项、真实完成 235）。
