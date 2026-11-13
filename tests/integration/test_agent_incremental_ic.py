@@ -55,6 +55,7 @@ from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.strategy_agent_evaluation import (
     AGENT_FORWARD_ANCHOR_KEY,
     AGENT_FORWARD_POWER_KEY,
+    AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY,
     AGENT_FORWARD_PROTOCOL_KEY,
     AGENT_FORWARD_PROTOCOL_SCHEMA,
     AGENT_FORWARD_STEP0_KEY,
@@ -66,6 +67,7 @@ from openalpha_cn.strategy_agent_evaluation import (
     evaluate,
     read_agent_forward_anchor,
     read_agent_forward_power,
+    read_agent_forward_protocol_document,
     read_agent_forward_step0,
     read_agent_protocol,
 )
@@ -322,6 +324,47 @@ def test_a_companion_block_with_an_unknown_field_is_refused() -> None:
     settings = {AGENT_FORWARD_ANCHOR_KEY: {**ANCHOR_BLOCK, "extra": 1}}
     with pytest.raises(AgentEvaluationError, match="extra"):
         read_agent_forward_anchor(settings)
+
+
+PROTOCOL_DOCUMENT_BLOCK: Final[Mapping[str, object]] = {
+    "schema_version": "agent-forward-protocol-document/v1",
+    "path": "docs/research/p7-c-protocol.md",
+    "sha256": "d" * 64,
+}
+
+
+def test_the_frozen_protocol_document_block_is_read_with_no_defaults() -> None:
+    """F7: the registration binds the committed protocol text it freezes (fix round 1).
+
+    The registration's settings carry the protocol document's repository-relative path and the
+    sha256 of its committed bytes, so a reader can tell which text was frozen; a block that
+    omitted either would leave the frozen text unstated.
+    """
+    document = read_agent_forward_protocol_document(
+        {AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY: dict(PROTOCOL_DOCUMENT_BLOCK)}
+    )
+
+    assert document.path == "docs/research/p7-c-protocol.md"
+    assert document.sha256 == "d" * 64
+
+
+def test_a_missing_or_malformed_protocol_document_block_is_refused_by_name() -> None:
+    with pytest.raises(AgentEvaluationError, match=AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY):
+        read_agent_forward_protocol_document({})
+    with pytest.raises(AgentEvaluationError, match="sha256"):
+        read_agent_forward_protocol_document(
+            {
+                AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY: {
+                    "schema_version": "agent-forward-protocol-document/v1",
+                    "path": "docs/research/p7-c-protocol.md",
+                    "sha256": "not-a-digest",
+                }
+            }
+        )
+    with pytest.raises(AgentEvaluationError, match="extra"):
+        read_agent_forward_protocol_document(
+            {AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY: {**PROTOCOL_DOCUMENT_BLOCK, "extra": 1}}
+        )
 
 
 # --- the stored records, the labels, and the evaluator ---------------------------------------

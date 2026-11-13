@@ -275,6 +275,9 @@ AGENT_FORWARD_STEP0_SCHEMA: Final = "agent-step0-registration/v1"
 AGENT_FORWARD_ANCHOR_KEY: Final = "agent_forward_anchor"
 """The settings key of C's registered first forward session (the evaluator's window anchor)."""
 AGENT_FORWARD_ANCHOR_SCHEMA: Final = "agent-forward-anchor/v1"
+AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY: Final = "agent_forward_protocol_document"
+"""The settings key of the protocol document C's registration freezes (fix round 1, F7)."""
+AGENT_FORWARD_PROTOCOL_DOCUMENT_SCHEMA: Final = "agent-forward-protocol-document/v1"
 
 _HEX_SHA256: Final = r"[0-9a-f]{64}"
 
@@ -328,6 +331,16 @@ class _AnchorBlock(BaseModel):
     session: date
 
 
+class _ProtocolDocumentBlock(BaseModel):
+    """The `agent-forward-protocol-document/v1` block: the frozen protocol text's address."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agent-forward-protocol-document/v1"]
+    path: Annotated[str, Field(min_length=1)]
+    sha256: Annotated[str, Field(pattern=_HEX_SHA256)]
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentForwardPower:
     """The D1 power decision: the registered sample, its verdict and the report it came from."""
@@ -355,6 +368,14 @@ class AgentForwardAnchor:
     """C's registered first forward session: the evaluator's window anchor."""
 
     session: date
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentForwardProtocolDocument:
+    """The protocol document C's registration freezes: its path and committed sha256."""
+
+    path: str
+    sha256: str
 
 
 def _block_of(settings: Mapping[str, object], key: str, schema: str) -> Mapping[str, object]:
@@ -438,6 +459,27 @@ def read_agent_forward_anchor(settings: Mapping[str, object]) -> AgentForwardAnc
             f"{AGENT_FORWARD_ANCHOR_SCHEMA} block: {problems}"
         ) from error
     return AgentForwardAnchor(session=parsed.session)
+
+
+def read_agent_forward_protocol_document(
+    settings: Mapping[str, object],
+) -> AgentForwardProtocolDocument:
+    """The `agent_forward_protocol_document` block: the committed protocol text C freezes (F7)."""
+    block = _block_of(
+        settings, AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY, AGENT_FORWARD_PROTOCOL_DOCUMENT_SCHEMA
+    )
+    try:
+        parsed = _ProtocolDocumentBlock.model_validate(dict(block))
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or 'the block'}: {item['msg']}"
+            for item in error.errors()
+        )
+        raise AgentEvaluationError(
+            f"the registration's {AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY} is not a valid "
+            f"{AGENT_FORWARD_PROTOCOL_DOCUMENT_SCHEMA} block: {problems}"
+        ) from error
+    return AgentForwardProtocolDocument(path=parsed.path, sha256=parsed.sha256)
 
 
 AgentOutcome = Literal[
