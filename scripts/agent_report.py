@@ -205,6 +205,34 @@ def _descriptive_outcome_wording(outcome: str) -> str:
     return DESCRIPTIVE_OUTCOME_WORDING
 
 
+_DESCRIPTIVE_OUTCOMES: Final[Mapping[str, str]] = {
+    "candidate_increment": "descriptive_positive_mean",
+    "no_increment_detected": "descriptive_nonpositive_mean",
+    "not_measurable": "not_measurable",
+    "futility_stop": "futility_stop",
+    "not_yet": "not_yet",
+}
+"""N4: the `--json` outcome value for a descriptive reading.
+
+The documented `outcome` key is what a downstream reader treats as the answer; for a registration
+made not_testable it must not carry a test's pass/fail label. The increment labels become
+descriptive values, while `not_measurable` and `futility_stop` keep their substantive outcomes (the
+text already frames them as descriptions of the stored window). The testable path keeps the
+evaluator's labels unchanged.
+"""
+
+
+def _descriptive_outcome(outcome: str) -> str:
+    """The descriptive `--json` outcome for `outcome` (N4); unknown labels are refused."""
+    try:
+        return _DESCRIPTIVE_OUTCOMES[outcome]
+    except KeyError as error:
+        raise AgentReportError(
+            f"the evaluator's outcome {outcome!r} is not one of C's five registered outcomes; the "
+            "report does not invent a descriptive label for it"
+        ) from error
+
+
 class AgentReportError(ValueError):
     """The report cannot state its facts as asked; the command prints this and exits 2."""
 
@@ -476,16 +504,21 @@ def _model_aliases(
     }
 
 
-def _test_view(test: Any) -> dict[str, Any] | None:
+def _test_view(test: Any, *, descriptive: bool) -> dict[str, Any] | None:
     if test is None:
         return None
-    return {
+    view = {
         "two_sided_p_value": test.two_sided_p_value,
         "one_sided_p_value": test.one_sided_p_value,
         "exact": test.exact,
         "sign_patterns": test.sign_patterns,
         "random_seed": test.random_seed,
     }
+    if descriptive:
+        # N4: the p-values in a not_testable registration's JSON are labelled descriptive; the
+        # testable path keeps this block byte-identical (no extra key).
+        view["reading"] = READING_DESCRIPTIVE
+    return view
 
 
 def _exploratory_view(reading: Any, *, q: float) -> dict[str, Any]:
@@ -574,10 +607,12 @@ def _view(
             "missing": primary.missing,
             "unmeasured": primary.unmeasured,
             "mean": primary.mean,
-            "test": _test_view(primary.test),
+            "test": _test_view(primary.test, descriptive=descriptive_reading),
             "descriptive_only": primary.test is None,
         },
-        "outcome": evaluation.outcome,
+        "outcome": (
+            _descriptive_outcome(evaluation.outcome) if descriptive_reading else evaluation.outcome
+        ),
         "outcome_wording": (
             _descriptive_outcome_wording(evaluation.outcome)
             if descriptive_reading

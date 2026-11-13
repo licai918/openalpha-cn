@@ -734,8 +734,16 @@ def test_a_register_untestable_registration_prints_a_descriptive_reading(
     assert "adopted" not in out, "no adopted-rule block is presented as a decision"
     view = json.loads(report_path.read_text(encoding="utf-8"))
     assert view["reading"] == "descriptive"
+    assert view["outcome"] not in {"candidate_increment", "no_increment_detected"}
+    assert view["outcome"] == "descriptive_positive_mean"
     assert view["outcome_wording"].startswith("descriptive (registered not_testable):")
     assert view["adopted"] == []
+    assert view["primary"]["test"]["reading"] == "descriptive"
+    document = json.dumps(view, ensure_ascii=False)
+    for phrase in ("candidate_increment", "no_increment_detected"):
+        assert phrase not in document, f"the descriptive --json carries {phrase!r}"
+    for phrase in FORBIDDEN_TEST_PHRASES:
+        assert phrase not in document, f"the descriptive --json carries {phrase!r}"
 
 
 def test_the_descriptive_reading_keeps_the_not_measurable_wording(
@@ -759,6 +767,13 @@ def test_the_descriptive_reading_keeps_the_not_measurable_wording(
     assert "no test is made (window not matured, or the registration is not testable)" in out
     for phrase in FORBIDDEN_TEST_PHRASES:
         assert phrase not in out, f"the descriptive report printed {phrase!r}"
+    report_path = tmp_path / "report.json"
+    report.main(world.arguments("--json", str(report_path)), clock=lambda: AS_OF)
+    view = json.loads(report_path.read_text(encoding="utf-8"))
+    assert view["outcome"] == "not_measurable"
+    document = json.dumps(view, ensure_ascii=False)
+    for phrase in ("candidate_increment", "no_increment_detected"):
+        assert phrase not in document, f"the descriptive --json carries {phrase!r}"
 
 
 def test_the_descriptive_reading_keeps_the_futility_wording(
@@ -778,6 +793,13 @@ def test_the_descriptive_reading_keeps_the_futility_wording(
     assert "a design stop, not a negative result" in out
     for phrase in FORBIDDEN_TEST_PHRASES:
         assert phrase not in out, f"the descriptive report printed {phrase!r}"
+    report_path = tmp_path / "report.json"
+    report.main(world.arguments("--json", str(report_path)), clock=lambda: AS_OF)
+    view = json.loads(report_path.read_text(encoding="utf-8"))
+    assert view["outcome"] == "futility_stop"
+    document = json.dumps(view, ensure_ascii=False)
+    for phrase in ("candidate_increment", "no_increment_detected"):
+        assert phrase not in document, f"the descriptive --json carries {phrase!r}"
 
 
 def test_the_testable_path_keeps_the_registered_outcome_wording(
@@ -799,7 +821,11 @@ def test_the_testable_path_keeps_the_registered_outcome_wording(
     assert "descriptive (registered not_testable)" not in out
     view = json.loads(report_path.read_text(encoding="utf-8"))
     assert view["reading"] == "test"
+    assert view["outcome"] == "candidate_increment"
     assert view["outcome_wording"].startswith("candidate_increment:")
+    assert "reading" not in view["primary"]["test"], (
+        "the testable --json's test block must stay byte-identical"
+    )
 
 
 def test_the_primary_test_is_printed_only_after_the_window_and_carries_its_reading(
