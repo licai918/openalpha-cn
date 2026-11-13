@@ -53,14 +53,20 @@ from openalpha_cn.model_view import LabelReach, OutcomeLabels
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.strategy_agent_evaluation import (
+    AGENT_FORWARD_ANCHOR_KEY,
+    AGENT_FORWARD_POWER_KEY,
     AGENT_FORWARD_PROTOCOL_KEY,
     AGENT_FORWARD_PROTOCOL_SCHEMA,
+    AGENT_FORWARD_STEP0_KEY,
     GAP_NO_AGENT_RECORD,
     NOT_MEASURABLE_WORDING,
     AgentEvaluation,
     AgentEvaluationError,
     AgentProtocol,
     evaluate,
+    read_agent_forward_anchor,
+    read_agent_forward_power,
+    read_agent_forward_step0,
     read_agent_protocol,
 )
 from openalpha_cn.strategy_registration import RegisteredConfiguration, registration_cutoff
@@ -221,6 +227,101 @@ def test_the_primary_horizon_is_pinned_to_one_session() -> None:
         .horizon
         == 5
     )
+
+
+# --- the registration's companion blocks (D1/D7) ---------------------------------------------
+
+
+POWER_BLOCK: Final[Mapping[str, object]] = {
+    "schema_version": "agent-forward-power/v1",
+    "sample": "n300",
+    "verdict": "testable",
+    "register_untestable": False,
+    "report_sha256": "a" * 64,
+    "measurable_sessions": 92,
+    "detectable_mean": 0.021,
+}
+STEP0_BLOCK: Final[Mapping[str, object]] = {
+    "schema_version": "agent-step0-registration/v1",
+    "path": "docs/research/p7-registration.json",
+    "registration_sha256": "b" * 64,
+    "config_id": "step0-config-id",
+    "seed": 7,
+}
+ANCHOR_BLOCK: Final[Mapping[str, object]] = {
+    "schema_version": "agent-forward-anchor/v1",
+    "session": "2026-12-21",
+}
+
+
+def test_the_companion_blocks_are_read_with_no_defaults() -> None:
+    """D1/D7: the power decision, the Step 0 identity and the window anchor are registered.
+
+    Each block is closed and required: a registration that omitted one would leave code choosing
+    which sample was registered, which Step 0 book it reads, or where the window starts.
+    """
+    settings = {
+        AGENT_FORWARD_POWER_KEY: dict(POWER_BLOCK),
+        AGENT_FORWARD_STEP0_KEY: dict(STEP0_BLOCK),
+        AGENT_FORWARD_ANCHOR_KEY: dict(ANCHOR_BLOCK),
+    }
+    power = read_agent_forward_power(settings)
+    step0 = read_agent_forward_step0(settings)
+    anchor = read_agent_forward_anchor(settings)
+
+    assert (power.sample, power.verdict, power.measurable_sessions) == ("n300", "testable", 92)
+    assert (step0.path, step0.config_id, step0.seed) == (
+        "docs/research/p7-registration.json",
+        "step0-config-id",
+        7,
+    )
+    assert anchor.session == date(2026, 12, 21)
+
+
+@pytest.mark.parametrize(
+    "key", (AGENT_FORWARD_POWER_KEY, AGENT_FORWARD_STEP0_KEY, AGENT_FORWARD_ANCHOR_KEY)
+)
+def test_a_missing_companion_block_is_refused_by_name(key: str) -> None:
+    settings = {
+        AGENT_FORWARD_POWER_KEY: dict(POWER_BLOCK),
+        AGENT_FORWARD_STEP0_KEY: dict(STEP0_BLOCK),
+        AGENT_FORWARD_ANCHOR_KEY: dict(ANCHOR_BLOCK),
+    }
+    settings.pop(key)
+
+    readers = {
+        AGENT_FORWARD_POWER_KEY: read_agent_forward_power,
+        AGENT_FORWARD_STEP0_KEY: read_agent_forward_step0,
+        AGENT_FORWARD_ANCHOR_KEY: read_agent_forward_anchor,
+    }
+    with pytest.raises(AgentEvaluationError, match=key):
+        readers[key](settings)
+
+
+def test_the_power_block_records_the_d1_untestable_choice_only_with_the_flag() -> None:
+    """D1: `not_testable` is registered only as the user's explicit --register-untestable call."""
+    settings = {AGENT_FORWARD_POWER_KEY: {**POWER_BLOCK, "verdict": "not_testable"}}
+    with pytest.raises(AgentEvaluationError, match=r"register[-_]untestable"):
+        read_agent_forward_power(settings)
+
+    settings = {
+        AGENT_FORWARD_POWER_KEY: {
+            **POWER_BLOCK,
+            "verdict": "not_testable",
+            "register_untestable": True,
+        }
+    }
+    assert read_agent_forward_power(settings).register_untestable is True
+
+    settings = {AGENT_FORWARD_POWER_KEY: {**POWER_BLOCK, "register_untestable": True}}
+    with pytest.raises(AgentEvaluationError, match=r"register[-_]untestable"):
+        read_agent_forward_power(settings)
+
+
+def test_a_companion_block_with_an_unknown_field_is_refused() -> None:
+    settings = {AGENT_FORWARD_ANCHOR_KEY: {**ANCHOR_BLOCK, "extra": 1}}
+    with pytest.raises(AgentEvaluationError, match="extra"):
+        read_agent_forward_anchor(settings)
 
 
 # --- the stored records, the labels, and the evaluator ---------------------------------------
@@ -495,6 +596,7 @@ def evaluate_with(
     anchor: date = ANCHOR,
     through: date = THROUGH,
     as_of: datetime = AS_OF,
+    agent_runtime_dir: Path | None = None,
     **changes: object,
 ) -> AgentEvaluation:
     agent = [record for group in records if group is not None for record in group]
@@ -509,6 +611,7 @@ def evaluate_with(
         anchor_session=anchor,
         through=through,
         as_of=as_of,
+        agent_runtime_dir=agent_runtime_dir,
     )
 
 
@@ -801,28 +904,60 @@ def test_a_matured_non_positive_interim_stays_futility_after_the_window_fills() 
     )
 
 
-def test_the_futility_form_and_the_one_sided_reading_are_labelled_provisional() -> None:
-    """F5/D5: both the futility form and the one-sided reading are PROVISIONAL pending D5.
+def test_the_futility_form_and_the_one_sided_reading_are_the_adopted_d5_rules() -> None:
+    """F5/D5: the futility form and the one-sided reading were ADOPTED by the user on 2026-11-12.
 
-    The protocol's values come from the plan; the *form* of the futility rule and reading a
-    two-sided sign-flip one-sidedly are D5 content the user has not ruled on. The answer carries
-    the words so no report can present either as adopted.
+    Batch 2 carried them as PROVISIONAL pending D5; the user's ruling ("按推荐") adopts both, so
+    an evaluation now states the rules it applied. No report may present either as a proposal,
+    and both statements are always populated, before the window as well as after it.
     """
     evaluation = evaluate_with(agent_records(planted_scores(SESSIONS[:6])))
 
-    assert len(evaluation.provisional) == 2
-    for label in evaluation.provisional:
-        assert "PROVISIONAL" in label
+    assert len(evaluation.adopted) == 2
+    for label in evaluation.adopted:
+        assert "PROVISIONAL" not in label
+        assert "adopted" in label
         assert "D5" in label
-    futility = [label for label in evaluation.provisional if "futility" in label.lower()]
-    one_sided = [label for label in evaluation.provisional if "one-sided" in label]
-    assert len(futility) == 1, "the futility form is labelled"
-    assert len(one_sided) == 1, "the one-sided reading is labelled"
+    futility = [label for label in evaluation.adopted if "futility" in label.lower()]
+    one_sided = [label for label in evaluation.adopted if "one-sided" in label]
+    assert len(futility) == 1, "the futility form is stated as adopted"
+    assert len(one_sided) == 1, "the one-sided reading is stated as adopted"
 
     early = evaluate_with(
         agent_records(planted_scores(SESSIONS[:2])), step0=step0_records(SESSIONS[:2])
     )
-    assert early.provisional == evaluation.provisional, "the labels are always populated"
+    assert early.adopted == evaluation.adopted, "the adopted rules are always populated"
+
+
+def test_a_dry_week_scratch_runtime_is_never_evaluated(tmp_path: Path) -> None:
+    """D7: the dry week's scratch runtime is never read as C's forward sample.
+
+    The dry week measures operational behaviour before C's registration exists and files no
+    prediction, so a runtime carrying its marker is refused by name rather than evaluated as a
+    session store with missing records. A marker that cannot be read is a refusal too.
+    """
+    import json
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    # An unmarked runtime is C's ordinary runtime and is read normally.
+    assert evaluate_with(agent_records(planted_scores(SESSIONS[:2])), agent_runtime_dir=scratch)
+
+    marker = scratch / "c-dry-week-scratch.json"
+    marker.write_text(
+        json.dumps({"schema": "openalpha-c-dry-week-scratch/v1", "evenings": ["2026-01-05"]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(AgentEvaluationError, match="dry-week"):
+        evaluate_with(agent_records(planted_scores(SESSIONS[:2])), agent_runtime_dir=scratch)
+
+    marker.write_text("{not json", encoding="utf-8")
+    with pytest.raises(AgentEvaluationError, match=r"cannot be read|status"):
+        evaluate_with(agent_records(planted_scores(SESSIONS[:2])), agent_runtime_dir=scratch)
+
+    marker.write_text(json.dumps({"schema": "other/v1"}), encoding="utf-8")
+    with pytest.raises(AgentEvaluationError, match=r"schema|status"):
+        evaluate_with(agent_records(planted_scores(SESSIONS[:2])), agent_runtime_dir=scratch)
 
 
 def test_an_abstention_is_excluded_never_scored_as_zero() -> None:

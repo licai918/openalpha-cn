@@ -55,6 +55,7 @@ from openalpha_cn.domain.trading_calendar import (
 from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.runtime.composition import build_storage
 from openalpha_cn.strategy_agent_forward import (
+    AGENT_SCRIPTS,
     AgentScore,
     agent_batch,
     agent_declaration,
@@ -435,3 +436,15 @@ def test_strategy_agent_forward_reaches_no_engine_no_composition_no_paper_book()
         "the module files through `strategy_forward_session`; if that edge is gone it "
         "re-implements the protocol, which is the duplication R1 exists to prevent"
     )
+
+
+def test_the_two_c_scripts_are_one_spelling() -> None:
+    """`AGENT_SCRIPTS` is the one spelling of the code C's registration binds (task 3.3).
+
+    The evening command's step-1 admission, the registration writer and the report's admission
+    all read this tuple, so a script added here (or left out) is a registration-binding change,
+    not a convenience. The report is included because it is the measured command of the same
+    registration; the writer and the power calculator are excluded because they run before the
+    registration and cannot be bound by it.
+    """
+    assert AGENT_SCRIPTS == ("scripts/agent_evening.py", "scripts/agent_report.py")
