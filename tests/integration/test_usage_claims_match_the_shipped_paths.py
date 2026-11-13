@@ -1,63 +1,67 @@
 """User-facing prose may not present model calls, usage records or capability selection as shipped.
 
 **The code fact these guards stand on**, measured at `2d197af`, re-measured at `ea88999`, and held
-by the premise test below rather than by this paragraph. The usage ledger exists: `build_storage`
+by the tests below rather than by this paragraph. The usage ledger exists: `build_storage`
 constructs `SQLiteModelUsageStore` for every runtime directory, so every shipped path -- CLI, REST,
-SDK -- creates its `model_usage` table in `state.sqlite3`. Nothing shipped writes a row to it. The
-one writer is `OpenAICompatibleProvider._record_usage`, which appends a `ModelUsageRecord`
-(tokens, attempts, and a cost estimated from user-configured prices) when the provider was built
-with a `usage_store` and the endpoint reported usage. No module under `src/` or `scripts/`
-constructs that provider except `V2-P7-012`'s `runtime/composition.llm_provider`, which
-*assembles* it (around the exchange recorder and, in record mode, the usage store) without making
-a request; no CLI command, REST route or SDK method invokes that assembly or reads or writes the
-ledger. Beneath that sits a wider fact: **no shipped path can spend a model request while the
-shipped endpoint constant is unverified.** The one model call under `src/` is
-`StructuredSignalAgent.analyze`'s `generate_json`; the only shipped construction of that agent is
-`scripts/agent_evening.py`'s model family (`V2-P7-013`), which is built *after*
-`runtime/composition.llm_provider` -- and that assembly refuses a live provider while
-`DEEPSEEK_V4_1_FLASH.verified_on is None`, so the construction site is unreachable in the shipped
-tree. `test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint` pins the gate: the
-day `L2` fills `verified_on`, that test fails and asks for the four documents to be rewritten and
-these guards to be retired or inverted. `ModelRegistry` is constructed nowhere under `src/` or
-`scripts/`; apart from the gated evening step a model is reached only through code a user writes
--- an agent they build and pass in, as `OpenAlphaSDK(agents=...)` accepts. So "Token and estimated
-cost are recorded" is true of a component a deployer can wire (and of the gated evening command
-once its endpoint is verified), and false of the product as it ships today.
+SDK -- creates its `model_usage` table in `state.sqlite3`. The one writer is
+`OpenAICompatibleProvider._record_usage`, which appends a `ModelUsageRecord` (tokens, attempts, and
+a cost estimated from user-configured prices) when the provider was built with a `usage_store` and
+the endpoint reported usage. No module under `src/` or `scripts/` constructs that provider except
+`V2-P7-012`'s `runtime/composition.llm_provider`, which *assembles* it (around the exchange
+recorder and, in record mode, the usage store) without making a request. As of gated step `L2`
+(2026-11-13, values read 2026-11-12), `DEEPSEEK_V4_1_FLASH` is verified, so the one shipped command
+that *can* call a model is `scripts/agent_evening.py` (`V2-P7-013`, plan C, a research candidate).
+It is off by default -- it runs only when the user starts it or installs the launchd job it prints
+-- it reads `DEEPSEEK_API_KEY` by name, and it spends at most the registered per-evening request
+cap. Everything else in the shipped path still makes no model call: the model family is reached
+only through that command's two gated scopes (`_llm_family` and `_dry_week_family`), each built
+*after* `runtime/composition.llm_provider`; `ModelRegistry` is constructed nowhere under `src/` or
+`scripts/`; and apart from that command a model reaches a run only through code a user writes --
+an agent they build and pass in, as `OpenAlphaSDK(agents=...)` accepts. So "Token and estimated
+cost are recorded" is true of the gated evening command within its cap and of a provider a
+deployer wires in code, and false of every other shipped path.
+`test_the_agent_evening_model_family_is_reachable_only_through_its_two_gated_sites` pins the
+reachable sites and `test_the_deepseek_endpoint_is_verified_with_the_documented_values` pins the
+verified values; the four documents state that narrower truth, and the guards below hold that no
+document presents a model call or usage recording as shipped *beyond* that command.
 
 Four couplings. The first three stand on that one fact, the fourth on a narrower one:
 
-1. **The premise.** `test_no_shipped_path_calls_a_model_or_records_usage` reads the syntax tree
+1. **The census.** `test_every_model_and_usage_site_is_the_censused_one` reads the syntax tree
    of every `.py` file under `src/` and `scripts/`, counts the places that could make a model
    call or usage recording reachable -- per module, enclosing scope and kind -- and holds the
-   counts equal to `USAGE_SITES`, where each place carries the reason it neither calls a model
-   nor records usage. The day a shipped path starts doing either in a way the scan reads, that
-   test fails and asks for the documents to be rewritten -- and for the prose guards below
-   to be retired or inverted -- instead of those guards silently blocking claims that have
-   become true. The ways the scan cannot read are listed below; a change made one of those ways
-   passes it.
+   counts equal to `USAGE_SITES`, where each place carries the reason it is not a shipped path
+   making a call or writing a row, or -- for the gated evening's two scopes -- the reason it is
+   the one place the user-started command can reach. A new site fails and asks for the census
+   entry; a site that moves into a shipped command fails unless the documents and guards are
+   updated with it. The ways the scan cannot read are listed below; a change made one of those
+   ways passes it.
 
 2. **Usage recording in prose.** `README.md`, `README.en.md`, `docs/why-openalpha-cn.zh-CN.md`
    and `docs/marketing/openalpha-cn-100-promotion-plans.zh-CN.md` may not present Token, usage
-   or cost recording, or billing, as something the product does unless the same clause says no
-   shipped path does it. Section 057 of the marketing pack is the model of a true sentence:
-   "模型调用的 Token 与估算成本另有账本，但要接入自带用量追踪的 Provider 才会写入，
-   出厂路径不会自动生成账单。"
-   `d4af27c` corrected that one sentence without a test; this module is the test.
+   or cost recording, or billing, as something the product does unless the same clause narrows
+   it to the one gated evening command and says the rest of the shipped path records nothing.
+   The model of a true sentence is now the replacement this batch wrote everywhere the old
+   universal claim stood: the ledger is written only by `scripts/agent_evening.py` within its
+   registered cap, and the rest of the shipped path records nothing.
+   `d4af27c` corrected one older sentence without a test; this module is the test.
 
 3. **A model call in prose.** The same four files may not present what a model client does
    once called -- classified retry, backoff, schema validation of a model's output, a
-   hallucination to diagnose -- as something the product does, unless the same clause says no
-   shipped path calls a model. `README.md`'s model bullets are the model of a true sentence:
-   they say what happens once a model provider is wired in code, and that no shipped path calls
-   one.
+   hallucination to diagnose -- as something the product does, unless the same clause says the
+   only shipped command that can call a model is `scripts/agent_evening.py` (off by default,
+   reading `DEEPSEEK_API_KEY` by name, within the registered per-evening cap) and the rest of
+   the shipped path calls no model. `README.md`'s model bullets are the model of a true
+   sentence: they say what happens once a model provider is wired in code, and they carry the
+   gated command's limits.
 
 4. **Capability selection in prose.** The same four files may not present model capability
    registration, or an endpoint chosen by a model's capabilities, as something code does,
    unless the same clause says no code selects by them. This stands on a narrower fact, and
-   saying that no shipped path calls a model does not answer it: nothing registers or selects
-   once a provider is wired either. `ModelRegistry` is constructed nowhere under `src/` or
-   `scripts/` (the premise test holds that), no module under `src/` reads a model's
-   `capabilities` (measured at `d4ef5e4`; no test holds it), and
+   saying that the one gated evening command is the only shipped model caller does not answer
+   it: nothing registers or selects once a provider is wired either. `ModelRegistry` is
+   constructed nowhere under `src/` or `scripts/` (the census test holds that), no module under
+   `src/` reads a model's `capabilities` (measured at `d4ef5e4`; no test holds it), and
    `OpenAICompatibleProvider.generate_json` posts to the one `base_url` it was built with.
    `D12` made five such claims conditional on wiring a provider in code, which left them false
    (the review of `D12`, Important 1), and section 040 made one with no condition at all.
@@ -102,7 +106,13 @@ Four couplings. The first three stand on that one fact, the fourth on a narrower
 - *Claims.* A clause that names usage recording is a claim unless it holds `USAGE_CONDITION`, a
   clause that names a model call unless it holds `MODEL_CALL_CONDITION`, and a clause that
   names capability selection unless it holds `CAPABILITY_CONDITION`; each condition exempts its
-  own class only. Until `D13` `MODEL_CALL_CONDITION` exempted a usage marker as well, and
+  own class only. Since `L2` the two conditions accept the narrower true statement this batch
+  wrote into the four documents: the only shipped command that can call a model is
+  `scripts/agent_evening.py` (off by default, reading `DEEPSEEK_API_KEY` by name, within the
+  registered per-evening cap) and the rest of the shipped path calls no model, and the ledger is
+  written only by that command while the rest records nothing. The old universal phrases --
+  出厂路径不调用模型, "no shipped path calls a model" -- no longer apply on their own and are
+  read as claims; until `D13` `MODEL_CALL_CONDITION` exempted a usage marker as well, and
   sections 005 and 061 of the marketing pack, which had lost the `usage_store` condition,
   passed on 出厂路径不调用模型 alone. A condition counts only where no negation directly
   precedes it (`prose_clauses.holds_unnegated_match`), and only as a whole phrase -- 出厂路径,
@@ -126,7 +136,9 @@ Four couplings. The first three stand on that one fact, the fourth on a narrower
   pinned, or whose clause the guard no longer flags. With each prose test, that makes each
   allowlist a census: every clause a guard flags in the four files is either rewritten or
   listed there. A guard's `diagram_allowlist` pins a unit an embedded diagram draws the same
-  way, and `test_every_diagram_allowlist_entry_exempts_exactly_one_flagged_unit` holds it.
+  way; after `L2` no diagram pin remains, and
+  `test_every_diagram_allowlist_entry_exempts_exactly_one_flagged_unit` holds the empty lists
+  (and a future pin) to their units.
 
 **What the usage guard cannot see.** `test_the_usage_guards_stated_blind_spots_are_real`
 measures each of these.
@@ -143,7 +155,9 @@ measures each of these.
   记录。" is flagged), and so is an English one spelled other than "transaction cost" beside a
   recording word ("Commission costs are recorded with every fill." is flagged;
   `test_the_limits_the_d13_narrowings_leave_are_real` measures it). A condition worded outside
-  `USAGE_CONDITION` is read as a claim -- since `D13` that includes 出厂路径不调用模型 on its own.
+  `USAGE_CONDITION` is read as a claim; since `L2` the permitted condition is the gated-evening
+  narrowing, and the old universal 出厂路径不会自动记账 is read as a claim because the one
+  shipped command that can bill does.
 
 **What the model-call guard cannot see.**
 `test_the_model_call_guards_stated_blind_spots_are_real` measures each of these.
@@ -256,6 +270,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Final
 
@@ -671,8 +686,9 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
     _site("runtime/composition.py", "llm_provider", PROVIDER_NAMED): Counted(
         2,
         "`llm_provider`'s return annotation and the `OpenAICompatibleProvider(...)` it returns "
-        "(`V2-P7-012`). It assembles the provider and posts nothing; calling it needs a caller "
-        "with a transport, and no shipped command, route or SDK method calls it.",
+        "(`V2-P7-012`). It assembles the provider and posts nothing; `scripts/agent_evening.py` "
+        "is the one shipped caller -- in its two gated scopes, only when the user starts the "
+        "command -- and no route or SDK method calls it.",
     ),
     _site("runtime/composition.py", "llm_provider", CALLED_KINDS[PROVIDER_NAMED]): Counted(
         1, "The same construction, counted again as a call (`V2-P7-012`)."
@@ -681,45 +697,49 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
         1,
         "`llm_provider` hands the provider the usage store in record mode (`V2-P7-012`). "
         "Constructing a provider posts nothing; a row is written only when a caller invokes it "
-        "against a vendor, and no shipped command, route or SDK method does.",
+        "against a vendor, and `scripts/agent_evening.py` is the one shipped caller -- only when "
+        "the user starts it, within the registered per-evening cap.",
     ),
     UsageSite("scripts/agent_evening.py", "<module>", AGENT_NAMED): Counted(
         1,
         "`V2-P7-013`'s evening command imports `StructuredSignalAgent` and `llm_provider`. It "
-        "constructs the agent only inside `_llm_family`, after `llm_provider` returned -- and "
-        "`llm_provider` refuses a live provider while `DEEPSEEK_V4_1_FLASH.verified_on is None`, "
-        "so the shipped tree cannot reach the constructor at all. The gate is asserted by "
-        "`test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint`; the day L2 "
-        "verifies the endpoint, that test fails and this entry's reason has to change with the "
-        "four documents.",
+        "constructs the agent only inside `_llm_family` and `_dry_week_family`, each after "
+        "`llm_provider` returned -- and since gated step L2 the endpoint is verified, so the "
+        "user-started evening command is the one shipped command that can call a model. It is "
+        "off by default, reads `DEEPSEEK_API_KEY` by name and spends at most the registered "
+        "per-evening cap; "
+        "`test_the_agent_evening_model_family_is_reachable_only_through_its_two_gated_sites` "
+        "pins that this import reaches no other shipped command.",
     ),
     UsageSite("scripts/agent_evening.py", "_llm_family", AGENT_NAMED): Counted(
         1,
-        "The same gated construction, in the step's own scope: `_llm_family` is called after "
-        "step 5's `llm_provider(...)` assembly, which is unreachable while the shipped endpoint "
-        "constant has no verification date.",
+        "The same construction in step 5's own scope: `_llm_family` is called after the step's "
+        "`llm_provider(...)` assembly, and that scope is reachable only by "
+        "`scripts/agent_evening.py` when the user starts it (off by default; the printed launchd "
+        "job is the other way).",
     ),
     UsageSite("scripts/agent_evening.py", "_llm_family", CALLED_KINDS[AGENT_NAMED]): Counted(
         1,
-        "The same gated construction counted again as a call (the `D12`-review rule). Nothing "
-        "runs here in the shipped tree for the reason above.",
+        "The same construction counted again as a call (the `D12`-review rule). It runs only "
+        "when the user-started evening command reaches `_llm_family`; no other shipped path "
+        "names this scope.",
     ),
     UsageSite("scripts/agent_evening.py", "_dry_week_family", AGENT_NAMED): Counted(
         1,
         "D7's dry-week mode (`V2-P7-013`, plan C task 3.5/2026-11-12 ruling) constructs the same "
-        "agent inside `_dry_week_family`, after its own `llm_provider(...)` assembly -- and "
-        "`llm_provider` refuses a live provider while `DEEPSEEK_V4_1_FLASH.verified_on is None`, "
-        "so the scratch mode cannot spend a request in the shipped tree either. It files no "
+        "agent inside `_dry_week_family`, after its own `llm_provider(...)` assembly. The "
+        "scratch mode likewise runs only when the user starts `--dry-week`; it files no "
         "prediction and its records are refused by the report and the evaluator.",
     ),
     UsageSite("scripts/agent_evening.py", "_dry_week_family", CALLED_KINDS[AGENT_NAMED]): Counted(
         1,
-        "The same dry-week construction counted again as a call (the `D12`-review rule). The "
-        "provider assembly above it is still refusal-gated by the unverified endpoint.",
+        "The same dry-week construction counted again as a call (the `D12`-review rule). It is "
+        "reachable only through the user-started dry-week command.",
     ),
 }
-"""Every `UsageSite` outside `tests/`, with how often it occurs and why it neither calls a model
-nor records usage."""
+"""Every `UsageSite` outside `tests/`, with how often it occurs and why it is not a shipped path
+making a model call or writing a row -- or, for the two evening scopes, why it is the one place
+the user-started command can reach."""
 
 
 def _premise_problems(found: Counter[UsageSite]) -> list[str]:
@@ -733,60 +753,119 @@ def _premise_problems(found: Counter[UsageSite]) -> list[str]:
     ]
 
 
-def test_no_shipped_path_calls_a_model_or_records_usage() -> None:
-    """The premise of both prose guards below, read off the code rather than remembered.
+def test_every_model_and_usage_site_is_the_censused_one() -> None:
+    """The census the prose guards stand on, read off the code rather than remembered.
 
     Equal counts, not a subset: a site that disappears fails too, so a scan that stopped finding
     anything cannot pass as a clean one, and a second occurrence in a counted scope fails as a
-    new scope does.
+    new scope does. This is not the old claim "no shipped path calls a model": since gated step
+    L2 the user-started evening command does, and its scopes' entries say so.
     """
     problems = _premise_problems(_usage_sites(_non_test_sources()))
     assert not problems, (
         "\n".join(problems) + "\nIf a shipped path now calls a model, builds "
         "OpenAICompatibleProvider or StructuredSignalAgent, hands a provider a usage store or "
-        "writes model_usage rows, the prose guards' premise is false: rewrite the model and "
-        "usage sentences in the four guarded documents to say what the shipped path does now, "
-        "and retire or invert test_user_facing_docs_do_not_present_a_model_call_as_shipped, "
-        "test_user_facing_docs_do_not_present_usage_recording_as_shipped and, if a registry is "
-        "built, test_user_facing_docs_do_not_present_capability_selection_as_shipped. If the "
-        "place calls and records nothing, record it in USAGE_SITES with its count and the reason."
+        "writes model_usage rows outside the two evening scopes, record it in USAGE_SITES with "
+        "its count and the reason -- and, if a shipped command can now call a model, update the "
+        "four documents' gated-path statement and the guards that pin it."
     )
 
 
-def test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint(
+DOCUMENT_MODEL_PATH_ZH: Final[tuple[str, ...]] = (
+    "`scripts/agent_evening.py`",
+    "研究候选",
+    "默认不运行",
+    "launchd",
+    "`DEEPSEEK_API_KEY`",
+    "登记上限",
+    "其余路径不调用模型",
+)
+DOCUMENT_MODEL_PATH_EN: Final[tuple[str, ...]] = (
+    "`scripts/agent_evening.py`",
+    "research candidate",
+    "off by default",
+    "launchd",
+    "`DEEPSEEK_API_KEY`",
+    "registered per-evening request cap",
+    "the rest of the shipped path still calls no model",
+)
+DOCUMENT_USAGE_BOUND_ZH: Final[tuple[str, ...]] = (
+    "只由该晚间命令在登记请求上限内写入",
+    "出厂路径的其余部分不记账",
+)
+DOCUMENT_USAGE_BOUND_EN: Final[tuple[str, ...]] = (
+    "only that evening command writes to within its registered cap",
+    "the rest of the shipped path records none",
+)
+"""The parts of the narrower truth the four documents must carry after gated step L2.
+
+The model path: the only shipped command that can call a model is `scripts/agent_evening.py`
+(plan C, a research candidate), off by default -- only the user starts it or installs the launchd
+job it prints -- reading `DEEPSEEK_API_KEY` by name and spending at most the registered
+per-evening request cap, with the rest of the shipped path still making no model call. The usage
+path: the ledger is written only by that command within its cap and the rest records nothing.
+"""
+
+
+def test_the_deepseek_endpoint_is_verified_with_the_documented_values() -> None:
+    """The values a human read from the official DeepSeek docs on 2026-11-12 (gated step L2).
+
+    Sources are the pages the endpoint's module comment names. This pin fails if any value is
+    reverted, guessed, or left as a placeholder; the model id is a moving alias, so the stored
+    exchange's `response.model` / `system_fingerprint` remain the per-exchange record of which
+    model answered.
+    """
+    from decimal import Decimal
+
+    from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH
+
+    endpoint = DEEPSEEK_V4_1_FLASH
+    assert endpoint.name == "DEEPSEEK_V4_1_FLASH"
+    assert endpoint.provider_id == "deepseek"
+    assert endpoint.model == "deepseek-flash"
+    assert endpoint.base_url == "https://api.deepseek.com"
+    assert endpoint.api_key_env == "DEEPSEEK_API_KEY"
+    assert endpoint.structured_output_mode == "json_object"
+    assert endpoint.temperature == 0.0
+    assert endpoint.max_output_tokens == 4096
+    assert endpoint.input_price_per_million == Decimal("0.15")
+    assert endpoint.output_price_per_million == Decimal("0.60")
+    assert dict(endpoint.extra_payload) == {"thinking": {"type": "disabled"}}
+    assert endpoint.documentation_url == "https://api-docs.deepseek.com/"
+    assert endpoint.verified_on == date(2026, 11, 12)
+
+
+def test_the_agent_evening_model_family_is_reachable_only_through_its_two_gated_sites(
     tmp_path: Path,
 ) -> None:
-    """The one shipped model call path cannot spend a request while the endpoint is unverified.
+    """After L2 a live provider is assembled; only the user-started evening command reaches one.
 
-    `scripts/agent_evening.py` (`V2-P7-013`) is the first shipped command that *can* call a
-    model, so the two prose guards above no longer stand on "nothing under `src/` or `scripts/`
-    even constructs the agent". They stand on a narrower, still true fact: the construction sits
-    inside `_llm_family`, after `llm_provider(...)`, and `llm_provider` refuses a live provider
-    while `DEEPSEEK_V4_1_FLASH.verified_on is None` -- which it is, because filling it is the
-    gated live step L2. This test is the tripwire for the day that changes: the first assertion
-    fails, and the batch that fills the endpoint must then rewrite the four documents' "no
-    shipped path calls a model" clauses and retire or invert the two prose guards instead of
-    keeping them green over a false premise.
+    `scripts/agent_evening.py` (`V2-P7-013`) is the one shipped command that *can* call a model.
+    It is off by default -- it runs only when the user starts it or installs the launchd job it
+    prints -- it reads `DEEPSEEK_API_KEY` by name, and it spends at most the registered
+    per-evening request cap. The model family sits inside `_llm_family` and `_dry_week_family`,
+    each after its own `llm_provider(...)` assembly; this test pins that those are the only two
+    shipped construction sites, and that the verified endpoint now assembles a live provider
+    (which makes no request until a caller invokes it). The four documents state the same
+    narrower truth; `test_the_four_user_facing_documents_state_the_one_shipped_model_path_and_its_limits`
+    pins their wording.
     """
     from datetime import UTC, datetime
 
     from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH
-    from openalpha_cn.models.openai_compatible import ModelConfigurationError
+    from openalpha_cn.models.openai_compatible import OpenAICompatibleProvider
     from openalpha_cn.runtime.composition import llm_provider
 
-    assert DEEPSEEK_V4_1_FLASH.verified_on is None, (
-        "DEEPSEEK_V4_1_FLASH now has a verification date: the gated step L2 happened, so the "
-        "four guard-ed documents' 'no shipped path calls a model' clauses are no longer true and "
-        "the two prose guards above must be rewritten and retired or inverted. See plan C tasks "
-        "2.8/3.2 and the batch-2 closeout's open concern 1"
+    assert DEEPSEEK_V4_1_FLASH.verified_on == date(2026, 11, 12)
+    provider = llm_provider(
+        DEEPSEEK_V4_1_FLASH,
+        runtime_dir=tmp_path,
+        clock=lambda: datetime(2026, 11, 12, 20, 30, tzinfo=UTC),
+        replay=False,
     )
-    with pytest.raises(ModelConfigurationError):
-        llm_provider(
-            DEEPSEEK_V4_1_FLASH,
-            runtime_dir=tmp_path,
-            clock=lambda: datetime(2026, 11, 12, 20, 30, tzinfo=UTC),
-            replay=False,
-        )
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.metadata.credential_env_vars == ("DEEPSEEK_API_KEY",)
+    assert provider.metadata.model == "deepseek-flash"
 
     source = (ROOT / "scripts" / "agent_evening.py").read_text(encoding="utf-8")
     tree = ast.parse(source, filename="scripts/agent_evening.py")
@@ -804,8 +883,8 @@ def test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint(
     constructions = calls.get("StructuredSignalAgent", [])
     assert constructions, "the evening command no longer constructs the model-backed agent"
     # Two shipped scopes construct it: step 5's family and D7's dry-week family. Each must sit
-    # after its own `llm_provider(...)` assembly, because that assembly is what refuses a live
-    # provider while the endpoint has no verification date.
+    # after its own `llm_provider(...)` assembly, so the command's credential check, request cap
+    # and deadline wrap the one place a model can be called.
     assert {scope for scope, _line in constructions} == {"_llm_family", "_dry_week_family"}, (
         "the shipped constructions moved out of the two gated scopes; the gating argument above "
         f"is about them, and it now happens in {constructions}"
@@ -814,8 +893,80 @@ def test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint(
         assemblies = [at for name, at in calls.get("llm_provider", []) if name == scope]
         assert assemblies and line > min(assemblies), (
             f"`{scope}` constructs the agent before it assembles `llm_provider`, which would "
-            "make the unverified-endpoint refusal unable to gate it"
+            "take the command's credential, cap and deadline off the model path"
         )
+
+
+def test_the_four_user_facing_documents_state_the_one_shipped_model_path_and_its_limits() -> None:
+    """Each of the four guarded documents carries the narrower truth, in its own language.
+
+    The old universal "no shipped path calls a model / never bills" is gone; what replaces it
+    names the one shipped command that can call a model, its off-by-default launchd gate, the
+    credential's variable name, the registered request cap, and the unchanged rest of the
+    shipped path. Every required part is a plain substring, so a document that drops one of the
+    facts fails here.
+    """
+    documents = _guarded_documents()
+    problems: list[str] = []
+    for path in GUARDED_FILES:
+        text = documents[path]
+        english = path == README_EN
+        for phrase in DOCUMENT_MODEL_PATH_EN if english else DOCUMENT_MODEL_PATH_ZH:
+            if phrase not in text:
+                problems.append(f"{path.relative_to(ROOT)}: missing {phrase!r}")
+        for phrase in DOCUMENT_USAGE_BOUND_EN if english else DOCUMENT_USAGE_BOUND_ZH:
+            if phrase not in text:
+                problems.append(f"{path.relative_to(ROOT)}: missing {phrase!r}")
+    assert not problems, (
+        "\n".join(problems) + "\nL2's commit must rewrite every 'the shipped path never calls a "
+        "model / never bills' clause in the four documents into this narrower statement. The "
+        "marketing pack is a user-facing document too: honesty first, and no claim is upgraded "
+        "from 候选."
+    )
+
+
+_OLD_MODEL_UNIVERSAL: Final[re.Pattern[str]] = re.compile(
+    "出厂路径(?:都)?不(?:会)?(?:调用|发起)(?:任何)?(?:大)?模型"
+    r"|no shipped path (?:calls|makes|sends) (?:a |any )?(?:models?|llms?)(?: calls?)?",
+    re.IGNORECASE,
+)
+_OLD_USAGE_UNIVERSAL: Final[re.Pattern[str]] = re.compile(
+    "出厂路径(?:都)?不(?:会)?(?:替你)?(?:自动)?(?:记账|生成账单|入账)"
+    r"|no shipped path (?:writes|records)(?: to)?",
+    re.IGNORECASE,
+)
+"""The two universal claims L2 made false, in the wordings the four documents used."""
+
+
+def test_the_four_user_facing_documents_no_longer_claim_the_shipped_path_never_calls_a_model() -> None:
+    """The old universal condition is now the false claim, not the exempting phrase.
+
+    L2 verified the endpoint and the evening command can spend a model request when the user
+    starts it, so a clause that still says 出厂路径不调用模型 ("no shipped path calls a model")
+    -- or that the shipped path never bills -- is a claim about the product that is no longer
+    true. A clause that also names the gated command as the exception is allowed: that is the
+    narrower statement, not the universal one.
+    """
+    problems: list[str] = []
+    for path in GUARDED_FILES:
+        for clause in clauses(_guarded_documents()[path]):
+            if not (_OLD_MODEL_UNIVERSAL.search(clause.text) or _OLD_USAGE_UNIVERSAL.search(clause.text)):
+                continue
+            lowered = clause.text.lower()
+            excepted = "agent_evening" in clause.text and (
+                "除" in clause.text or "except" in lowered or "其余" in clause.text
+            )
+            if not excepted:
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{clause.line} still claims the universal: "
+                    f"{clause.text!r}"
+                )
+    assert not problems, (
+        "\n".join(problems) + "\nRewrite the clause into the gated-path statement: the only "
+        "shipped command that can call a model is `scripts/agent_evening.py`, and the rest of "
+        "the shipped path still makes no model call."
+    )
+
 
 
 def _counted(*sites: tuple[str, str, int]) -> Counter[UsageSite]:
@@ -1135,7 +1286,7 @@ appended text is valid Python in that module."""
 def test_the_premise_goes_red_on_each_injection_the_review_measured() -> None:
     """Every injection must fail the premise, measured against the real source tree.
 
-    `test_no_shipped_path_calls_a_model_or_records_usage` passing on the unmodified tree is the
+    `test_every_model_and_usage_site_is_the_censused_one` passing on the unmodified tree is the
     other half: together they show the premise tells today's code from each of these edits.
     """
     sources = dict(_non_test_sources())
@@ -1389,13 +1540,20 @@ USAGE_CONDITION: Final[re.Pattern[str]] = re.compile(
     f"(?:记账|生成账单|入账|(?:写入|记录)(?:这张表|账本|用量|任何用量|模型用量)?{_CONDITION_END})"
     f"|no shipped path (?:writes|records)(?: to)?{_CONDITION_END}"
     "|no shipped path (?:writes|records) (?:to )?(?:the (?:ledger|table)|(?:any |model )?usage)"
-    "(?![A-Za-z])",
+    "(?![A-Za-z])"
+    "|只由该晚间命令[^。；!?]{0,200}?出厂路径的其余部分不记账"
+    "|only (?:that|the gated) evening command[^.;!?]{0,200}?"
+    "rest of the shipped path records (?:none|nothing)"
+    "|其余路径不调用模型[^。；!?]{0,80}?账本仅该命令写入",
     re.IGNORECASE,
 )
-"""A statement that no shipped path records usage: 出厂路径, 不, then 记账, 生成账单 or 入账,
-or 写入 or 记录 whose only object is the ledger's own (这张表, 账本, 用量) before the phrase ends,
-with 都, 会, 替你 or 自动 allowed between; or "no shipped path writes" or "records", with "to"
-allowed, ending the phrase or followed by the ledger, the table or usage.
+"""A statement that shipped usage is bounded to the gated evening command: 出厂路径, 不, then
+记账, 生成账单 or 入账, or 写入 or 记录 whose only object is the ledger's own (这张表, 账本, 用量)
+before the phrase ends, with 都, 会, 替你 or 自动 allowed between; or "no shipped path writes" or
+"records", with "to" allowed, ending the phrase or followed by the ledger, the table or usage; or
+since `L2`, the true narrower statement the four documents carry -- the ledger is written only by
+the evening command within its registered cap and 出厂路径的其余部分不记账 ("the rest of the shipped
+path records none") -- and the embedded diagram's 其余路径不调用模型 · 账本仅该命令写入.
 
 A whole phrase, not a prefix, so 出厂路径不需要额外配置 states nothing. And a verb with another
 object states nothing either: 出厂路径不写入密钥 and "No shipped path records your API key" say
@@ -1406,13 +1564,20 @@ MODEL_CALL_CONDITION: Final[re.Pattern[str]] = re.compile(
     "出厂路径(?:都)?不(?:会)?(?:调用|发起)(?:任何)?(?:大)?模型"
     r"(?![一-鿿]|\s*(?:api\s*)?(?:keys?|credentials?|secrets?)(?![A-Za-z]))"
     "|no shipped path (?:calls|makes|sends) (?:a |any )?(?:models?|llms?)(?: calls?)?"
-    f"(?:{_CONDITION_END}|(?= at all))",
+    f"(?:{_CONDITION_END}|(?= at all))"
+    "|唯一能调用模型(?:的)?[^。；!?]{0,400}?其余路径不调用模型"
+    "|only shipped command that can call a model[^.;!?]{0,600}?"
+    "rest of the shipped path (?:still )?(?:calls|makes) no model",
     re.IGNORECASE,
 )
-"""A statement that no shipped path calls a model: 出厂路径, 不, 调用 or 发起, then 模型 as the
-object and not as the first half of another noun (出厂路径不调用模型密钥 states nothing); or "no
-shipped path calls a model" and its near variants, ending the phrase ("... sends a model key
-anywhere" states nothing, the review of `D12`'s M-4).
+"""A statement that the shipped model call is bounded to the gated evening command: 出厂路径, 不,
+调用 or 发起, then 模型 as the object and not as the first half of another noun (出厂路径不调用模型
+密钥 states nothing); or "no shipped path calls a model" and its near variants, ending the
+phrase ("... sends a model key anywhere" states nothing, the review of `D12`'s M-4); or since
+`L2`, the true narrower statement the four documents carry -- 唯一能调用模型的是
+`scripts/agent_evening.py` (off by default, reading `DEEPSEEK_API_KEY` by name, within the
+registered cap), 其余路径不调用模型 -- and the embedded diagram's 唯一能调用模型：agent_evening
+（默认不运行）· 其余路径不调用模型.
 
 It exempts a model-call marker only. Until `D13` it exempted a usage marker too, and a path that
 calls no model does record nothing -- but the clause then says nothing about the `usage_store` a
@@ -1441,7 +1606,7 @@ def _names_usage_recording(clause: str) -> bool:
 
 
 def _is_usage_claim(clause: str) -> bool:
-    """Whether one clause presents usage recording without saying no shipped path records it.
+    """Whether one clause presents usage recording without the gated command's limits.
 
     Only `USAGE_CONDITION` exempts it; `MODEL_CALL_CONDITION` did until `D13` (see there).
     """
@@ -1476,7 +1641,7 @@ def _names_model_call(clause: str) -> bool:
 
 
 def _is_model_call_claim(clause: str) -> bool:
-    """Whether one clause presents model-call behaviour without saying no shipped path calls."""
+    """Whether one clause presents model-call behaviour without the gated command's limits."""
     return _names_model_call(clause) and not holds_unnegated_match(clause, MODEL_CALL_CONDITION)
 
 
@@ -1617,8 +1782,9 @@ MODEL_CALL_ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
         reason=(
             "Section 007 lists the questions users cannot answer about a result. The model and "
             "the retry are two separate items of that list, and neither is presented as a model "
-            "call this product makes; the section's next sentence names RunManifest, which "
-            "does record model and prompt versions (model_versions, prompt_versions)."
+            "call this product makes; the section's own boundary sentence now names the one "
+            "gated evening command, and the next sentence names RunManifest, which does record "
+            "model and prompt versions (model_versions, prompt_versions)."
         ),
     ),
     AllowedClause(
@@ -1632,8 +1798,8 @@ MODEL_CALL_ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
         reason=(
             "Section 029 opens on a general statement about multi-agent systems: a model "
             "timeout is one of five failures that can look like no result. The section's claim "
-            "about this product's model layer is a clause of its own, which states that no "
-            "shipped path calls a model."
+            "about this product's model layer is a clause of its own, which now states the "
+            "narrower boundary: only the gated evening command can call a model."
         ),
     ),
 )
@@ -1650,28 +1816,14 @@ CAPABILITY_ALLOWLIST: Final[tuple[AllowedClause, ...]] = ()
 """The capability guard's true non-claims: none. Every clause it flagged at `d4ef5e4`
 (`PRE_D13_CAPABILITY_CLAIMS`) was a claim, and each was rewritten."""
 
-USAGE_DIAGRAM_ALLOWLIST: Final[tuple[AllowedClause, ...]] = (
-    AllowedClause(
-        path=ROOT / "scripts" / "generate_brain_diagrams.py",
-        excerpt="Token / 尝试次数账本",
-        clause=(
-            "模型治理边界，OPTIONAL MODEL ENHANCEMENT，需代码接入 \N{MIDDLE DOT} Schema 校验，"
-            "408/429/500/502/503/504 有界重试，Token / 尝试次数账本 \N{MIDDLE DOT} "
-            "出厂路径不调用模型"
-        ),
-        reason=(
-            "brain-03's 模型治理边界 box as D12 rewrote it names the ledger beside "
-            "出厂路径不调用模型 and promises nothing about when a row is written, so it is true as "
-            "drawn. Since D13 MODEL_CALL_CONDITION no longer exempts a usage marker, so the usage "
-            "guard reads it as a claim. Rewording the box into a USAGE_CONDITION form, such as "
-            "出厂路径不记账, retires this entry. The retry line names the six codes "
-            "`_post` marks retryable (models/openai_compatible.py:81) rather than every 5xx, "
-            "which is what it said before this round."
-        ),
-    ),
-)
-"""The usage guard's true non-claims among the units the embedded diagrams draw, pinned the same
-way, by the generator's path and the unit's whole text."""
+USAGE_DIAGRAM_ALLOWLIST: Final[tuple[AllowedClause, ...]] = ()
+"""The usage guard's true non-claims among the units the embedded diagrams draw: none.
+
+`D12` pinned brain-03's 模型治理边界 box because it named the ledger beside the old universal
+claim. After `L2` the box itself was redrawn as the narrower truth (the one model-calling command,
+off by default, and the rest recording nothing), so the guards no longer flag it and the pin is
+retired. A drawing call the guards flag again needs its own entry here.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1691,8 +1843,10 @@ USAGE_GUARD: Final[ProseGuard] = ProseGuard(
     is_claim=_is_usage_claim,
     allowlist=ALLOWLIST,
     remedy=(
-        "Say in the same clause that no shipped path records it -- USAGE_CONDITION, as section "
-        "057 does -- or reword the claim. Saying no shipped path calls a model is not enough."
+        "Say in the same clause that the ledger is written only by the gated evening command "
+        "`scripts/agent_evening.py` within the registered cap -- USAGE_CONDITION, as the four "
+        "documents now do -- or reword the claim. The old 出厂路径不会自动记账 universal is no "
+        "longer true and is read as a claim."
     ),
     diagram_allowlist=USAGE_DIAGRAM_ALLOWLIST,
 )
@@ -1702,8 +1856,10 @@ MODEL_CALL_GUARD: Final[ProseGuard] = ProseGuard(
     is_claim=_is_model_call_claim,
     allowlist=MODEL_CALL_ALLOWLIST,
     remedy=(
-        "Say in the same clause that no shipped path calls a model -- MODEL_CALL_CONDITION, as "
-        "README.md's model bullets do -- or reword the claim."
+        "Say in the same clause that the only shipped command that can call a model is "
+        "`scripts/agent_evening.py` (off by default, reading `DEEPSEEK_API_KEY` by name, within "
+        "the registered cap) and that the rest of the shipped path calls no model -- "
+        "MODEL_CALL_CONDITION, as README.md's model bullets now do -- or reword the claim."
     ),
 )
 
@@ -1743,14 +1899,15 @@ def _violations(documents: dict[Path, str], guard: ProseGuard) -> list[str]:
     return violations
 
 
-def test_user_facing_docs_do_not_present_usage_recording_as_shipped() -> None:
+def test_user_facing_docs_present_usage_recording_only_through_the_gated_evening_command() -> None:
     """Every clause the usage guard flags in the four files is a violation unless `ALLOWLIST`
     pins it.
 
-    A flagged clause is exempt only when an entry for its file pins exactly its text. Written
-    against the 23 usage lines the D7 brief counted in the marketing pack, the extra ones its
-    review found, and `README.md`'s and `README.en.md`'s model-governance bullets -- each
-    presented Token, attempt or cost recording as a shipped capability.
+    A flagged clause is exempt only when an entry for its file pins exactly its text. Since
+    `L2` the guard's condition is narrower than the old universal: a clause must say the ledger
+    is written only by the gated evening command within its cap and the rest records nothing.
+    `test_the_four_user_facing_documents_state_the_one_shipped_model_path_and_its_limits` pins
+    the required statement in each document, so deleting the sentences cannot pass this guard.
     """
     violations = _violations(_guarded_documents(), USAGE_GUARD)
     assert not violations, (
@@ -1759,18 +1916,17 @@ def test_user_facing_docs_do_not_present_usage_recording_as_shipped() -> None:
     )
 
 
-def test_user_facing_docs_do_not_present_a_model_call_as_shipped() -> None:
+def test_user_facing_docs_present_a_model_call_only_through_the_gated_evening_command() -> None:
     """Every clause the model-call guard flags is a violation unless `MODEL_CALL_ALLOWLIST` pins
     it.
 
-    Written against the 25 claims it flags at `ea88999` beside its two pins, re-measured in
-    `D13` (this docstring said 27 and 20): `README.md`'s model row, two model bullets and fourth
-    advantage, `README.en.md`'s two model bullets, `why-openalpha`'s 研究运行 row, and 18 clauses
-    of the marketing pack, section 097's hook among them. Each presented classified retry,
-    capability registration, schema validation or a model to diagnose as what the product does.
-    No shipped path calls a model -- the premise test above holds that -- so each is true only
-    of a provider a user wires in code. Capability registration left this guard in `D13` for a
-    guard of its own.
+    Before `L2` no shipped path called a model, so a retry or schema sentence was true only of a
+    provider wired in code. Since `L2` the shipped evening command can call a model, so a clause
+    must carry its limits: the only shipped command that can call a model is
+    `scripts/agent_evening.py`, off by default, reading `DEEPSEEK_API_KEY` by name, within the
+    registered cap, and the rest of the shipped path calls no model. The statement test above
+    pins that each document carries it; this guard holds every other flagged clause to the same
+    truth.
     """
     violations = _violations(_guarded_documents(), MODEL_CALL_GUARD)
     assert not violations, (
@@ -1807,11 +1963,11 @@ def test_each_prose_test_fails_on_a_claim_it_exists_to_catch(
     claim, prose_test = {
         "usage": (
             PRE_D7_CLAIMS["README.md:17"],
-            test_user_facing_docs_do_not_present_usage_recording_as_shipped,
+            test_user_facing_docs_present_usage_recording_only_through_the_gated_evening_command,
         ),
         "model-call": (
             PRE_D12_MODEL_CALL_CLAIMS["README.md:17"],
-            test_user_facing_docs_do_not_present_a_model_call_as_shipped,
+            test_user_facing_docs_present_a_model_call_only_through_the_gated_evening_command,
         ),
         "capability": (
             PRE_D13_CAPABILITY_CLAIMS["README.md:37"],
@@ -2602,14 +2758,15 @@ def test_the_embedded_diagrams_do_not_present_a_model_call_or_usage_recording_as
 ) -> None:
     """Every prose guard over the words the embedded diagrams draw, one unit per drawing call.
 
-    Written against brain-03's 模型治理边界 box, which read "能力注册 · Schema 校验 · 408/429/5xx
-    重试" and "Token / 尝试次数 / 估算成本持久化" as system behaviour. Only a guard's
-    `diagram_allowlist` applies here: one entry, the usage guard's pin on that box as `D12`
-    rewrote it. The box must still be read, so a reader or generator list gone blind fails rather
-    than passes. Three other cost words the diagrams drew as shipped -- "agent_outputs /
-    routing_path / 成本" in brain-03, "Retry / Recovery · 成本账本" in brain-01 and
-    "同一成本与恢复语义" in brain-05 -- carry no marker these guards read, and were rewritten by
-    hand.
+    Written against brain-03's 模型治理边界 box, which once read "能力注册 · Schema 校验 ·
+    408/429/5xx 重试" and "Token / 尝试次数 / 估算成本持久化" as system behaviour. After `L2`
+    no diagram pin remains: that box now draws the narrower truth -- the one model-calling
+    command, off by default, and the rest recording nothing -- so the guards read it as a true
+    statement rather than a claim. The box must still be read, so a reader or generator list gone
+    blind fails rather than passes. Three other cost words the diagrams drew as shipped --
+    "agent_outputs / routing_path / 成本" in brain-03, "Retry / Recovery · 成本账本" in brain-01
+    and "同一成本与恢复语义" in brain-05 -- carry no marker these guards read, and were
+    rewritten by hand.
     """
     guard = GUARDS[name]
     sources = _diagram_sources()
@@ -2652,7 +2809,12 @@ def test_a_diagram_read_names_the_generator_it_could_not_parse() -> None:
     one. `tests/diagram_text.py` took `filename` for exactly this.
     """
     label = "scripts/generate_broken_diagrams.py"
-    pin = replace(USAGE_DIAGRAM_ALLOWLIST[0], path=ROOT / label)
+    pin = AllowedClause(
+        path=ROOT / label,
+        excerpt="模型治理边界",
+        clause="模型治理边界",
+        reason="a synthetic pin, for the reader's SyntaxError path only",
+    )
     reads: dict[str, Callable[[], object]] = {
         "_diagram_violations": lambda: _diagram_violations(USAGE_GUARD, {label: BROKEN_GENERATOR}),
         "_allowlist_problems": lambda: _allowlist_problems(

@@ -930,16 +930,19 @@ def test_an_unverified_endpoint_is_a_configuration_gap_not_an_answer(
 ) -> None:
     """F1's controller ruling: any `ModelConfigurationError` from the assembly is a family gap.
 
-    `llm_provider` still refuses the live request by name while `DEEPSEEK_V4_1_FLASH.verified_on`
-    is `None` -- nothing reaches a transport and the placeholder model id is never spent -- but
-    the evening now records that deployment failure as `no_record: configuration_error` and goes
-    on: the rule family is filed, no model batch exists, and exit is 0. Before this ruling the
-    same error was a step-5 refusal and the day had no journal at all; that is the F1 ruled
-    behaviour change, not a silent adaptation. Once the endpoint is verified -- at gated step L2
-    -- this test skips: it pins the placeholder's gap, not a fact about the deployment.
+    The deployed endpoint is verified since L2, so this test swaps the module's constant for an
+    unverified copy -- the state every new endpoint starts in -- and keeps the F1 ruling
+    measured: `llm_provider` refuses the live request by name, nothing reaches a transport, the
+    placeholder model id is never spent, and the evening records the deployment failure as
+    `no_record: configuration_error` and goes on: the rule family is filed, no model batch
+    exists, and exit is 0. Before this ruling the same error was a step-5 refusal and the day had
+    no journal at all; that is the F1 ruled behaviour change, not a silent adaptation.
     """
-    if DEEPSEEK_V4_1_FLASH.verified_on is not None:
-        pytest.skip("the endpoint has been verified; the unverified path is unreachable")
+    monkeypatch.setattr(
+        agent,
+        "DEEPSEEK_V4_1_FLASH",
+        dataclasses.replace(DEEPSEEK_V4_1_FLASH, verified_on=None),
+    )
     world = _world(tmp_path, monkeypatch)
 
     code = agent.main(world.arguments(), clock=lambda: world.evening)

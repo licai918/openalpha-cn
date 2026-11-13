@@ -2,9 +2,11 @@
 
 Three properties are asserted here and each has a failure it exists to stop:
 
-- an **unverified** endpoint refuses a live provider *by name* -- the placeholder model id and
-  base URL in `models/deepseek.py` must not quietly spend a real request before a human has
-  filled them from the vendor's documentation;
+- an **unverified** endpoint (a copy of the shipped one with `verified_on=None`, as any future
+  endpoint starts) refuses a live provider *by name* -- an unconfirmed model id and base URL must
+  not quietly spend a real request before a human has filled them from the vendor's
+  documentation. The shipped `DEEPSEEK_V4_1_FLASH` itself was verified at gated step L2
+  (2026-11-12 reading), and `test_the_endpoint_carries_the_verified_documented_values` pins it;
 - **replay** needs no key and makes no transport call -- the whole point of the exchange store
   is that a replayed run can be re-executed offline;
 - a fake-transport run **records usage once** and a replay adds none -- the usage row is billed
@@ -85,12 +87,13 @@ class FakeJsonTransport:
 
 
 def test_an_unverified_endpoint_refuses_a_live_provider_by_name(tmp_path: Path) -> None:
-    """The placeholder must not spend a real request before a human fills it in."""
-    assert DEEPSEEK_V4_1_FLASH.verified_on is None
+    """An unverified copy -- as any new endpoint starts -- must not spend a real request."""
+    assert DEEPSEEK_V4_1_FLASH.verified_on == date(2026, 11, 12)
+    unverified = replace(DEEPSEEK_V4_1_FLASH, verified_on=None)
 
     with pytest.raises(ModelConfigurationError) as raised:
         llm_provider(
-            DEEPSEEK_V4_1_FLASH,
+            unverified,
             runtime_dir=tmp_path,
             clock=lambda: CLOCK,
             replay=False,
@@ -101,10 +104,11 @@ def test_an_unverified_endpoint_refuses_a_live_provider_by_name(tmp_path: Path) 
     assert "verified" in message.lower()
     assert DEEPSEEK_V4_1_FLASH.documentation_url in message
 
-    # A verified endpoint is allowed to record, and a fake transport is always allowed (the
-    # next test records through one while the shipped constant is still unverified).
-    verified = replace(DEEPSEEK_V4_1_FLASH, verified_on=date(2026, 1, 1))
-    provider = llm_provider(verified, runtime_dir=tmp_path, clock=lambda: CLOCK, replay=False)
+    # The verified shipped endpoint is allowed to record, and a fake transport is always
+    # allowed (the next test records through one).
+    provider = llm_provider(
+        DEEPSEEK_V4_1_FLASH, runtime_dir=tmp_path, clock=lambda: CLOCK, replay=False
+    )
     assert provider.metadata.credential_env_vars == ("DEEPSEEK_API_KEY",)
     assert isinstance(provider, OpenAICompatibleProvider)
     assert isinstance(provider.transport, RecordingJsonTransport)
@@ -271,18 +275,24 @@ def test_build_storage_opens_the_usage_store_through_the_opener(tmp_path: Path) 
     assert _top_level_functions_calling(COMPOSITION, "model_exchange_store_at") == ("llm_provider",)
 
 
-def test_the_endpoint_carries_the_limits_the_batch_was_asked_for() -> None:
-    """Placeholders are visible as placeholders: prices zero, verification unset, mode declared."""
+def test_the_endpoint_carries_the_verified_documented_values() -> None:
+    """The shipped endpoint was verified at L2 from the 2026-11-12 reading; pin every value."""
+    from decimal import Decimal
+
     endpoint = DEEPSEEK_V4_1_FLASH
 
     assert isinstance(endpoint, VendorEndpoint)
     assert endpoint.provider_id == "deepseek"
-    assert endpoint.structured_output_mode == "json_schema"
+    assert endpoint.model == "deepseek-flash"
+    assert endpoint.base_url == "https://api.deepseek.com"
+    assert endpoint.structured_output_mode == "json_object"
     assert endpoint.temperature == 0.0
-    assert endpoint.max_output_tokens > 0
-    assert endpoint.input_price_per_million == 0
-    assert endpoint.output_price_per_million == 0
-    assert endpoint.verified_on is None
+    assert endpoint.max_output_tokens == 4096
+    assert endpoint.input_price_per_million == Decimal("0.15")
+    assert endpoint.output_price_per_million == Decimal("0.60")
+    assert dict(endpoint.extra_payload) == {"thinking": {"type": "disabled"}}
+    assert endpoint.documentation_url == "https://api-docs.deepseek.com/"
+    assert endpoint.verified_on == date(2026, 11, 12)
 
 
 # --- fix round 1: usage is billed only for a request that reached the vendor ------------------
@@ -419,9 +429,10 @@ def test_two_identical_record_mode_calls_write_one_usage_row_and_call_once(
 
 def test_an_unverified_endpoint_refuses_an_explicit_urllib_transport(tmp_path: Path) -> None:
     """Fix round 1, F5: an injected real transport is still a real request."""
+    unverified = replace(DEEPSEEK_V4_1_FLASH, verified_on=None)
     with pytest.raises(ModelConfigurationError) as raised:
         llm_provider(
-            DEEPSEEK_V4_1_FLASH,
+            unverified,
             runtime_dir=tmp_path,
             clock=lambda: CLOCK,
             replay=False,
@@ -636,10 +647,11 @@ def test_wrap_transport_is_not_applied_in_replay_mode(tmp_path: Path) -> None:
 
 def test_wrap_transport_cannot_bypass_the_unverified_endpoint_gate(tmp_path: Path) -> None:
     """The gate is decided on the undecorated caller transport, before any wrapping."""
+    unverified = replace(DEEPSEEK_V4_1_FLASH, verified_on=None)
     for supplied in (None, UrllibJsonTransport()):
         with pytest.raises(ModelConfigurationError):
             llm_provider(
-                DEEPSEEK_V4_1_FLASH,
+                unverified,
                 runtime_dir=tmp_path,
                 clock=lambda: CLOCK,
                 replay=False,
@@ -651,7 +663,7 @@ def test_wrap_transport_cannot_bypass_the_unverified_endpoint_gate(tmp_path: Pat
     # hook is still applied to it.
     fake = FakeJsonTransport(RESPONSE)
     provider = llm_provider(
-        DEEPSEEK_V4_1_FLASH,
+        unverified,
         runtime_dir=tmp_path,
         clock=lambda: CLOCK,
         replay=False,

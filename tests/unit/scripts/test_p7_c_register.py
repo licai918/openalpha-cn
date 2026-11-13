@@ -7,10 +7,11 @@ red, and it runs every refusal against a throwaway repository built the way
 `test_p7_register.py` builds Step 0's: hermetic git, pinned commit times, the two C scripts and one
 file under every path the registry binds.
 
-The endpoint is deliberately *not* filled in `src/`: `DEEPSEEK_V4_1_FLASH.verified_on` is `None`
-until the gated L2 step, so every success path here monkeypatches the writer's own module-level
-constant with `dataclasses.replace(verified_on=...)` for the duration of the test and the shipped
-constant stays untouched.
+The endpoint the writer refuses is an unverified one. The shipped `DEEPSEEK_V4_1_FLASH` was
+verified at gated step L2 (2026-11-12 reading), so every success path here still monkeypatches
+the writer's own module-level constant with `dataclasses.replace(verified_on=...)` for the
+duration of the test -- now a later date than the shipped one -- and the refusal test explicitly
+replaces it with `verified_on=None`; the shipped constant is never mutated.
 """
 
 from __future__ import annotations
@@ -304,8 +305,10 @@ def test_the_criteria_freeze_every_decision_and_claim_no_verdict() -> None:
     assert "5" in criteria["dry_week"] and "600" in criteria["dry_week"]
     assert "agent_report.py" in criteria["report"]
     assert "forward_report.py" in criteria["report"]
-    assert "verified_on" in criteria["model"] and "None" in criteria["model"]
+    assert "verified_on" in criteria["model"] and "2026-11-12" in criteria["model"]
     assert "deepseek-flash" in criteria["model"]
+    assert "response.model" in criteria["model"] and "system_fingerprint" in criteria["model"]
+    assert "L2 已完成" in criteria["model"]
     assert "72" in criteria["forward_only"]
     assert "候选" in criteria["wording"]
 
@@ -533,12 +536,14 @@ def _pin_world(
 ) -> None:
     monkeypatch.chdir(repo)
     monkeypatch.setattr(register, "_now", lambda: now)
-    if verified:
-        monkeypatch.setattr(
-            register,
-            "DEEPSEEK_V4_1_FLASH",
-            dataclasses.replace(DEEPSEEK_V4_1_FLASH, verified_on=now.date()),
-        )
+    monkeypatch.setattr(
+        register,
+        "DEEPSEEK_V4_1_FLASH",
+        dataclasses.replace(
+            DEEPSEEK_V4_1_FLASH,
+            verified_on=now.date() if verified else None,
+        ),
+    )
 
 
 def _arguments(

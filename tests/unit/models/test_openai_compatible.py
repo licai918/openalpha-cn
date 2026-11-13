@@ -251,9 +251,11 @@ def test_default_payload_is_byte_identical_without_extra_payload(
         '"json_schema": {"name": "openalpha_structured_payload", "strict": true, '
         '"schema": {"type": "object"}}}}'
     )
-    # The vendor endpoint's field exists and defaults to empty: the composition root passes it
-    # through, so its empty default is what keeps the exchanged bytes unchanged.
-    assert dict(DEEPSEEK_V4_1_FLASH.extra_payload) == {}
+    # A provider built without an `extra_payload` adds no vendor dial: the exchanged bytes above
+    # are unchanged by the option. The shipped endpoint sets its own switch (`thinking`,
+    # disabled), because DeepSeek's thinking mode is on by default and ignores `temperature`.
+    assert "thinking" not in payload
+    assert dict(DEEPSEEK_V4_1_FLASH.extra_payload) == {"thinking": {"type": "disabled"}}
 
 
 def test_extra_payload_thinking_disabled_reaches_the_request_body(
