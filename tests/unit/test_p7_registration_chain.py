@@ -17,6 +17,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
+import pytest
+
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 _SCRIPTS: Final[Path] = ROOT / "scripts"
 for _directory in (_SCRIPTS, _SCRIPTS / "research"):
@@ -28,6 +30,20 @@ from p7_register import (  # noqa: E402
     chain_problems,
     committed_survivor_registrations,
     registration_body,
+)
+
+from openalpha_cn.domain.agent_forward import AGENT_LLM_FAMILY  # noqa: E402
+from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
+    ADOPTED_INTERIM_SESSION,
+    ADOPTED_LEVEL,
+    ADOPTED_MIN_MEASURABLE_SESSIONS,
+    ADOPTED_MIN_SCORED,
+    ADOPTED_Q,
+    ADOPTED_WINDOW_SESSIONS,
+    read_agent_forward_anchor,
+    read_agent_forward_power,
+    read_agent_forward_step0,
+    read_agent_protocol,
 )
 
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
@@ -142,3 +158,96 @@ def test_only_non_smoke_survivor_registrations_are_chain_candidates(tmp_path: Pa
 
     assert set(selected) == {"docs/research/survivor.json"}
     assert selected["docs/research/survivor.json"]["config"]["kind"] == "survivor_book/v1"
+
+
+# --- C's registration (`V2-P7-013` task 3.4): bound to Step 0, never a member of its chain ------
+
+AGENT_FORWARD_KIND: Final[str] = "agent_forward/v1"
+C_REGISTRATION: Final[Path] = ROOT / "docs/research/p7-c-registration.json"
+C_REGISTRATION_RELATIVE: Final[str] = "docs/research/p7-c-registration.json"
+
+
+def test_an_agent_forward_registration_is_not_a_survivor_chain_member(tmp_path: Path) -> None:
+    """C's kind is filtered out structurally: it can never become a link of Step 0's chain."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "--template=", "-b", "main")
+    files = {
+        "docs/research/survivor.json": _registration(
+            config={"kind": "survivor_book/v1"}, settings={}
+        ),
+        "docs/research/p7-c-registration.json": _registration(
+            config={"kind": AGENT_FORWARD_KIND},
+            settings={"random_seed": 20_260_926},
+        ),
+    }
+    for relative, body in files.items():
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(body) + "\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "registrations")
+
+    selected = committed_survivor_registrations(repo)
+
+    assert set(selected) == {"docs/research/survivor.json"}
+    assert chain_problems(selected) == []
+
+
+def _real_c_registration() -> dict[str, Any]:
+    """C's registration, or a skip: it is the user's L5 commit, made after this batch."""
+    if not C_REGISTRATION.is_file():
+        pytest.skip(
+            "C's registration is not written yet (it is the user's L5 commit, "
+            "docs/research/p7-c-registration.json)"
+        )
+    body: dict[str, Any] = json.loads(C_REGISTRATION.read_text(encoding="utf-8"))
+    return body
+
+
+def test_the_real_c_registration_is_not_a_survivor_chain_member() -> None:
+    document = _real_c_registration()
+
+    assert document["config"]["kind"] == AGENT_FORWARD_KIND
+    committed = committed_survivor_registrations(ROOT)
+    assert C_REGISTRATION_RELATIVE not in committed
+    assert chain_problems(committed) == []
+
+
+def test_the_real_c_registration_freezes_the_adopted_protocol() -> None:
+    """D2/D3/D5's values are the evaluator's adopted constants, read through its own readers."""
+    settings = _real_c_registration()["settings"]
+
+    protocol = read_agent_protocol(settings)
+    assert protocol.primary_family == AGENT_LLM_FAMILY
+    assert protocol.primary_set == "primary"
+    assert protocol.primary_horizon == 1
+    assert protocol.window_sessions == ADOPTED_WINDOW_SESSIONS
+    assert protocol.interim_session == ADOPTED_INTERIM_SESSION
+    assert protocol.min_scored == ADOPTED_MIN_SCORED
+    assert protocol.min_measurable_sessions == ADOPTED_MIN_MEASURABLE_SESSIONS
+    assert protocol.level == ADOPTED_LEVEL
+    assert protocol.q == ADOPTED_Q
+
+    step0 = read_agent_forward_step0(settings)
+    read_agent_forward_power(settings)
+    anchor = read_agent_forward_anchor(settings)
+    assert (ROOT / step0.path).is_file(), step0.path
+    assert anchor.session.weekday() < 5, anchor.session
+
+
+def test_the_real_c_registrations_power_block_agrees_with_the_body() -> None:
+    """D1's frozen choice is one the writer's body rules could have made (D1's own branches)."""
+    document = _real_c_registration()
+    settings = document["settings"]
+    config = document["config"]
+
+    power = read_agent_forward_power(settings)
+    if power.sample == "n300":
+        assert config["primary_size"] == 300
+    else:
+        assert config["primary_size"] == 10**6
+    assert power.register_untestable == (power.verdict == "not_testable")
+    if power.sample == "census":
+        assert power.verdict == "testable"
+        assert power.register_untestable is False
