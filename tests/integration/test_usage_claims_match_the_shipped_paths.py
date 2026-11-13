@@ -704,6 +704,19 @@ USAGE_SITES: Final[dict[UsageSite, Counted]] = {
         "The same gated construction counted again as a call (the `D12`-review rule). Nothing "
         "runs here in the shipped tree for the reason above.",
     ),
+    UsageSite("scripts/agent_evening.py", "_dry_week_family", AGENT_NAMED): Counted(
+        1,
+        "D7's dry-week mode (`V2-P7-013`, plan C task 3.5/2026-11-12 ruling) constructs the same "
+        "agent inside `_dry_week_family`, after its own `llm_provider(...)` assembly -- and "
+        "`llm_provider` refuses a live provider while `DEEPSEEK_V4_1_FLASH.verified_on is None`, "
+        "so the scratch mode cannot spend a request in the shipped tree either. It files no "
+        "prediction and its records are refused by the report and the evaluator.",
+    ),
+    UsageSite("scripts/agent_evening.py", "_dry_week_family", CALLED_KINDS[AGENT_NAMED]): Counted(
+        1,
+        "The same dry-week construction counted again as a call (the `D12`-review rule). The "
+        "provider assembly above it is still refusal-gated by the unverified endpoint.",
+    ),
 }
 """Every `UsageSite` outside `tests/`, with how often it occurs and why it neither calls a model
 nor records usage."""
@@ -790,16 +803,19 @@ def test_the_agent_evening_model_family_is_gated_on_the_unverified_endpoint(
         pending.extend((child, scope) for child in ast.iter_child_nodes(node))
     constructions = calls.get("StructuredSignalAgent", [])
     assert constructions, "the evening command no longer constructs the model-backed agent"
-    assert [scope for scope, _line in constructions] == ["_llm_family"], (
-        "the shipped construction moved out of `_llm_family`; the gating argument above is "
-        f"about that step, and it now happens in {constructions}"
+    # Two shipped scopes construct it: step 5's family and D7's dry-week family. Each must sit
+    # after its own `llm_provider(...)` assembly, because that assembly is what refuses a live
+    # provider while the endpoint has no verification date.
+    assert {scope for scope, _line in constructions} == {"_llm_family", "_dry_week_family"}, (
+        "the shipped constructions moved out of the two gated scopes; the gating argument above "
+        f"is about them, and it now happens in {constructions}"
     )
-    assemblies = [line for scope, line in calls.get("llm_provider", []) if scope == "_llm_family"]
-    assert assemblies, "the evening command no longer assembles the provider through `llm_provider`"
-    assert all(line > min(assemblies) for _scope, line in constructions), (
-        "the agent is constructed before `llm_provider` is assembled, which would make the "
-        "unverified-endpoint refusal unable to gate it"
-    )
+    for scope, line in constructions:
+        assemblies = [at for name, at in calls.get("llm_provider", []) if name == scope]
+        assert assemblies and line > min(assemblies), (
+            f"`{scope}` constructs the agent before it assembles `llm_provider`, which would "
+            "make the unverified-endpoint refusal unable to gate it"
+        )
 
 
 def _counted(*sites: tuple[str, str, int]) -> Counter[UsageSite]:

@@ -22,6 +22,7 @@ import dataclasses
 import hashlib
 import importlib
 import json
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
@@ -61,6 +62,9 @@ from openalpha_cn.runtime.composition import (
     run_repository_at,
 )
 from openalpha_cn.storage.predictions import FilePredictionStore
+from openalpha_cn.strategy_agent_evaluation import (
+    DRY_WEEK_SCRATCH_SCHEMA,
+)
 from openalpha_cn.strategy_forward_session import file_forward_record, outcome_calendar
 from openalpha_cn.strategy_registration import SHANGHAI, RegisteredConfiguration
 from openalpha_cn.strategy_survivor_forward import record_scope
@@ -1749,3 +1753,443 @@ def test_pin_worktree_refuses_a_dirty_or_foreign_worktree(
     assert _git(fresh, "rev-parse", "HEAD") == commit
     assert (fresh / ".env").is_symlink()
     assert seen and seen[0][2] == agent.C_SCRIPTS
+
+
+# --- the D7 dry week ---------------------------------------------------------------------------
+#
+# The dry week measures the model family's operational behaviour before C's registration exists:
+# at most five evenings in a scratch runtime, at most 600 model requests each, operational
+# metrics only -- never a score, an IC or a return. It files no prediction, writes no C evidence
+# and no evening journal, and its scratch runtime carries the marker the evaluator and the report
+# refuse to read as C's forward sample (`strategy_agent_evaluation.DRY_WEEK_SCRATCH_MARKER`).
+
+_DRY_WEEK_JOURNAL_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "schema",
+        "session",
+        "status",
+        "names",
+        "requests",
+        "scored",
+        "abstained",
+        "not_routed",
+        "invalid_output",
+        "blank_responses",
+        "invalid_json_responses",
+        "transport_failures",
+        "latency_ms",
+        "tokens",
+        "cap",
+        "deadline",
+    }
+)
+
+
+def _dry_week_arguments(world: World, scratch: Path, *extra: str) -> list[str]:
+    """A dry-week command line against `scratch`, with C's registration deliberately absent.
+
+    No C registration may exist for the dry week (`world.registration` is not a file in this
+    fixture); the two registrations it does need are Step 0's committed one and its runtime.
+    """
+    return [
+        "--dry-week",
+        "--runtime-dir",
+        str(scratch),
+        "--step0-runtime-dir",
+        str(world.step0),
+        "--step0-registration",
+        str(world.step0_registration),
+        "--registration",
+        str(world.registration),
+        "--repo",
+        str(world.repo),
+        "--as-of",
+        world.evening.isoformat(),
+        *extra,
+    ]
+
+
+def _dry_week_journal(world: World, scratch: Path) -> dict[str, Any]:
+    path = agent.dry_week_journal_path(scratch, world.session)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _dry_week_marker(scratch: Path) -> dict[str, Any]:
+    return json.loads(agent.dry_week_marker_path(scratch).read_text(encoding="utf-8"))
+
+
+def test_a_dry_week_evening_files_no_prediction_journal_or_evidence_and_leaves_step0_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D7: one dry-week evening is operational measurement, not a filed forward prediction.
+
+    The census is the survivors that carry a limit event; the model family runs through the real
+    engine (so its run manifest records the model, and 015's guard is on the path), and the only
+    things the scratch runtime gains are the exchange/usage records, the dry-week journal and the
+    scratch marker. No prediction batch, no evening journal, no evidence record, and Step 0's own
+    store is byte-identical afterwards.
+    """
+    world = _world(tmp_path, monkeypatch)
+    scratch = tmp_path / "dry-scratch"
+    before_step0 = _files(world.step0, skip_panel_locks=True)
+    model = ScriptedModel("valid")
+
+    code = agent.main(
+        _dry_week_arguments(world, scratch), clock=lambda: world.evening, transport=model
+    )
+    printed = capsys.readouterr().out
+
+    assert code == 0, printed
+    journal = _dry_week_journal(world, scratch)
+    assert journal["schema"] == agent.DRY_WEEK_EVENING_SCHEMA
+    assert journal["session"] == world.session.isoformat()
+    assert journal["status"] == "completed"
+    assert journal["names"] == 1, "only the survivor carrying a limit event is asked about"
+    assert journal["requests"] == 1
+    assert journal["scored"] == 1
+    assert journal["abstained"] == journal["not_routed"] == journal["invalid_output"] == 0
+    assert journal["blank_responses"] == journal["invalid_json_responses"] == 0
+    assert journal["transport_failures"] == 0
+    assert journal["cap"] == agent.DEFAULT_MAX_MODEL_REQUESTS
+    assert datetime.fromisoformat(journal["deadline"]).strftime("%H:%M") == "23:30"
+    assert model.calls == 1
+
+    # The real engine path: the run manifest records the model that answered.
+    storage = build_storage(runtime_dir=scratch, clock=lambda: world.evening)
+    run_id = agent.agent_run_id(
+        config_id=agent.DRY_WEEK_CONFIG_ID,
+        session=world.session,
+        family=AGENT_LLM_FAMILY,
+        ts_code=world.evidence_subject,
+    )
+    manifest = storage.repository.get_run(run_id)
+    assert manifest is not None
+    assert [(ref.component, ref.version) for ref in manifest.model_versions] == [
+        (DEEPSEEK_V4_1_FLASH.provider_id, DEEPSEEK_V4_1_FLASH.model)
+    ]
+
+    # Nothing was filed and no C account was written.
+    assert prediction_store_at(scratch, clock=lambda: world.evening).list_ids() == ()
+    assert not world.journal_path().exists(), "the dry week writes no evening journal"
+    assert not (scratch / "agent_evening").exists()
+    assert list((scratch / "evidence").rglob("*.parquet")) == [], "no evidence record exists"
+    assert _files(world.step0, skip_panel_locks=True) == before_step0
+
+    marker = _dry_week_marker(scratch)
+    assert marker == {"schema": DRY_WEEK_SCRATCH_SCHEMA, "evenings": [world.session.isoformat()]}
+    assert "候选" in printed and agent.NOT_TRADED in printed
+    assert "dry week" in printed.lower() and "request" in printed.lower()
+
+
+def test_the_dry_week_journal_carries_only_operational_facts_never_a_score_or_a_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D7: the journal's key set is the operational list, and no outcome field can sneak in.
+
+    The dry week is never evaluated: a key named score, IC, return, mean or label -- at any depth
+    the documented shape allows -- would let a reader compute something the decision D7 says the
+    dry week does not measure.
+    """
+    world = _world(tmp_path, monkeypatch)
+    scratch = tmp_path / "dry-scratch"
+
+    assert (
+        agent.main(
+            _dry_week_arguments(world, scratch),
+            clock=lambda: world.evening,
+            transport=ScriptedModel("valid"),
+        )
+        == 0
+    )
+    capsys.readouterr()
+    journal = _dry_week_journal(world, scratch)
+    assert set(journal) == _DRY_WEEK_JOURNAL_FIELDS
+    assert set(journal["latency_ms"]) == {"p50", "p95", "mean"}
+    assert set(journal["tokens"]) == {"input", "output", "total"}
+    # `latency_ms.mean` is the one field D7 asks for under that name; no outcome field may exist
+    # anywhere else in the document.
+    forbidden = frozenset({"score", "ic", "return", "returns", "mean", "label", "labels"})
+    found: list[tuple[str, ...]] = []
+
+    def walk(value: Any, path: tuple[str, ...]) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in forbidden and (*path, key) != ("latency_ms", "mean"):
+                    found.append((*path, key))
+                walk(item, (*path, key))
+
+    walk(journal, ())
+    assert found == [], f"the dry-week journal carries outcome fields {found}"
+    serialised = json.dumps(journal)
+    for word in ("score", "return", "label"):
+        assert not re.search(rf'"{word}"\s*:', serialised), word
+    assert journal["latency_ms"]["mean"] is not None
+
+
+def test_a_rerun_of_a_recorded_dry_week_evening_is_refused_and_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D7: one journal per session; the second run is refused before anything is written."""
+    world = _world(tmp_path, monkeypatch)
+    scratch = tmp_path / "dry-scratch"
+    assert (
+        agent.main(
+            _dry_week_arguments(world, scratch),
+            clock=lambda: world.evening,
+            transport=ScriptedModel("valid"),
+        )
+        == 0
+    )
+    capsys.readouterr()
+    journal_before = agent.dry_week_journal_path(scratch, world.session).read_bytes()
+    marker_before = agent.dry_week_marker_path(scratch).read_bytes()
+
+    code = agent.main(
+        _dry_week_arguments(world, scratch), clock=lambda: world.evening, transport=ScriptedModel()
+    )
+
+    err = capsys.readouterr().err
+    assert code == agent.AgentEveningExit.refused
+    assert "already" in err and world.session.isoformat() in err
+    assert agent.dry_week_journal_path(scratch, world.session).read_bytes() == journal_before
+    assert agent.dry_week_marker_path(scratch).read_bytes() == marker_before
+
+
+def test_a_fifth_recorded_evening_exhausts_the_scratch_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D7's hard cap: at most five evenings per scratch runtime, enforced by the marker."""
+    world = _world(tmp_path, monkeypatch)
+    scratch = tmp_path / "dry-scratch"
+    scratch.mkdir()
+    recorded = [f"2026-01-{day:02d}" for day in (5, 6, 7, 8, 9)]
+    agent.dry_week_marker_path(scratch).write_text(
+        json.dumps({"schema": DRY_WEEK_SCRATCH_SCHEMA, "evenings": recorded}), encoding="utf-8"
+    )
+
+    code = agent.main(
+        _dry_week_arguments(world, scratch), clock=lambda: world.evening, transport=ScriptedModel()
+    )
+
+    err = capsys.readouterr().err
+    assert code == agent.AgentEveningExit.refused
+    assert "5" in err and ("dry-week" in err or "D7" in err)
+    assert not agent.dry_week_journal_path(scratch, world.session).exists()
+    assert _dry_week_marker(scratch)["evenings"] == recorded, "the marker was not rewritten"
+
+
+def test_the_600_request_ceiling_is_hard_and_the_evening_stops_when_it_is_reached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D7: 600 requests per evening is a ceiling, and crossing it stops the evening by name.
+
+    A smaller cap exercises the same path cheaply: the invalid answer triggers a retry, the retry
+    is the request past the allowance, and the evening records `request_cap_reached` with the
+    requests it did spend. A cap above 600 is refused before the run starts.
+    """
+    world = _world(tmp_path, monkeypatch)
+    scratch = tmp_path / "dry-scratch"
+    model = ScriptedModel("invalid", "valid")
+
+    code = agent.main(
+        _dry_week_arguments(world, scratch, "--max-model-requests", "1"),
+        clock=lambda: world.evening,
+        transport=model,
+    )
+    capsys.readouterr()
+
+    assert code == 0
+    assert model.calls == 1, "the request past the allowance was never sent"
+    journal = _dry_week_journal(world, scratch)
+    assert journal["status"] == agent.NO_RECORD_REQUEST_CAP_REACHED
+    assert journal["requests"] == 1
+    assert journal["cap"] == 1
+    assert journal["invalid_output"] == 0, "a cap is not an answer"
+
+    above = tmp_path / "dry-scratch-above"
+    code = agent.main(
+        _dry_week_arguments(world, above, "--max-model-requests", "601"),
+        clock=lambda: world.evening,
+        transport=ScriptedModel("valid"),
+    )
+    err = capsys.readouterr().err
+    assert code == agent.AgentEveningExit.refused
+    assert "600" in err
+    assert not agent.dry_week_journal_path(above, world.session).exists()
+
+
+def test_a_dry_week_evening_stops_with_the_named_status_it_met(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D6/D7: a transport failure, a deadline and a configuration fault are statuses, not answers.
+
+    Each stops the evening and is journalled; the operational account of a failed evening is what
+    the dry week exists to collect, so the journal is written with the status and the counts it
+    reached, and no score is recorded.
+    """
+    cases = (
+        ("transport", ScriptedModel("error"), None, agent.NO_RECORD_TRANSPORT_ERROR),
+        ("configuration", ConfigurationFailingModel(), None, agent.NO_RECORD_CONFIGURATION_ERROR),
+        ("deadline", ScriptedModel("valid"), time(23, 31), agent.NO_RECORD_DEADLINE_REACHED),
+    )
+    for name, model, wall_time, expected in cases:
+        case = tmp_path / name
+        case.mkdir()
+        world = _world(case, monkeypatch)
+        scratch = case / "dry-scratch"
+
+        def clock(world: World = world, wall_time: time | None = wall_time) -> datetime:
+            if wall_time is None:
+                return world.evening
+            return datetime.combine(world.session, wall_time, tzinfo=SHANGHAI)
+
+        code = agent.main(_dry_week_arguments(world, scratch), clock=clock, transport=model)
+        capsys.readouterr()
+
+        assert code == 0, f"{name}: a failed dry-week evening is still journalled"
+        journal = _dry_week_journal(world, scratch)
+        assert journal["status"] == expected, name
+        assert journal["scored"] == 0, name
+        assert journal["requests"] >= 0, name
+        assert not agent.dry_week_marker_path(scratch).exists(), (
+            f"{name}: a failed evening is not a completed evening, so no marker is written"
+        )
+
+
+def test_dry_week_requires_its_own_scratch_runtime_and_step0_and_refuses_a_registered_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D7: the scratch runtime and Step 0's runtime are required, and C's runtime is refused.
+
+    A runtime that already carries a registered evening's journal or filed predictions is C's
+    forward runtime, not a scratch directory: writing the marker there would mark a real trial's
+    store as disposable, so the refusal happens before anything is read or written.
+    """
+    world = _world(tmp_path, monkeypatch)
+
+    code = agent.main(["--dry-week", "--step0-runtime-dir", str(world.step0)])
+    err = capsys.readouterr().err
+    assert code == agent.AgentEveningExit.refused
+    assert "--runtime-dir is required" in err
+
+    code = agent.main(["--dry-week", "--runtime-dir", str(tmp_path / "scratch")])
+    err = capsys.readouterr().err
+    assert code == agent.AgentEveningExit.refused
+    assert "--step0-runtime-dir is required" in err
+    assert not (tmp_path / "scratch").exists()
+
+    assert agent.main(world.arguments("--no-llm"), clock=lambda: world.evening) == 0
+    capsys.readouterr()
+    before = _files(world.runtime)
+    marker = agent.dry_week_marker_path(world.runtime)
+
+    code = agent.main(
+        _dry_week_arguments(world, world.runtime),
+        clock=lambda: world.evening,
+        transport=ScriptedModel("valid"),
+    )
+
+    err = capsys.readouterr().err
+    assert code == agent.AgentEveningExit.refused
+    assert "registered" in err and "scratch" in err
+    assert not marker.exists()
+    assert _files(world.runtime) == before
+
+
+def test_a_dry_week_run_does_not_require_a_c_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D7: the dry week precedes registration, so step 1 is not run and C's file is not read."""
+    world = _world(tmp_path, monkeypatch)
+    scratch = tmp_path / "dry-scratch"
+    assert not world.registration.exists()
+
+    def unreachable_admission(options: Any) -> Any:
+        raise AssertionError("the dry week must not admit a C registration")
+
+    monkeypatch.setattr(agent, "_admit", unreachable_admission)
+
+    code = agent.main(
+        _dry_week_arguments(world, scratch),
+        clock=lambda: world.evening,
+        transport=ScriptedModel("valid"),
+    )
+    capsys.readouterr()
+
+    assert code == 0
+    assert agent.dry_week_journal_path(scratch, world.session).is_file()
+
+
+class _BlankThenInvalidModel(ScriptedModel):
+    """A transport whose answers are blank first, then not JSON: both are operations to count."""
+
+    def __init__(self) -> None:
+        super().__init__("blank", "invalid")
+
+    def post_json(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        self.requests.append(payload)
+        action = self.script[min(len(self.requests) - 1, len(self.script) - 1)]
+        content = "" if action == "blank" else "not a json object"
+        return {
+            "id": f"req-{len(self.requests)}",
+            "model": "deepseek-flash",
+            "system_fingerprint": "fp-c-test",
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+        }
+
+
+def test_blank_and_invalid_json_answers_are_counted_and_an_invalid_output_is_not_a_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D6/D7: the meter counts what the endpoint did, and `model_invalid_output` is an answer.
+
+    A blank content and a non-JSON content are two failed answers to the same subject; after the
+    retries the agent's coded abstention is `model_invalid_output`, which is the family's answer,
+    so the evening completes and the operational counts say what happened.
+    """
+    world = _world(tmp_path, monkeypatch)
+    scratch = tmp_path / "dry-scratch"
+    model = _BlankThenInvalidModel()
+
+    code = agent.main(
+        _dry_week_arguments(world, scratch), clock=lambda: world.evening, transport=model
+    )
+    capsys.readouterr()
+
+    assert code == 0
+    assert model.calls == 2, "the blank answer was retried once and the second answer was invalid"
+    journal = _dry_week_journal(world, scratch)
+    assert journal["status"] == "completed"
+    assert journal["requests"] == 2
+    assert journal["blank_responses"] == 1
+    assert journal["invalid_json_responses"] == 1
+    assert journal["invalid_output"] == 1
+    assert journal["scored"] == 0
+    assert journal["transport_failures"] == 0
+    assert journal["tokens"] == {"input": 22, "output": 14, "total": 36}

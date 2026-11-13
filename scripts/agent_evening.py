@@ -67,6 +67,17 @@ crash that filed the batches but died before step 6. Such a rerun needs no crede
 filed batches put the provider in replay mode (N4), so a launchd environment without
 `DEEPSEEK_API_KEY` finishes the day instead of journalling `credential_missing` over the store.
 
+## The D7 dry week (`--dry-week`)
+
+A mode of this command rather than a second script: the dry week exercises the same Step 0 read,
+the same engine and the same provider assembly, and measures only what the endpoint *did* --
+requests, blank and non-JSON answers, transport failures, latency and tokens -- on a scratch
+runtime instead of C's. It needs no C registration (nothing is filed, so there is nothing to
+register), files no prediction, writes no C evidence and no evening journal, and its only output
+is one `dry_week/<session>.json` plus the root marker `c-dry-week-scratch.json` the evaluator and
+the report refuse to read as C's forward sample. At most five evenings per scratch runtime and at
+most 600 model requests each; the sixth evening and a rerun of a recorded one are refused.
+
 ## What it never does
 
 It never trades, never touches Step 0's runtime, never edits the registration, and never spends a
@@ -80,14 +91,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Final
 
 _SCRIPTS: Final[Path] = Path(__file__).resolve().parent
@@ -142,7 +156,12 @@ from openalpha_cn.runtime.composition import (  # noqa: E402
     prediction_store_at,
     research_engine,
 )
+from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
+    DRY_WEEK_SCRATCH_MARKER,
+    DRY_WEEK_SCRATCH_SCHEMA,
+)
 from openalpha_cn.strategy_agent_forward import (  # noqa: E402
+    AGENT_SCRIPTS,
     REGISTRATION_HYPERPARAMETER,
     SCORING_SET_HYPERPARAMETER,
     AgentScore,
@@ -188,8 +207,11 @@ REGISTRATION_IN_REPOSITORY: Final[str] = "docs/research/p7-c-registration.json"
 """C's registration (plan C batch 3 writes it); a relative `--registration` resolves here."""
 STEP0_REGISTRATION_IN_REPOSITORY: Final[str] = "docs/research/p7-registration.json"
 """Step 0's registration: the book whose survivors, holdings and watch list C scores."""
-C_SCRIPTS: Final[tuple[str, ...]] = ("scripts/agent_evening.py",)
-"""The code this batch binds into C's admission (batch 3 adds the report script)."""
+C_SCRIPTS: Final[tuple[str, ...]] = AGENT_SCRIPTS
+"""The code this batch binds into C's admission: the evening command and the report.
+
+One spelling (`strategy_agent_forward.AGENT_SCRIPTS`) is what the registration writer, this
+command's step 1 and the report's own admission all read (`V2-P7-013` task 3.3, `V2-P7-014`)."""
 
 AGENT_REGISTRATION_KIND: Final[str] = "agent_forward/v1"
 """What C's registered configuration declares itself: never a survivor or a P6 configuration."""
@@ -221,6 +243,19 @@ variable unset or blank before anything was asked; `configuration_error` is any 
 a malformed base URL or extra payload, a credential that vanished mid-run). Only a genuine
 invalid answer after its retries is `model_invalid_output`.
 """
+
+DRY_WEEK_EVENING_SCHEMA: Final[str] = "openalpha-c-dry-week-evening/v1"
+"""The dry-week evening's one journal document (D7): operational facts only, never an outcome."""
+DRY_WEEK_JOURNAL_DIRECTORY: Final[str] = "dry_week"
+"""Where a scratch runtime's dry-week evenings live, one document per session."""
+DRY_WEEK_MAX_EVENINGS: Final[int] = 5
+"""D7: at most five dry-week evenings per scratch runtime."""
+DRY_WEEK_MAX_REQUESTS: Final[int] = 600
+"""D7: at most 600 model requests per dry-week evening, a hard ceiling on `--max-model-requests`."""
+DRY_WEEK_CONFIG_ID: Final[str] = "c-dry-week-scratch"
+"""The run address a dry-week evening's cycles are minted under: never C's `config_id`."""
+DRY_WEEK_COMPLETED: Final[str] = "completed"
+"""The status of an evening that ran to its end; every other status names what stopped it."""
 
 _EMPTY_SET: Final[str] = "empty_set"
 """Why a scoring set filed no batch: there is nothing in it. Never a `no_record` gap."""
@@ -675,6 +710,471 @@ class _BudgetedTransport:
             payload=payload,
             timeout_seconds=timeout_seconds,
         )
+
+
+# --- the D7 dry week ----------------------------------------------------------------------------
+
+
+def dry_week_marker_path(runtime_dir: Path) -> Path:
+    """The scratch runtime's dry-week marker: what makes it not C's forward runtime (D7)."""
+    return Path(runtime_dir) / DRY_WEEK_SCRATCH_MARKER
+
+
+def dry_week_journal_path(runtime_dir: Path, session: date) -> Path:
+    """The one dry-week evening document of `session` in a scratch runtime."""
+    return Path(runtime_dir) / DRY_WEEK_JOURNAL_DIRECTORY / f"{session.isoformat()}.json"
+
+
+def _dry_week_evenings(runtime_dir: Path) -> tuple[str, ...]:
+    """The sessions the marker lists, or a refusal naming why its status cannot be stated."""
+    path = dry_week_marker_path(runtime_dir)
+    if not path.is_file():
+        return ()
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise StepFailedError(
+            "dry_week",
+            f"{path} cannot be read ({error}); a scratch runtime whose dry-week status cannot "
+            "be stated is not written to",
+        ) from error
+    if not isinstance(body, Mapping) or body.get("schema") != DRY_WEEK_SCRATCH_SCHEMA:
+        raise StepFailedError(
+            "dry_week",
+            f"{path} is not a {DRY_WEEK_SCRATCH_SCHEMA} marker; the dry week writes its own "
+            "marker and never overwrites a document it cannot read",
+        )
+    evenings = body.get("evenings")
+    if not isinstance(evenings, list) or any(not isinstance(item, str) for item in evenings):
+        raise StepFailedError(
+            "dry_week",
+            f"{path} lists no sessions in `evenings`; the marker is not one this command wrote",
+        )
+    return tuple(sorted(evenings))
+
+
+def _write_dry_week_marker(runtime_dir: Path, evenings: Sequence[str]) -> Path:
+    """Write the scratch marker atomically: temporary file, then one `os.replace`."""
+    path = dry_week_marker_path(runtime_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (
+        json.dumps(
+            {"schema": DRY_WEEK_SCRATCH_SCHEMA, "evenings": list(evenings)},
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode()
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
+    return path
+
+
+def _refuse_a_registered_runtime(runtime_dir: Path, *, clock: Callable[[], datetime]) -> None:
+    """Refuse a runtime that already holds a registered evening or a filed prediction (D7).
+
+    The dry week writes a marker that makes the runtime unreadable as C's forward sample, so it
+    must never be pointed at a store that *is* one: a registered evening leaves an
+    `openalpha-agent-evening/v1` journal, and any filed prediction at all means the directory has
+    a forward history. A marker already present means this is a scratch runtime and is not
+    refused -- the cap and the rerun check handle it.
+    """
+    if dry_week_marker_path(runtime_dir).is_file():
+        return
+    journal_directory = agent_journal_dir_at(Path(runtime_dir))
+    if journal_directory.is_dir():
+        for path in sorted(journal_directory.glob("*.json")):
+            try:
+                body = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise StepFailedError(
+                    "dry_week",
+                    f"{path} cannot be read ({error}); a runtime whose evening history cannot "
+                    "be stated is not used as a dry-week scratch",
+                ) from error
+            if isinstance(body, Mapping) and body.get("schema") == JOURNAL_SCHEMA:
+                raise StepFailedError(
+                    "dry_week",
+                    f"{runtime_dir} holds a registered evening journal ({path}); it is C's "
+                    "forward runtime, not a dry-week scratch, and the dry week never marks a "
+                    "registered runtime as disposable",
+                )
+    store = prediction_store_at(Path(runtime_dir), clock=clock)
+    filed = store.list_ids()
+    if filed:
+        raise StepFailedError(
+            "dry_week",
+            f"{runtime_dir} holds {len(filed)} filed prediction record(s); a dry-week scratch "
+            "runtime files none, so this is a forward runtime and is not used as a scratch",
+        )
+
+
+class _OperationalMeter:
+    """What one dry-week evening asks of the endpoint, counted without reading any answer (D7).
+
+    Every HTTP attempt the budget lets through is observed: blank and non-JSON content are
+    operational facts even though the agent retries them, and a transport failure is recorded
+    before the provider turns it into a family gap. `tokens` is the vendor-reported usage, summed
+    over the stored exchanges (or, for a failed attempt, over nothing).
+    """
+
+    def __init__(self) -> None:
+        self.attempts: int = 0
+        self.blank_responses: int = 0
+        self.invalid_json_responses: int = 0
+        self.transport_failures: int = 0
+        self.latencies_ms: list[float] = []
+        self.tokens: dict[str, int] = {"input": 0, "output": 0, "total": 0}
+
+    def observe_response(self, response: Mapping[str, Any]) -> None:
+        """Classify one response's content without interpreting it, and add its usage."""
+        content: object = None
+        choices = response.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+            message = choices[0].get("message")
+            if isinstance(message, Mapping):
+                content = message.get("content")
+        if isinstance(content, str):
+            if not content.strip():
+                self.blank_responses += 1
+            else:
+                try:
+                    json.loads(content)
+                except ValueError:
+                    self.invalid_json_responses += 1
+        else:
+            self.invalid_json_responses += 1
+        usage = response.get("usage")
+        if isinstance(usage, Mapping):
+            self.tokens["input"] += _token_count(usage.get("prompt_tokens"))
+            self.tokens["output"] += _token_count(usage.get("completion_tokens"))
+            self.tokens["total"] += _token_count(usage.get("total_tokens"))
+
+
+class _MeteredTransport:
+    """A `JsonTransport` that observes one HTTP attempt and forwards it unchanged."""
+
+    def __init__(self, inner: JsonTransport, *, meter: _OperationalMeter) -> None:
+        self._inner = inner
+        self._meter = meter
+
+    def post_json(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        started = perf_counter()
+        try:
+            response = self._inner.post_json(
+                url=url,
+                headers=headers,
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+            )
+        except ModelTransportError:
+            self._meter.transport_failures += 1
+            raise
+        finally:
+            self._meter.attempts += 1
+            self._meter.latencies_ms.append((perf_counter() - started) * 1000.0)
+        self._meter.observe_response(response)
+        return response
+
+
+def _latency_summary(samples: Sequence[float]) -> dict[str, float | None]:
+    """`p50`, `p95` and the mean of the evening's request latencies, in milliseconds."""
+    if not samples:
+        return {"p50": None, "p95": None, "mean": None}
+    ordered = sorted(samples)
+    p95_index = max(0, math.ceil(0.95 * len(ordered)) - 1)
+    return {
+        "p50": round(statistics.median(ordered), 3),
+        "p95": round(ordered[p95_index], 3),
+        "mean": round(statistics.fmean(ordered), 3),
+    }
+
+
+def _dry_week_document(
+    *,
+    session: date,
+    status: str,
+    names: Sequence[str],
+    requests: int,
+    counts: Mapping[str, int],
+    meter: _OperationalMeter,
+    cap: int,
+    deadline: datetime,
+) -> dict[str, Any]:
+    """One evening's operational account: what was asked, what came back, and nothing else."""
+    return {
+        "schema": DRY_WEEK_EVENING_SCHEMA,
+        "session": session.isoformat(),
+        "status": status,
+        "names": len(names),
+        "requests": requests,
+        "scored": counts["scored"],
+        "abstained": counts["abstained"],
+        "not_routed": counts["not_routed"],
+        "invalid_output": counts["invalid_output"],
+        "blank_responses": meter.blank_responses,
+        "invalid_json_responses": meter.invalid_json_responses,
+        "transport_failures": meter.transport_failures,
+        "latency_ms": _latency_summary(meter.latencies_ms),
+        "tokens": dict(meter.tokens),
+        "cap": cap,
+        "deadline": deadline.isoformat(),
+    }
+
+
+def _write_dry_week_journal(path: Path, document: Mapping[str, Any]) -> None:
+    """Write the evening document once, atomically: temporary file, then one `os.replace`."""
+    payload = (json.dumps(document, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
+
+
+def _dry_week_family(
+    runtime: Path,
+    day: StepZeroDay,
+    *,
+    session: date,
+    names: Sequence[str],
+    by_subject: Mapping[str, Sequence[Any]],
+    options: argparse.Namespace,
+    clock: Callable[[], datetime],
+    transport: JsonTransport | None,
+) -> tuple[str, dict[str, int], int, _OperationalMeter, datetime]:
+    """The model family as an operational measurement: counts and a status, never a score.
+
+    The engine is on the path for the same reason the registered evening puts it there -- 015's
+    history/72-hour guard, the run manifest and the replay record -- and each name's answer is
+    mapped only to which operational bucket it fell in. A transport failure, the request cap, the
+    wall deadline or a configuration fault stops the evening with that named status; an invalid
+    answer after its retries is the family's coded abstention (`model_invalid_output`), which is
+    an answer and therefore not a stop (D6).
+    """
+    counts = {"scored": 0, "abstained": 0, "not_routed": 0, "invalid_output": 0}
+    meter = _OperationalMeter()
+    deadline = _parse_deadline(options.deadline, session)
+    key_env = DEEPSEEK_V4_1_FLASH.api_key_env
+    if key_env is not None and not os.environ.get(key_env, "").strip():
+        return NO_RECORD_CREDENTIAL_MISSING, counts, 0, meter, deadline
+    budget = _ModelBudget(allowance=options.max_model_requests, deadline=deadline, clock=clock)
+
+    def wrap_transport(inner: JsonTransport) -> JsonTransport:
+        return _BudgetedTransport(_MeteredTransport(inner, meter=meter), budget=budget)
+
+    try:
+        provider = llm_provider(
+            DEEPSEEK_V4_1_FLASH,
+            runtime_dir=runtime,
+            clock=clock,
+            replay=False,
+            transport=transport,
+            wrap_transport=wrap_transport,
+        )
+    except ModelConfigurationError:
+        return NO_RECORD_CONFIGURATION_ERROR, counts, budget.requests, meter, deadline
+    agent = StructuredSignalAgent(
+        agent_id=AGENT_ID,
+        evidence_families=_MARKET_EVENT_FAMILIES,
+        provider=provider,
+        max_attempts=2,
+        prompt=STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT,
+        include_facts=True,
+    )
+    storage = build_storage(runtime_dir=runtime, clock=clock)
+    engine = research_engine(
+        repository=storage.repository,
+        memory=storage.memory,
+        recovery_store=storage.recovery_store,
+        clock=clock,
+        agents=[agent],
+    )
+    published = session_publication_instant(session)
+    try:
+        code_commit = _git_output(Path(options.repo), "rev-parse", "HEAD")
+    except StepFailedError:
+        code_commit = DRY_WEEK_CONFIG_ID
+    config_digest = hashlib.sha256(
+        canonical_json_bytes({"config_id": DRY_WEEK_CONFIG_ID, "session": session.isoformat()})
+    ).hexdigest()
+    status = DRY_WEEK_COMPLETED
+    for ts_code in names:
+        request = ResearchRunRequest(
+            run_id=agent_run_id(
+                config_id=DRY_WEEK_CONFIG_ID,
+                session=session,
+                family=AGENT_LLM_FAMILY,
+                ts_code=ts_code,
+            ),
+            mode=RunMode.daily,
+            subject=ts_code,
+            as_of=published,
+            evidence=tuple(by_subject.get(ts_code, ())),
+            code_commit=code_commit,
+            config_digest=config_digest,
+            random_seed=0,
+        )
+        try:
+            result = engine.run_cycle(request)
+        except ModelProviderFailure:
+            counts["invalid_output"] += 1
+            continue
+        except ModelTransportError:
+            status = NO_RECORD_TRANSPORT_ERROR
+            break
+        except RequestCapReached:
+            status = NO_RECORD_REQUEST_CAP_REACHED
+            break
+        except _DeadlineReached:
+            status = NO_RECORD_DEADLINE_REACHED
+            break
+        except ModelConfigurationError:
+            status = NO_RECORD_CONFIGURATION_ERROR
+            break
+        except (RuntimeError, ValueError) as error:
+            raise StepFailedError(
+                "dry_week", f"{ts_code}: {type(error).__name__}: {error}"
+            ) from error
+        if not result.agent_results:
+            counts["not_routed"] += 1
+        elif result.agent_results[0].signal.direction == "abstain":
+            counts["abstained"] += 1
+        else:
+            counts["scored"] += 1
+    return status, counts, budget.requests, meter, deadline
+
+
+def _print_dry_week(
+    *,
+    session: date,
+    document: Mapping[str, Any],
+    path: Path,
+    marker: Path | None,
+) -> None:
+    """The printed dry-week account: candidate wording, operations, never a result."""
+    latency = document["latency_ms"]
+    tokens = document["tokens"]
+    print(f"{CANDIDATE} / candidate: the dry week evening of {session.isoformat()}")
+    print(
+        f"{NOT_TRADED}: the dry week files no prediction and trades nothing; its numbers are "
+        "operational only and are never read as C's forward sample"
+    )
+    print(
+        f"dry week status {document['status']}; names {document['names']}, requests "
+        f"{document['requests']}/{document['cap']}, scored {document['scored']}, abstained "
+        f"{document['abstained']}, not routed {document['not_routed']}, invalid output "
+        f"{document['invalid_output']}"
+    )
+    print(
+        f"meter: blank {document['blank_responses']}, invalid json "
+        f"{document['invalid_json_responses']}, transport failures "
+        f"{document['transport_failures']}, latency ms p50 {latency['p50']} / p95 "
+        f"{latency['p95']} / mean {latency['mean']}"
+    )
+    print(
+        f"tokens {tokens['input']} in / {tokens['output']} out / {tokens['total']} total; "
+        f"deadline {document['deadline']}"
+    )
+    print(f"dry-week journal written: {path}")
+    if marker is not None:
+        print(f"scratch marker updated: {marker}")
+
+
+def _dry_week(
+    options: argparse.Namespace,
+    *,
+    clock: Callable[[], datetime],
+    transport: JsonTransport | None,
+) -> int:
+    """One D7 dry-week evening: no registration, no filing, operational metrics only.
+
+    The scratch runtime and Step 0's runtime are required; C's registration is not read (there is
+    nothing to register yet), and a runtime already holding a registered evening or a filed
+    prediction is refused. The cap and the rerun checks run before anything is opened, so a
+    refused evening leaves the scratch runtime untouched.
+    """
+    _required(options, "runtime_dir", step="dry_week")
+    _required(options, "step0_runtime_dir", step="dry_week")
+    runtime = Path(options.runtime_dir)
+    pinned = _now(options, clock)
+    if pinned.tzinfo is None:
+        pinned = pinned.replace(tzinfo=SHANGHAI)
+    session = pinned.astimezone(SHANGHAI).date()
+    cap = options.max_model_requests
+    if isinstance(cap, bool) or cap < 0 or cap > DRY_WEEK_MAX_REQUESTS:
+        raise StepFailedError(
+            "dry_week",
+            f"--max-model-requests is {cap!r}; D7's hard ceiling is {DRY_WEEK_MAX_REQUESTS} "
+            "requests one evening, and a cap is zero or more up to it",
+        )
+    _refuse_a_registered_runtime(runtime, clock=clock)
+    recorded = _dry_week_evenings(runtime)
+    if len(recorded) >= DRY_WEEK_MAX_EVENINGS:
+        raise StepFailedError(
+            "dry_week",
+            f"{runtime} has recorded {len(recorded)} dry-week evenings; D7 runs at most "
+            f"{DRY_WEEK_MAX_EVENINGS} per scratch runtime, and a sixth would be a sixth "
+            "measurement of the same deployment",
+        )
+    journal_file = dry_week_journal_path(runtime, session)
+    if journal_file.exists() or session.isoformat() in recorded:
+        raise StepFailedError(
+            "dry_week",
+            f"the dry-week evening of {session.isoformat()} is already recorded "
+            f"({journal_file}); an evening is measured once and the held account stands",
+        )
+    step0 = _step0_registration(options, Path(options.repo))
+    day = _step0_day(options, step0, session=session, clock=clock)
+    wall = clock()
+    if wall >= day.cutoff:
+        raise _late(day, session, wall)
+    published = session_publication_instant(session)
+    panel = PanelStore(Path(options.step0_runtime_dir) / "panel")
+    try:
+        events = limit_events_on(panel, session=session, as_of=published, exchange=day.exchange)
+        arriving = limit_event_snapshots(events, session=session, fetched_at=wall)
+    except (RuntimeError, ValueError) as error:
+        raise StepFailedError("dry_week", f"{type(error).__name__}: {error}") from error
+    by_subject: dict[str, list[Any]] = {}
+    for snapshot in arriving:
+        by_subject.setdefault(snapshot.subject, []).append(snapshot)
+    names = sorted(set(day.survivors) & set(by_subject))
+    status, counts, requests, meter, deadline = _dry_week_family(
+        runtime,
+        day,
+        session=session,
+        names=names,
+        by_subject=by_subject,
+        options=options,
+        clock=clock,
+        transport=transport,
+    )
+    document = _dry_week_document(
+        session=session,
+        status=status,
+        names=names,
+        requests=requests,
+        counts=counts,
+        meter=meter,
+        cap=cap,
+        deadline=deadline,
+    )
+    _write_dry_week_journal(journal_file, document)
+    marker: Path | None = None
+    if status == DRY_WEEK_COMPLETED:
+        evenings = tuple(sorted({*recorded, session.isoformat()}))
+        marker = _write_dry_week_marker(runtime, evenings)
+    _print_dry_week(session=session, document=document, path=journal_file, marker=marker)
+    return AgentEveningExit.ok
 
 
 def _stable_block(block: Mapping[str, Any]) -> dict[str, Any]:
@@ -1590,6 +2090,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--as-of", default=None, help="the evening's pinned clock (ISO 8601)")
     parser.add_argument("--no-llm", action="store_true", help="file the rule family only")
     parser.add_argument(
+        "--dry-week",
+        action="store_true",
+        help=(
+            "run one D7 dry-week evening on a scratch runtime: operational metrics only, no "
+            "prediction filed, no C registration needed, at most five evenings"
+        ),
+    )
+    parser.add_argument(
         "--max-model-requests",
         type=int,
         default=DEFAULT_MAX_MODEL_REQUESTS,
@@ -1636,6 +2144,8 @@ def main(
             return AgentEveningExit.ok
         if options.pin_worktree:
             return _pin_worktree(options)
+        if options.dry_week:
+            return _dry_week(options, clock=now, transport=transport)
         return _run(options, clock=now, transport=transport)
     except StepFailedError as error:
         if error.step in AGENT_STEPS:
