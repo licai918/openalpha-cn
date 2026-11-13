@@ -39,11 +39,19 @@ is deliberate: the context manager patches `cli._panel_transport` and would take
 of the caller's hands, while `run_probe` takes it as an argument so tests can pass a scripted one
 and open a fake-transport seam with no process-global state.
 
-**Answers are findings, never crashes.** A non-zero Tushare `code` (e.g. `40101`, a credential or
-endpoint refusal) and a transport-level exception both become a `permitted=False` finding with an
-`error_code` -- the Tushare code as text, or the exception's class name. Messages are never kept:
-a provider message can carry a credential (see `cli._fetch_panel`'s reasoning), and they are not
-metadata.
+**Answers are findings, never crashes -- except the two rejections that cannot improve.** A
+non-zero Tushare `code` (e.g. `40101`, a credential or endpoint refusal) and a transport-level
+exception both become a `permitted=False` finding with an `error_code` -- the Tushare code as
+text, or the exception's class name. Messages are never kept: a provider message can carry a
+credential (see `cli._fetch_panel`'s reasoning), and they are not metadata.
+
+**A rejection that can only repeat stops the run.** The first `40101` (`TUSHARE_CREDENTIAL_CODE`)
+or `40203` (`TUSHARE_RATE_LIMIT_CODE`) rejection is recorded as the finding it is, and then
+`run_probe` sends nothing more -- no further planned call and no further page. Its `ProbeRun`
+carries the `ProbeStop` and the number of planned calls not sent, the report prints a
+`stopped: ...` line, and `--live` exits `STOPPED_EXIT` (3) with the cause on stderr after the
+budget file has recorded what it did send. Every other non-zero code is a finding the plan
+continues past: an unrecognised interface name in an `anns_d` schema probe must not end the run.
 
 **The token is the environment's.** `TUSHARE_TOKEN` is read at send time and put in the request
 envelope; it is never hardcoded, printed, returned in a finding or written anywhere. `run_probe`
@@ -53,9 +61,10 @@ is what reads it, so a scripted transport in a test receives only the test envir
 writes nothing, and ignores `--budget-file` (it neither reads nor creates it). `--live` is the
 only path that sends, and it refuses without `--i-have-the-users-go`, without a `TUSHARE_TOKEN`
 read from the environment at send time, and without a `--budget-file`; even then it prints the
-metadata report and writes only the budget file. `--live` is never run by this repository's tests
-or by the batch that added this script: it is gated live step L1 and waits for the user's
-explicit go.
+metadata report and writes only the budget file. A `--live` run stopped by a credential or
+rate-limit rejection exits `STOPPED_EXIT` (3), not 0 and not the refusal's 2, because it did send
+requests and the budget file records them. `--live` is never run by this repository's tests or by
+the batch that added this script: it is gated live step L1 and waits for the user's explicit go.
 
 **The budget is cumulative across invocations.** `--live` requires `--budget-file PATH`: a small
 JSON file (`PROBE_BUDGET_SCHEMA`, one `spent` field, cumulative requests), read before the run and
@@ -150,6 +159,12 @@ REFUSED_EXIT: Final[int] = 2
 and recorded nothing. The one exception prints its report and says the budget file could not
 record the requests that were sent."""
 
+STOPPED_EXIT: Final[int] = 3
+"""What a `--live` run exits with when a credential or rate-limit rejection stopped it. Distinct
+from both success (0) and `REFUSED_EXIT` (2, where nothing was sent): this run did send requests,
+and the budget file has recorded them before the exit, so a rerun is refused by the budget rather
+than repeating them."""
+
 
 class ProbeBudgetError(ValueError):
     """A budget file the probe refuses to use; nothing was sent."""
@@ -162,6 +177,10 @@ Truncation = Literal["no", "possibly", "yes"]
 `possibly` = a page filled the documented row limit and the probe could not confirm there is no
 next page, `yes` = the server's own flag said more rows exist (or a follow-up page failed) and
 they were not fetched. The two are kept apart because only the first is certain."""
+
+StopReason = Literal["credential_refused", "rate_limited"]
+"""Why a run stopped early: the two rejections that can only repeat -- a refused credential
+(`40101`) and a per-interface rate limit (`40203`). Every other rejection stays a finding."""
 
 
 @dataclass(frozen=True)
@@ -197,6 +216,48 @@ class ProbeFinding:
     earliest_date_seen: date | None
     timestamp_fields: tuple[str, ...]
     truncated: Truncation
+
+
+@dataclass(frozen=True)
+class ProbeStop:
+    """The rejection that ended a run early: its finding is recorded, and nothing after it was
+    sent, because the same answer would only repeat (a refused credential, a rate limit)."""
+
+    reason: StopReason
+    error_code: str
+    api_name: str
+
+
+@dataclass(frozen=True)
+class ProbeRun:
+    """What `run_probe` did: the findings it recorded, the plan it was given, and any early stop.
+
+    `not_sent` is `planned - len(findings)`: the planned calls whose first request was never sent,
+    whether a stop or the cap ended the run. One finding is one planned call even when the call
+    was paged.
+    """
+
+    findings: tuple[ProbeFinding, ...]
+    planned: int
+    stop: ProbeStop | None = None
+
+    @property
+    def not_sent(self) -> int:
+        """The planned calls that were never sent a first request."""
+        return self.planned - len(self.findings)
+
+
+_STOP_CODES: Final[Mapping[str, StopReason]] = {
+    str(TUSHARE_CREDENTIAL_CODE): "credential_refused",
+    str(TUSHARE_RATE_LIMIT_CODE): "rate_limited",
+}
+"""The rejections that stop a run: another request would get the same answer and spend the cap."""
+
+_STOP_LABELS: Final[Mapping[StopReason, str]] = {
+    "credential_refused": "credential refused",
+    "rate_limited": "rate limited",
+}
+"""How the report and the command name each stop."""
 
 
 # --- the plan -----------------------------------------------------------------------------------
@@ -312,22 +373,30 @@ def _market_params(api_name: str, day: date) -> Mapping[str, str]:
 
 def run_probe(
     plan: Sequence[ProbeCall], *, transport: TushareTransport, cap: int = PROBE_CAP
-) -> tuple[ProbeFinding, ...]:
-    """Send `plan` through `transport`, one request per call, and record one finding per request.
+) -> ProbeRun:
+    """Send `plan` through `transport` and record one finding per planned call that is sent.
 
     The cap is `p7_smoke_requests.CappedCounter`: incremented before the transport is reached, so
-    a call past `cap` is never sent and the probe stops there. The token comes from
-    `TUSHARE_TOKEN` at send time and is never kept; `transport` is the caller's (tests pass a
-    scripted one).
+    a call past `cap` is never sent and the probe stops there. A credential (`40101`) or
+    rate-limit (`40203`) rejection also stops the run: its finding is kept and no further planned
+    call or page is sent, because the next answer would be the same. Every other non-zero code or
+    transport failure is a finding the plan continues past. The token comes from `TUSHARE_TOKEN`
+    at send time and is never kept; `transport` is the caller's (tests pass a scripted one).
     """
     counter = budget.CappedCounter(cap)
     findings: list[ProbeFinding] = []
+    stop: ProbeStop | None = None
     for call in plan:
         finding = _probe_call(call, transport, counter)
         if finding is None:
             break
         findings.append(finding)
-    return tuple(findings)
+        code = finding.error_code
+        reason = None if code is None else _STOP_CODES.get(code)
+        if code is not None and reason is not None:
+            stop = ProbeStop(reason=reason, error_code=code, api_name=call.api_name)
+            break
+    return ProbeRun(findings=tuple(findings), planned=len(plan), stop=stop)
 
 
 _FLAG_ABSENT: Final[object] = object()
@@ -600,7 +669,12 @@ def _looks_like_timestamp(field: str) -> bool:
 
 
 def render_report(
-    findings: Sequence[ProbeFinding], *, spent: int, cumulative: int | None = None
+    findings: Sequence[ProbeFinding],
+    *,
+    spent: int,
+    cumulative: int | None = None,
+    stop: ProbeStop | None = None,
+    not_sent: int = 0,
 ) -> str:
     """The metadata report: no row value, no message, no token, nothing persisted.
 
@@ -611,7 +685,8 @@ def render_report(
     the union in first-seen order. `truncated` is `yes` if any call's row count is a hard lower
     bound, else `possibly` if any is a possible one, else `no`; the paging note says which is
     which. `spent` is this invocation's requests; `cumulative`, when given, is the budget file's
-    total after the run.
+    total after the run; `stop`, when given, adds the line naming why the run stopped early and
+    how many planned calls that left unsent.
     """
     grouped: dict[str, list[ProbeFinding]] = {}
     for finding in findings:
@@ -630,6 +705,8 @@ def render_report(
         lines.append(
             f"- Cumulative budget: {cumulative} of PROBE_CAP ({PROBE_CAP}) requests spent."
         )
+    if stop is not None:
+        lines.append(f"- stopped: {_STOP_LABELS[stop.reason]}, {not_sent} planned calls not sent.")
     lines.extend(
         [
             "",
@@ -951,7 +1028,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     tally = _Tally(_default_transport())
     try:
-        findings = run_probe(plan, transport=tally, cap=allowance)
+        run = run_probe(plan, transport=tally, cap=allowance)
     except BaseException:
         # A partial or failed run still records what it actually sent. The write is best effort:
         # the exception in flight is the one to report.
@@ -959,11 +1036,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             _record_budget(budget_path, spent + tally.attempts)
         raise
 
+    findings = run.findings
     cumulative = spent + tally.attempts
     try:
         _record_budget(budget_path, cumulative)
     except (OSError, ValueError) as error:
-        print(render_report(findings, spent=tally.attempts), end="")
+        print(
+            render_report(
+                findings,
+                spent=tally.attempts,
+                stop=run.stop,
+                not_sent=run.not_sent,
+            ),
+            end="",
+        )
         print(
             f"p7_event_probe: {tally.attempts} request(s) were sent and the budget file "
             f"{budget_path} could not be written ({type(error).__name__}: {error}); do not run "
@@ -971,7 +1057,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return REFUSED_EXIT
-    print(render_report(findings, spent=tally.attempts, cumulative=cumulative), end="")
+    report = render_report(
+        findings,
+        spent=tally.attempts,
+        cumulative=cumulative,
+        stop=run.stop,
+        not_sent=run.not_sent,
+    )
+    print(report, end="")
+    if run.stop is not None:
+        cause = (
+            "credential refusal"
+            if run.stop.reason == "credential_refused"
+            else "rate-limit rejection"
+        )
+        print(
+            f"p7_event_probe: stopped at the first {cause} (Tushare code {run.stop.error_code}) "
+            f"on {run.stop.api_name}; {run.not_sent} of {run.planned} planned calls were not "
+            f"sent; {tally.attempts} request(s) recorded in {budget_path}",
+            file=sys.stderr,
+        )
+        return STOPPED_EXIT
     return 0
 
 
