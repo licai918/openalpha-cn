@@ -1178,6 +1178,112 @@ def test_a_crash_after_filing_before_the_journal_replays_without_a_credential(
     assert "credential_missing" not in printed
 
 
+def test_an_empty_coverage_set_day_still_replays_without_a_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N4 completeness: a day whose coverage set is empty still counts as filed.
+
+    An empty coverage set is a supported state (the coverage batch is not filed at all,
+    `coverage_absent: "empty_set"`), so a crash-after-filing rerun of such a day holds only the
+    primary LLM batch. The replay predicate must accept primary alone when coverage is empty;
+    otherwise this rerun demands the credential for a day whose one batch is already in the
+    store.
+    """
+    world = _world(tmp_path, monkeypatch, holdings=(), watch=())
+    assert world.coverage == (), "the fixture must produce an empty coverage set"
+    real_write_journal = agent._write_journal
+
+    def crash_after_filing(path: Path, document: Any) -> str:
+        raise agent.StepFailedError("summary", "scripted crash after the batches were filed")
+
+    monkeypatch.setattr(agent, "_write_journal", crash_after_filing)
+    assert (
+        agent.main(world.arguments(), clock=lambda: world.evening, transport=ScriptedModel("valid"))
+        == agent.AgentEveningExit.refused
+    )
+    capsys.readouterr()
+    before = {
+        record.record_id: agent.batch_digest(record.batch)
+        for record in _records(world, AGENT_LLM_FAMILY)
+    }
+    assert len(before) == 1, "an empty coverage set files the primary batch only"
+
+    monkeypatch.setattr(agent, "_write_journal", real_write_journal)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    replay = ScriptedModel()
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=replay)
+
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert replay.calls == 0
+    journal = _journal(world)
+    assert journal["llm_family"]["status"] == "filed"
+    assert journal["llm_family"]["coverage_absent"] == "empty_set"
+    after = {
+        record.record_id: agent.batch_digest(record.batch)
+        for record in _records(world, AGENT_LLM_FAMILY)
+    }
+    assert after == before
+    assert "credential_missing" not in json.dumps(journal)
+    assert "credential_missing" not in printed
+
+
+def test_a_foreign_registrations_llm_batches_do_not_count_as_filed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N4 completeness: only C's own registration makes a day replayable.
+
+    The predicate must filter on the stored declaration's registration digest. If a foreign
+    registration's same-session LLM batches were accepted, a day C has never filed would be
+    assembled in replay mode and step 5 would refuse a missing exchange by name instead of
+    journalling the credential gap. The foreign records below are filed under a different
+    registration; with no key C's own day is still a credential gap.
+    """
+    world = _world(tmp_path, monkeypatch)
+    foreign = dataclasses.replace(
+        world.c.registered, config_id="f" * 64, registration_sha256="e" * 64
+    )
+    store = prediction_store_at(world.runtime, clock=lambda: world.evening)
+    calendar = outcome_calendar(
+        PanelStore(world.step0 / "panel"), "SSE", world.session, as_of=world.publication
+    )
+    for scoring_set in ("primary", "coverage"):
+        declaration = agent.agent_declaration(
+            family=AGENT_LLM_FAMILY,
+            scoring_set=scoring_set,
+            agent_kind="llm_backed",
+            registered=foreign,
+            model_ref="deepseek/foreign",
+            prompt_ref="foreign/prompt",
+        )
+        batch = agent.agent_batch(
+            session=world.session,
+            scores=[
+                agent.AgentScore(
+                    ts_code=world.survivors[0], score=0.1, abstention=None, run_id="foreign-run"
+                )
+            ],
+            declaration=declaration,
+            predicted_at=world.evening,
+        )
+        file_forward_record(store, batch, calendar=calendar, clock=lambda: world.evening)
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=ScriptedModel())
+
+    journal = _journal(world)
+    assert code == 0
+    assert journal["llm_family"]["status"] == "no_record"
+    assert journal["llm_family"]["reason"] == "credential_missing"
+    assert "step 5 (llm_family) failed" not in capsys.readouterr().err
+
+
 def test_a_zero_request_cap_rerun_of_a_filed_day_replays_and_is_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

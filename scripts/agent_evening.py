@@ -143,6 +143,8 @@ from openalpha_cn.runtime.composition import (  # noqa: E402
     research_engine,
 )
 from openalpha_cn.strategy_agent_forward import (  # noqa: E402
+    REGISTRATION_HYPERPARAMETER,
+    SCORING_SET_HYPERPARAMETER,
     AgentScore,
     agent_batch,
     agent_declaration,
@@ -919,14 +921,27 @@ def _prior_reason(runtime: Path, session: date) -> str | None:
     return None
 
 
-def _llm_batches_filed(runtime: Path, session: date, *, clock: Callable[[], datetime]) -> bool:
-    """Whether both of the session's LLM batches are already in the prediction store (N4).
+def _llm_batches_filed(
+    runtime: Path,
+    session: date,
+    *,
+    clock: Callable[[], datetime],
+    scoring_sets: frozenset[str],
+    registration_sha256: str,
+) -> bool:
+    """Whether the session's expected LLM batches are already in the prediction store (N4).
 
     Read from the store *before* the credential is checked, because a rerun that only has to
     reproduce the day sends no request and so must not need a key. A filed batch is a fact of
-    the day; the run that will replay it is a later reader. Both scoring sets are required, at
-    the session's own publication instant: anything less is a day that still has a request to
-    spend.
+    the day; the run that will replay it is a later reader.
+
+    Two filters keep the answer about C's own day rather than about whatever the store holds:
+    the declaration must carry C's `registration_sha256` (a foreign registration's same-session
+    batches do not make C's day filed, and accepting them would put a never-filed day into
+    replay mode), and only the expected scoring sets count -- `primary` always, `coverage` only
+    when the day has a non-empty coverage set, because an empty coverage set is a supported
+    state that files no coverage batch at all. Anything less is a day that still has a request
+    to spend.
     """
     published = session_publication_instant(session)
     store = prediction_store_at(runtime, clock=clock)
@@ -940,8 +955,13 @@ def _llm_batches_filed(runtime: Path, session: date, *, clock: Callable[[], date
             continue
         if record.batch.as_of != published:
             continue
-        filed.add(str(dict(declaration.hyperparameters).get("scoring_set")))
-    return {"primary", "coverage"} <= filed
+        declared = dict(declaration.hyperparameters)
+        if declared.get(REGISTRATION_HYPERPARAMETER) != registration_sha256:
+            continue
+        scoring_set = declared.get(SCORING_SET_HYPERPARAMETER)
+        if scoring_set in scoring_sets:
+            filed.add(str(scoring_set))
+    return scoring_sets <= filed
 
 
 def _llm_family(
@@ -986,10 +1006,20 @@ def _llm_family(
             "requests one evening may spend, zero or more",
         )
     deadline = _parse_deadline(options.deadline, session)
-    # N4: a rerun of a day whose two LLM batches are already filed will send no request, so it
-    # reads them back in replay mode -- the credential is not needed and the usage store is not
-    # opened. Only a day that still has a request to spend is checked for the key (F1).
-    replay = _llm_batches_filed(runtime, session, clock=clock)
+    published = session_publication_instant(session)
+    primary = primary_of(admitted, day, session)
+    coverage = coverage_of(day)
+    expected_sets = frozenset({"primary"}) | (frozenset({"coverage"}) if coverage else frozenset())
+    # N4: a rerun of a day whose expected LLM batches are already filed will send no request, so
+    # it reads them back in replay mode -- the credential is not needed and the usage store is
+    # not opened. Only a day that still has a request to spend is checked for the key (F1).
+    replay = _llm_batches_filed(
+        runtime,
+        session,
+        clock=clock,
+        scoring_sets=expected_sets,
+        registration_sha256=admitted.registered.registration_sha256,
+    )
     key_env = DEEPSEEK_V4_1_FLASH.api_key_env
     if not replay and key_env is not None and not os.environ.get(key_env, "").strip():
         return _no_record(NO_RECORD_CREDENTIAL_MISSING)
@@ -1032,10 +1062,7 @@ def _llm_family(
         clock=clock,
         agents=[agent],
     )
-    published = session_publication_instant(session)
     config_digest = hashlib.sha256(canonical_json_bytes(dict(admitted.config))).hexdigest()
-    primary = primary_of(admitted, day, session)
-    coverage = coverage_of(day)
     names = sorted(set(primary) | set(coverage))
     scores: dict[str, AgentScore] = {}
     model_ref = f"{DEEPSEEK_V4_1_FLASH.provider_id}/{DEEPSEEK_V4_1_FLASH.model}"
