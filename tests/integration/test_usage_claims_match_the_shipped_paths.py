@@ -790,7 +790,7 @@ DOCUMENT_MODEL_PATH_EN: Final[tuple[str, ...]] = (
     "the rest of the shipped path still calls no model",
 )
 DOCUMENT_USAGE_BOUND_ZH: Final[tuple[str, ...]] = (
-    "只有该晚间命令会在登记请求上限内写入",
+    "只有方案 C 的晚间命令 `scripts/agent_evening.py` 会在登记请求上限内写入",
     "出厂路径的其余部分不记账",
 )
 DOCUMENT_USAGE_BOUND_EN: Final[tuple[str, ...]] = (
