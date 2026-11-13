@@ -39,6 +39,7 @@
 | r3-8 | 2026-11-12 | 07:40:13–07:40:15 | `evening`（G7） | 0 | — | 0 / 182 / 260 | `{}` | — | — | 同上（逐行相同） | — | — | — | `the day was already complete; nothing was run`：G7 过 |
 | r3-9 | 2026-11-12 | 08:32:18–08:32:19 | `evening`（G7 文件级复核） | 0 | — | 0 / 182 / 260 | `{}` | — | — | — | — | — | — | 重跑前后 `RT/paper`、`RT/daily_survivor` 下 6 个文件的 sha256 逐一相同：G7 过（文件级） |
 | r3-10 | — | 08:32:28 | `weekly`（G4，提前跑） | 0 | — | 0 / 182 / 260 | `{}` | — | — | — | — | — | — | `records: 1 witnessed … 0 missing`；`not tested: 0 of 2 pre-registered periods matured`；次要族 `not applied: … no p-value`：G4 过。G2 的「周报列出缺失」要在第 4 晚后再跑一次周报 |
+| r3-11 | 2026-11-12 | 19:33:06–19:33:21（北京 11-13 08:33） | `morning`（G3） | 0 | — | 1 / 183 / 260 | namechange 1 | — | — | — | — | — | — | 复核 11-12 的计划：advice 无变化、notices 无；运行前后 `RT/paper/snapshots` 列表（2 个文件）与 `ledger.sqlite3` sha256 逐一相同：G3 过 |
 
 ## 3. 逐类拒绝
 
