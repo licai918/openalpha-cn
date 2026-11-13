@@ -56,6 +56,7 @@ from openalpha_cn.models.deepseek import DEEPSEEK_V4_1_FLASH
 from openalpha_cn.models.openai_compatible import ModelConfigurationError, ModelTransportError
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import session_publication_instant
+from openalpha_cn.panel_limit_events import limit_events_on
 from openalpha_cn.runtime.composition import (
     build_storage,
     prediction_store_at,
@@ -63,6 +64,7 @@ from openalpha_cn.runtime.composition import (
 )
 from openalpha_cn.storage.predictions import FilePredictionStore
 from openalpha_cn.strategy_agent_evaluation import (
+    DRY_WEEK_SCRATCH_MARKER,
     DRY_WEEK_SCRATCH_SCHEMA,
 )
 from openalpha_cn.strategy_forward_session import file_forward_record, outcome_calendar
@@ -270,6 +272,7 @@ class World:
     evidence_subject: str
     record_id: str | None
     c: Any
+    panel: Any
 
     def arguments(self, *extra: str) -> list[str]:
         return [
@@ -393,6 +396,7 @@ def _world(
         evidence_subject=evidence_subject,
         record_id=record_id,
         c=c,
+        panel=panel,
     )
 
 
@@ -2063,8 +2067,13 @@ def test_a_dry_week_evening_stops_with_the_named_status_it_met(
         assert journal["status"] == expected, name
         assert journal["scored"] == 0, name
         assert journal["requests"] >= 0, name
-        assert not agent.dry_week_marker_path(scratch).exists(), (
-            f"{name}: a failed evening is not a completed evening, so no marker is written"
+        marker = json.loads(agent.dry_week_marker_path(scratch).read_text(encoding="utf-8"))
+        assert marker == {
+            "schema": DRY_WEEK_SCRATCH_SCHEMA,
+            "evenings": [world.session.isoformat()],
+        }, (
+            f"{name}: every started evening is in the marker -- a failed one included, or the "
+            "D7 cap and the dry-week isolation guard would not see it"
         )
 
 
@@ -2193,3 +2202,213 @@ def test_blank_and_invalid_json_answers_are_counted_and_an_invalid_output_is_not
     assert journal["scored"] == 0
     assert journal["transport_failures"] == 0
     assert journal["tokens"] == {"input": 22, "output": 14, "total": 36}
+
+
+def _evening_of(session: date) -> datetime:
+    """The wall clock a dry-week evening of `session` runs at: after its publication, before the
+    next open's call auction."""
+    return datetime.combine(session, time(18, 30), tzinfo=SHANGHAI)
+
+
+def _dry_week_session_arguments(
+    world: World, scratch: Path, session: date, *extra: str
+) -> list[str]:
+    """`_dry_week_arguments` with the pinned clock moved to `session`."""
+    arguments = _dry_week_arguments(world, scratch, *extra)
+    arguments[arguments.index("--as-of") + 1] = _evening_of(session).isoformat()
+    return arguments
+
+
+def _file_step0_day(world: World, session: date) -> None:
+    """File Step 0's one bound, on-time record and complete day journal for `session`.
+
+    The five-evening cap test needs more than the fixture's single day; the records are filed
+    through the real forward-session protocol, not hand-faked.
+    """
+    body = json.loads(world.step0_registration.read_text(encoding="utf-8"))
+    registered = RegisteredConfiguration(
+        config_id=body["config_id"],
+        registration_sha256=hashlib.sha256(world.step0_registration.read_bytes()).hexdigest(),
+        code_commit=body["code_commit"],
+        seed=SEED,
+    )
+    evening = _evening_of(session)
+    store = FilePredictionStore(world.step0 / "predictions", clock=lambda: evening)
+    batch = _survivor_batch(
+        tuple(world.panel.securities), session=session, registered=registered, evening=evening
+    )
+    calendar = outcome_calendar(
+        PanelStore(world.step0 / "panel"),
+        "SSE",
+        session,
+        as_of=session_publication_instant(session),
+    )
+    file_forward_record(store, batch, calendar=calendar, clock=lambda: evening)
+    journal = daily.survivor_journal_directory(world.step0, body["config_id"]) / (
+        f"{session.isoformat()}.json"
+    )
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(json.dumps(_journal_document(session, (), ())), encoding="utf-8")
+
+
+def _sessions_with_limit_events(world: World, count: int) -> tuple[date, ...]:
+    """The first `count` panel sessions whose survivors carry a limit event.
+
+    A dry-week evening only spends a request when its census is non-empty, so the cap test picks
+    sessions that are measurable by construction (the fixture's scripted streak) rather than
+    assuming every session has an event.
+    """
+    panel = PanelStore(world.step0 / "panel")
+    chosen: list[date] = []
+    for session in world.panel.sessions:
+        events = limit_events_on(
+            panel,
+            session=session,
+            as_of=session_publication_instant(session),
+            exchange="SSE",
+        )
+        if events:
+            chosen.append(session)
+        if len(chosen) == count:
+            return tuple(chosen)
+    raise AssertionError(f"the fixture panel prices fewer than {count} sessions with limit events")
+
+
+class _RefusingTransport:
+    """A model transport that fails the test if it is ever asked to send a request."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def post_json(self, **arguments: Any) -> dict[str, Any]:
+        self.calls += 1
+        raise AssertionError("a dry-week evening past the cap must send no model request")
+
+
+def test_five_failed_evenings_exhaust_the_scratch_runtime_and_the_sixth_spends_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F1 (blocking): D7's cap counts every evening that STARTS, whatever its status.
+
+    Five evenings that each stop on the request cap are five measurements of the deployment;
+    the marker records each of them, so the sixth is refused by the cap with zero model requests
+    and no new journal. Before this fix the failed evenings were invisible to the cap, so an
+    operator could run unlimited evenings and spend unlimited requests.
+    """
+    world = _world(tmp_path, monkeypatch)
+    scratch = tmp_path / "dry-scratch"
+    sessions = _sessions_with_limit_events(world, 5)
+    for session in sessions:
+        _file_step0_day(world, session)
+    for index, session in enumerate(sessions):
+        transport = _RefusingTransport()
+        evening = _evening_of(session)
+
+        code = agent.main(
+            _dry_week_session_arguments(world, scratch, session, "--max-model-requests", "0"),
+            clock=lambda evening=evening: evening,
+            transport=transport,
+        )
+        capsys.readouterr()
+
+        assert code == 0, f"evening {index} was journalled"
+        assert transport.calls == 0, "a zero cap sends no request"
+        journal = json.loads(
+            agent.dry_week_journal_path(scratch, session).read_text(encoding="utf-8")
+        )
+        assert journal["status"] == agent.NO_RECORD_REQUEST_CAP_REACHED
+        marker = json.loads(agent.dry_week_marker_path(scratch).read_text(encoding="utf-8"))
+        assert len(marker["evenings"]) == index + 1, (
+            "each started evening is in the marker, failed or not"
+        )
+        assert session.isoformat() in marker["evenings"]
+
+    sixth = sessions[-1] + timedelta(days=1)
+    transport = _RefusingTransport()
+    code = agent.main(
+        _dry_week_session_arguments(world, scratch, sixth, "--max-model-requests", "0"),
+        clock=lambda: _evening_of(sixth),
+        transport=transport,
+    )
+    err = capsys.readouterr().err
+
+    assert code == agent.AgentEveningExit.refused
+    assert "5" in err and "dry-week" in err
+    assert transport.calls == 0, "the cap is checked before any request is constructed"
+    assert not agent.dry_week_journal_path(scratch, sixth).exists()
+
+
+def test_the_registered_evening_refuses_a_dry_week_marked_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F2: a dry-week scratch runtime is never filed into, by name and before admission.
+
+    Pointing C's registered evening at the L4 scratch directory would file forward records into
+    a runtime the evaluator refuses six months later; the refusal belongs in step 1, before any
+    read, any request and any write.
+    """
+    world = _world(tmp_path, monkeypatch)
+    world.runtime.mkdir()
+    marker = world.runtime / DRY_WEEK_SCRATCH_MARKER
+    marker.write_text(
+        json.dumps({"schema": DRY_WEEK_SCRATCH_SCHEMA, "evenings": [world.session.isoformat()]}),
+        encoding="utf-8",
+    )
+    before = _files(world.runtime)
+    transport = _RefusingTransport()
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=transport)
+
+    err = capsys.readouterr().err
+    assert code == agent.AgentEveningExit.refused
+    assert "step 1 (registration) failed" in err
+    assert "dry-week" in err and DRY_WEEK_SCRATCH_MARKER in err
+    assert transport.calls == 0
+    assert _files(world.runtime) == before, "a refused evening writes nothing"
+    assert not world.journal_path().exists()
+
+
+def test_pin_worktree_refuses_a_dry_week_marked_runtime_and_changes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F2's operator half: `--pin-worktree` refuses a marked runtime before any git work.
+
+    The pin command is where the L5 operator names C's runtime; a scratch runtime there would
+    pin the wrong store, so the marker is refused by name and no worktree is created or moved.
+    """
+    repository, registration = _pin_world(tmp_path)
+    marked = tmp_path / "marked"
+    marked.mkdir()
+    (marked / DRY_WEEK_SCRATCH_MARKER).write_text(
+        json.dumps({"schema": DRY_WEEK_SCRATCH_SCHEMA, "evenings": []}), encoding="utf-8"
+    )
+
+    def checkout_must_not_run(*arguments: Any, **keywords: Any) -> Any:
+        raise AssertionError("a marked runtime is refused before the checkout is looked up")
+
+    monkeypatch.setattr(registry, "registered_checkout", checkout_must_not_run)
+    pinned = tmp_path / "pinned"
+
+    code = agent.main(
+        [
+            "--pin-worktree",
+            str(pinned),
+            "--repo",
+            str(repository),
+            "--registration",
+            str(registration),
+            "--runtime-dir",
+            str(marked),
+        ]
+    )
+
+    err = capsys.readouterr().err
+    assert code == agent.AgentEveningExit.refused
+    assert "dry-week" in err
+    assert not pinned.exists(), "nothing was created"

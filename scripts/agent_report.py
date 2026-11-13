@@ -19,7 +19,12 @@ and the registered Step 0 configuration, and this script only states what it ans
 ## What it prints, in the order a reader needs it
 
 - **Candidate wording first.** `候选 / candidate`, not traded, and a passing run is not evidence.
-- The registration's identity, the registered window (anchor, through, as-of).
+- The registration's identity, and the registered window. **The anchor is checked exactly**
+  (F3, D5): it must be the first trading session whose 16:30 publication instant falls after C's
+  registration commit -- the same session for a commit before the close, the next session for a
+  commit after it, on a weekend or on a holiday. A window that starts anywhere else would make
+  the first positions permanent gaps or skip sessions the registration covers, so the report
+  refuses instead of reading it. Then through and as-of.
 - The records **witnessed** and the records **missing**, the latter with the evaluator's own
   reason per session, plus the sample size `n`, the power (the mean detectable at 0.8 from the
   window's measured dispersion -- a property of the design, never observed power) and the
@@ -45,10 +50,11 @@ and the registered Step 0 configuration, and this script only states what it ans
 
 A runtime marked as a D7 dry-week scratch is refused **before anything is opened** -- its evenings
 filed no prediction and are never part of C's forward sample. So are an uncommitted registration,
-a configuration that is not `agent_forward/v1`, a Step 0 registration whose recorded
-`registration_sha256` / `config_id` / `seed` differ from what C's registration froze, and any
-evaluator refusal. A report that cannot state the facts refuses rather than printing a partial
-one.
+a configuration that is not `agent_forward/v1`, a registered window anchor that is not the first
+trading session whose publication follows the registration commit, a Step 0 registration whose
+recorded `registration_sha256` / `config_id` / `seed` differ from what C's registration froze, and
+any evaluator refusal. A report that cannot state the facts refuses rather than printing a
+partial one.
 
 Wording is candidate throughout: engineering completion is not research validity, and a report
 that prints a passing test is not evidence that the family has an increment.
@@ -63,7 +69,7 @@ import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -75,8 +81,13 @@ for _root in (_SCRIPTS, _SCRIPTS / "research"):
 import registry  # noqa: E402
 
 from openalpha_cn.domain.agent_forward import AGENT_LLM_FAMILY  # noqa: E402
+from openalpha_cn.domain.trading_calendar import (  # noqa: E402
+    CalendarHorizonError,
+    TradingCalendar,
+)
 from openalpha_cn.model_view import LabelReach, OutcomeLabels  # noqa: E402
 from openalpha_cn.panel.store import PanelStore  # noqa: E402
+from openalpha_cn.panel_ingest import session_publication_instant  # noqa: E402
 from openalpha_cn.runtime.composition import (  # noqa: E402
     agent_journal_dir_at,
     prediction_store_at,
@@ -153,6 +164,7 @@ class ReportRegistration:
     config_id: str
     registration_sha256: str
     registration_commit: str
+    registration_committed_at: datetime
     code_commit: str
     settings: Mapping[str, Any]
 
@@ -224,6 +236,7 @@ def _admit(registration: Path, repository: Path) -> ReportRegistration:
         config_id=config_id,
         registration_sha256=hashlib.sha256(admitted.content).hexdigest(),
         registration_commit=admitted.commit,
+        registration_committed_at=admitted.committed_at,
         code_commit=code_commit,
         settings=dict(settings),
     )
@@ -286,14 +299,42 @@ def _labels(
     step0_runtime_dir: Path,
     *,
     exchange: str,
-    anchor: date,
+    years: Sequence[int],
     as_of: datetime,
 ) -> Any:
     """The shared `model_view.OutcomeLabels` reader over Step 0's panel at the report's as-of."""
-    years = tuple(sorted({anchor.year, as_of.astimezone(SHANGHAI).year}))
     return OutcomeLabels(
         PanelStore(Path(step0_runtime_dir) / "panel"),
-        LabelReach(as_of=as_of, years=years, exchange=exchange),
+        LabelReach(as_of=as_of, years=tuple(sorted(years)), exchange=exchange),
+    )
+
+
+def _expected_anchor(calendar: TradingCalendar, *, committed_at: datetime) -> date:
+    """The first trading session whose 16:30 publication instant is after C's commit (D5).
+
+    The window is "120 forward sessions **after C's registration commit**": an anchor on the
+    commit's own session is right when the commit landed before that session's 16:30 publication
+    (the session's outcome had not published), and the next trading session is right when it
+    landed after the close, on a weekend or on a holiday. A date outside the calendar's horizon
+    means no session can be named, which is a refusal and not a guess.
+    """
+    committed = committed_at.astimezone(SHANGHAI)
+    day = committed.date()
+    for offset in range(0, 371):
+        candidate = day + timedelta(days=offset)
+        try:
+            trading = calendar.is_trading_day(candidate)
+        except CalendarHorizonError as error:
+            raise AgentReportError(
+                f"the label calendar cannot say whether {candidate.isoformat()} traded "
+                f"({error}); the first session after C's registration commit at "
+                f"{committed.isoformat()} cannot be named"
+            ) from error
+        if trading and session_publication_instant(candidate) > committed:
+            return candidate
+    raise AgentReportError(
+        f"no trading session's 16:30 publication falls after C's registration commit at "
+        f"{committed.isoformat()} within 370 days; the registered window anchor cannot be named"
     )
 
 
@@ -302,12 +343,16 @@ def _stored_primary(
     *,
     clock: Callable[[], datetime],
     registration_sha256: str,
+    anchor: date,
+    through: date,
 ) -> dict[str, Any]:
     """The abstention rate, read from C's stored LLM primary-set records and never computed.
 
     An abstention is a row with no score: it is counted as a coded absence, never as a `0.0`
     value, and the rate is printed even when it is zero. A record of another registration is not
-    C's and is left out (the evaluator refuses one; the rate is only C's own).
+    C's and is left out (the evaluator refuses one; the rate is only C's own). The records are
+    restricted to `anchor <= session <= through`, the registered window the primary arm reads:
+    a record outside it belongs to another reading and would print a rate the test never used.
     """
     store = prediction_store_at(Path(runtime_dir), clock=clock)
     scored = 0
@@ -325,7 +370,10 @@ def _stored_primary(
             continue
         if hyperparameters.get("registration_sha256") != registration_sha256:
             continue
-        sessions.add(record.batch.as_of.astimezone(SHANGHAI).date())
+        session = record.batch.as_of.astimezone(SHANGHAI).date()
+        if not anchor <= session <= through:
+            continue
+        sessions.add(session)
         for prediction in record.batch.predictions:
             if prediction.score is None:
                 abstained += 1
@@ -341,13 +389,20 @@ def _stored_primary(
     }
 
 
-def _model_aliases(runtime_dir: Path, *, sessions: Sequence[date]) -> dict[str, Any]:
+def _model_aliases(
+    runtime_dir: Path,
+    *,
+    sessions: Sequence[date],
+    anchor: date,
+    through: date,
+) -> dict[str, Any]:
     """The distinct model identities C's evening journals recorded, and the journals missing.
 
     `deepseek-flash` is a moving alias, so the report names the `(response.model,
     system_fingerprint)` pairs it actually saw and whether they changed across sessions (plan C
     protocol §9): a change is reported, never grounds for re-registration. A session C filed a
-    primary record for but whose evening journal is absent is named as missing.
+    primary record for but whose evening journal is absent is named as missing. Journals outside
+    `anchor..through` are not read: they are another window's accounting (`F8`).
     """
     directory = agent_journal_dir_at(Path(runtime_dir))
     recorded: set[str] = set()
@@ -368,6 +423,8 @@ def _model_aliases(runtime_dir: Path, *, sessions: Sequence[date]) -> dict[str, 
                 )
             session = body.get("session")
             name = session if isinstance(session, str) else path.stem
+            if not anchor.isoformat() <= name <= through.isoformat():
+                continue
             recorded.add(name)
             family = body.get("llm_family")
             exchanges = family.get("exchanges") if isinstance(family, Mapping) else None
@@ -634,9 +691,28 @@ def _report(options: argparse.Namespace, *, clock: Callable[[], datetime]) -> in
     step0_registered, book, exchange = _step0_reading(repository, step0_block)
     as_of = _instant(options.as_of, clock)
     through = _through(options.through, as_of)
+    committed = registration.registration_committed_at.astimezone(SHANGHAI)
+    labels = _labels(
+        step0_runtime,
+        exchange=exchange,
+        years=(committed.year, as_of.astimezone(SHANGHAI).year, through.year),
+        as_of=as_of,
+    )
+    # D5: the window is 120 forward sessions AFTER C's registration commit. An anchor before the
+    # commit's first trading session would make the window's first positions permanent gaps (no
+    # C record can exist before the registration); an anchor later than it would skip sessions
+    # the registration covers. The registered value is checked against the calendar exactly.
+    expected_anchor = _expected_anchor(labels.calendar, committed_at=committed)
+    if anchor.session != expected_anchor:
+        raise AgentReportError(
+            f"C's registered agent_forward_anchor.session is {anchor.session.isoformat()}, but "
+            f"the first trading session after C's registration commit at {committed.isoformat()} "
+            f"is {expected_anchor.isoformat()}; D5's window is 120 forward sessions after the "
+            "registration commit, so the report refuses to read a window that does not start "
+            "there"
+        )
     agent_store = prediction_store_at(runtime, clock=clock)
     step0_store = prediction_store_at(step0_runtime, clock=clock)
-    labels = _labels(step0_runtime, exchange=exchange, anchor=anchor.session, as_of=as_of)
     try:
         evaluation = evaluate(
             protocol=protocol,
@@ -654,9 +730,15 @@ def _report(options: argparse.Namespace, *, clock: Callable[[], datetime]) -> in
     except AgentEvaluationError as error:
         raise AgentReportError(f"{type(error).__name__}: {error}") from error
     abstention = _stored_primary(
-        runtime, clock=clock, registration_sha256=registration.registration_sha256
+        runtime,
+        clock=clock,
+        registration_sha256=registration.registration_sha256,
+        anchor=anchor.session,
+        through=through,
     )
-    aliases = _model_aliases(runtime, sessions=abstention["sessions"])
+    aliases = _model_aliases(
+        runtime, sessions=abstention["sessions"], anchor=anchor.session, through=through
+    )
     view = _view(
         registration=registration,
         evaluation=evaluation,

@@ -39,7 +39,12 @@ from openalpha_cn.domain.alpha_model import (
 )
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
-from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET
+from openalpha_cn.domain.trading_calendar import (
+    TRADING_CALENDAR_DATASET,
+    CalendarDay,
+    TradingCalendar,
+    build_trading_calendar,
+)
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.strategy_agent_evaluation import (
@@ -87,6 +92,8 @@ SESSIONS: Final[tuple[date, ...]] = (
 ANCHOR: Final[date] = SESSIONS[0]
 THROUGH: Final[date] = SESSIONS[5]
 AS_OF: Final[datetime] = datetime(2026, 1, 17, 12, 0, tzinfo=SHANGHAI)
+C_COMMITTED_AT: Final[datetime] = datetime(2026, 1, 5, 9, 0, tzinfo=SHANGHAI)
+"""C's registration commit instant: before the anchor session's 16:30 publication."""
 C_CONFIG_ID: Final[str] = "caf-0000000000000001"
 C_CODE_COMMIT: Final[str] = "a" * 40
 C_COMMIT: Final[str] = "b" * 40
@@ -164,6 +171,7 @@ def _c_body(
     step0_config_id: str = STEP0_CONFIG_ID,
     step0_seed: int = STEP0_SEED,
     kind: str = "agent_forward/v1",
+    anchor: date = ANCHOR,
 ) -> dict[str, Any]:
     return {
         "schema": "openalpha-research-registration/v1",
@@ -191,14 +199,48 @@ def _c_body(
             },
             AGENT_FORWARD_ANCHOR_KEY: {
                 "schema_version": AGENT_FORWARD_ANCHOR_SCHEMA,
-                "session": ANCHOR.isoformat(),
+                "session": anchor.isoformat(),
             },
         },
     }
 
 
+def calendar_over(
+    sessions: tuple[date, ...],
+    *,
+    exchange: str = "SSE",
+    first: date | None = None,
+) -> TradingCalendar:
+    """A trading calendar over the natural days spanning `sessions` and a week after.
+
+    `build_trading_calendar` refuses a gap in the natural-day sequence, so every date from
+    `first` (or the first session) to a week past the last is declared, open exactly where
+    `sessions` says. The F3 anchor check reads this calendar the way the evaluator's label reader
+    does, so it must cover the registration commit's own date (a weekend commit included).
+    """
+    days: list[CalendarDay] = []
+    previous: date | None = None
+    day = min(sessions) if first is None else min(first, min(sessions))
+    last = max(sessions) + timedelta(days=7)
+    while day <= last:
+        trading = day in sessions
+        days.append(
+            CalendarDay(calendar_date=day, is_trading=trading, previous_trading_date=previous)
+        )
+        if trading:
+            previous = day
+        day += timedelta(days=1)
+    return build_trading_calendar(exchange, days)
+
+
+CALENDAR: Final[TradingCalendar] = calendar_over(SESSIONS, first=date(2026, 1, 1))
+
+
 class SentinelLabels:
-    """The labels reader a report run is handed: the recorder only checks identity."""
+    """The labels reader a report run is handed: the recorder checks identity, F3 its calendar."""
+
+    def __init__(self, calendar: TradingCalendar = CALENDAR) -> None:
+        self.calendar = calendar
 
 
 @dataclass
@@ -308,6 +350,8 @@ def _world(
     admitted: Any = None,
     step0_admitted: Any = None,
     step0_runtime: Path | None = None,
+    committed_at: datetime = C_COMMITTED_AT,
+    anchor: date | None = None,
 ) -> ReportWorld:
     """A report world whose admission, step 0 registration and evaluator are seams.
 
@@ -320,7 +364,7 @@ def _world(
     runtime.mkdir()
     step0 = step0_runtime if step0_runtime is not None else tmp_path / "step0"
     step0.mkdir(parents=True, exist_ok=True)
-    body = _c_body() if c_body is None else c_body
+    body = _c_body(anchor=ANCHOR if anchor is None else anchor) if c_body is None else c_body
     content = (json.dumps(body, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode()
     registration = tmp_path / "c-registration.json"
     registration.write_bytes(content)
@@ -332,7 +376,9 @@ def _world(
     admitted_value = (
         admitted
         if admitted is not None
-        else SimpleNamespace(content=content, registered=body, commit=C_COMMIT)
+        else SimpleNamespace(
+            content=content, registered=body, commit=C_COMMIT, committed_at=committed_at
+        )
     )
     step0_value = (
         step0_admitted
@@ -1015,3 +1061,163 @@ def test_the_report_script_reaches_no_agent_or_model_module() -> None:
     ]
     assert forbidden == [], f"the report imports {forbidden}"
     assert "llm_provider" not in source, "the report assembles no model provider"
+
+
+# --- F3: the window anchor is the first trading session after C's registration commit ----------
+
+
+def test_the_registered_anchor_is_the_first_trading_session_after_the_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D5: 120 forward sessions *after the registration commit*, checked exactly on the report side.
+
+    A trading-day commit before the 16:30 publication anchors that same session (its outcome had
+    not published when the registration was committed); a commit after the close anchors the next
+    session; a Saturday commit anchors the next trading session. The writer's old "a weekday, at
+    most 16 days old" rule allowed anchors before the commit, whose first positions can never
+    have a C record and would be permanent gaps.
+    """
+    cases = (
+        ("trading-day-before-the-close", C_COMMITTED_AT, ANCHOR),
+        ("trading-day-after-the-close", datetime(2026, 1, 5, 16, 31, tzinfo=SHANGHAI), SESSIONS[1]),
+        ("saturday", datetime(2026, 1, 3, 10, 0, tzinfo=SHANGHAI), ANCHOR),
+    )
+    for index, (name, committed_at, anchor) in enumerate(cases):
+        case = tmp_path / f"{index}-{name}"
+        case.mkdir()
+        world = _world(case, monkeypatch, committed_at=committed_at, anchor=anchor)
+
+        code = report.main(world.arguments(), clock=lambda: AS_OF)
+        out = capsys.readouterr().out
+
+        assert code == 0, (name, out)
+        assert world.recorder.call is not None, name
+        assert world.recorder.call["anchor_session"] == anchor, name
+
+
+def test_a_holiday_commit_anchors_the_next_trading_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A commit on a non-trading weekday cannot anchor that day; the window starts after it."""
+    holiday = date(2026, 1, 6)
+    calendar = calendar_over(
+        tuple(session for session in SESSIONS if session != holiday), first=date(2026, 1, 1)
+    )
+    labels = SentinelLabels(calendar)
+    committed_at = datetime.combine(holiday, datetime.min.time()).replace(hour=10, tzinfo=SHANGHAI)
+    expected = SESSIONS[2]
+    world = _world(
+        tmp_path,
+        monkeypatch,
+        labels=labels,
+        committed_at=committed_at,
+        anchor=expected,
+    )
+
+    code = report.main(world.arguments(), clock=lambda: AS_OF)
+    out = capsys.readouterr().out
+
+    assert code == 0, out
+    assert world.recorder.call is not None
+    assert world.recorder.call["anchor_session"] == expected
+
+
+@pytest.mark.parametrize("anchor", [SESSIONS[0] - timedelta(days=3), SESSIONS[1]])
+def test_an_anchor_that_is_not_the_first_trading_session_after_the_commit_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    anchor: date,
+) -> None:
+    """The report refuses an anchor before, or later than, the commit's first trading session.
+
+    The message names the commit instant, the expected session and the registered anchor, so an
+    operator can see which of the three the registration got wrong. The evaluator is never
+    called: a window read from a wrong anchor cannot be un-read.
+    """
+    world = _world(tmp_path, monkeypatch, anchor=anchor)
+
+    code = report.main(world.arguments(), clock=lambda: AS_OF)
+    err = capsys.readouterr().err
+
+    assert code == 2
+    assert C_COMMITTED_AT.isoformat() in err
+    assert ANCHOR.isoformat() in err
+    assert anchor.isoformat() in err
+    assert world.recorder.call is None, "a wrong anchor is refused before the evaluation"
+
+
+# --- F8: every printed figure covers the registered window ------------------------------------
+
+
+def test_the_abstention_and_model_alias_figures_are_window_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F8: the abstention rate and the model identities cover anchor..through only.
+
+    A record or a journal outside the registered window belongs to another reading: counting it
+    would print a rate and an alias history the primary arm never used. The hand-computed window
+    facts are two scored rows and one abstention (1/3), one identity and no missing journal.
+    """
+    world = _world(tmp_path, monkeypatch)
+    before_anchor = date(2026, 1, 2)
+    after_through = date(2026, 1, 13)
+    _write_record(
+        world.runtime,
+        _llm_record(
+            before_anchor,
+            scored=("600001.SH",),
+            abstained=("600002.SH", "600003.SH"),
+            registration_sha256=world.c_sha,
+        ),
+    )
+    _write_record(
+        world.runtime,
+        _llm_record(
+            after_through,
+            scored=("600001.SH", "600002.SH"),
+            abstained=("600003.SH",),
+            registration_sha256=world.c_sha,
+        ),
+    )
+    _write_record(
+        world.runtime,
+        _llm_record(
+            SESSIONS[0],
+            scored=("600001.SH", "600002.SH"),
+            registration_sha256=world.c_sha,
+        ),
+    )
+    _write_record(
+        world.runtime,
+        _llm_record(SESSIONS[5], abstained=("600003.SH",), registration_sha256=world.c_sha),
+    )
+    _write_journal(world.runtime, before_anchor, fingerprint="fp-outside-before")
+    _write_journal(world.runtime, after_through, fingerprint="fp-outside-after")
+    _write_journal(world.runtime, SESSIONS[0], fingerprint="fp-window")
+    _write_journal(world.runtime, SESSIONS[5], fingerprint="fp-window")
+    destination = tmp_path / "report.json"
+
+    code = report.main(world.arguments("--json", str(destination)), clock=lambda: AS_OF)
+    out = capsys.readouterr().out
+    view = json.loads(destination.read_text(encoding="utf-8"))
+
+    assert code == 0
+    assert "2 scored, 1 abstained of 3 rows (33.3%)" in out
+    assert view["abstention"] == {
+        "scored": 2,
+        "abstained": 1,
+        "rows": 3,
+        "rate": pytest.approx(1 / 3),
+    }
+    assert view["model_aliases"]["identities"] == [
+        {
+            "model": "deepseek-flash",
+            "system_fingerprint": "fp-window",
+            "sessions": [SESSIONS[0].isoformat(), SESSIONS[5].isoformat()],
+        }
+    ]
+    assert view["model_aliases"]["changed"] is False
+    assert view["model_aliases"]["missing_journals"] == []
+    assert "fp-window" in out
+    assert "fp-outside-before" not in out and "fp-outside-after" not in out

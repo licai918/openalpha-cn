@@ -159,6 +159,8 @@ from openalpha_cn.runtime.composition import (  # noqa: E402
 from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
     DRY_WEEK_SCRATCH_MARKER,
     DRY_WEEK_SCRATCH_SCHEMA,
+    AgentEvaluationError,
+    refuse_a_dry_week_runtime,
 )
 from openalpha_cn.strategy_agent_forward import (  # noqa: E402
     AGENT_SCRIPTS,
@@ -726,10 +728,24 @@ def dry_week_journal_path(runtime_dir: Path, session: date) -> Path:
 
 
 def _dry_week_evenings(runtime_dir: Path) -> tuple[str, ...]:
-    """The sessions the marker lists, or a refusal naming why its status cannot be stated."""
+    """The sessions that have STARTED in a scratch runtime, whatever the evening's status.
+
+    The marker is written before the evening's first model request (`_dry_week`), so every
+    started evening is counted by D7's five-evening cap even when it ends on the request cap, the
+    deadline, a transport failure or a configuration fault. The `dry_week/*.json` journals are
+    unioned in as a second witness: a crash between the marker write and the journal leaves the
+    session in the marker, and a runtime whose marker was lost still cannot hide its evenings.
+
+    A marker that cannot be read or is not this command's document is a refusal, not an empty
+    runtime: a scratch runtime whose dry-week status cannot be stated is not written to.
+    """
     path = dry_week_marker_path(runtime_dir)
+    journal_directory = Path(runtime_dir) / DRY_WEEK_JOURNAL_DIRECTORY
+    journalled: set[str] = set()
+    if journal_directory.is_dir():
+        journalled = {entry.stem for entry in journal_directory.glob("*.json") if entry.is_file()}
     if not path.is_file():
-        return ()
+        return tuple(sorted(journalled))
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
@@ -750,11 +766,16 @@ def _dry_week_evenings(runtime_dir: Path) -> tuple[str, ...]:
             "dry_week",
             f"{path} lists no sessions in `evenings`; the marker is not one this command wrote",
         )
-    return tuple(sorted(evenings))
+    return tuple(sorted({*evenings, *journalled}))
 
 
 def _write_dry_week_marker(runtime_dir: Path, evenings: Sequence[str]) -> Path:
-    """Write the scratch marker atomically: temporary file, then one `os.replace`."""
+    """Write the scratch marker atomically: temporary file, then one `os.replace`.
+
+    `evenings` is every STARTED dry-week session, journalled or not: the marker is what enforces
+    D7's five-evening ceiling and what keeps the scratch runtime isolated from C's forward
+    sample, so it must not wait for an evening to finish before saying the evening happened.
+    """
     path = dry_week_marker_path(runtime_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = (
@@ -1058,7 +1079,8 @@ def _print_dry_week(
     session: date,
     document: Mapping[str, Any],
     path: Path,
-    marker: Path | None,
+    marker: Path,
+    started: int,
 ) -> None:
     """The printed dry-week account: candidate wording, operations, never a result."""
     latency = document["latency_ms"]
@@ -1085,8 +1107,10 @@ def _print_dry_week(
         f"deadline {document['deadline']}"
     )
     print(f"dry-week journal written: {path}")
-    if marker is not None:
-        print(f"scratch marker updated: {marker}")
+    print(
+        f"scratch marker: {marker} ({started} of {DRY_WEEK_MAX_EVENINGS} dry-week evenings "
+        "started; every started evening counts, whatever its status)"
+    )
 
 
 def _dry_week(
@@ -1101,6 +1125,13 @@ def _dry_week(
     nothing to register yet), and a runtime already holding a registered evening or a filed
     prediction is refused. The cap and the rerun checks run before anything is opened, so a
     refused evening leaves the scratch runtime untouched.
+
+    **The marker is written before the evening's first model request**, so a started evening is
+    counted by D7's five-evening ceiling however it ends -- a crash, the request cap, the
+    deadline, a transport failure or a configuration fault. The only refusals before that write
+    are the operator checks above and Step 0's own filing/lateness checks: an evening that cannot
+    read a filed Step 0 day never spent a request, so it is not a measurement and does not
+    consume a scratch evening.
     """
     _required(options, "runtime_dir", step="dry_week")
     _required(options, "step0_runtime_dir", step="dry_week")
@@ -1148,6 +1179,11 @@ def _dry_week(
     for snapshot in arriving:
         by_subject.setdefault(snapshot.subject, []).append(snapshot)
     names = sorted(set(day.survivors) & set(by_subject))
+    # F1: every started evening is in the marker BEFORE the first model request, whatever its
+    # outcome. The cap check above read the marker; this refresh is what makes a failed evening
+    # count, and what marks an all-failed scratch runtime as one (the isolation guard reads it).
+    started = tuple(sorted({*recorded, session.isoformat()}))
+    marker = _write_dry_week_marker(runtime, started)
     status, counts, requests, meter, deadline = _dry_week_family(
         runtime,
         day,
@@ -1169,11 +1205,13 @@ def _dry_week(
         deadline=deadline,
     )
     _write_dry_week_journal(journal_file, document)
-    marker: Path | None = None
-    if status == DRY_WEEK_COMPLETED:
-        evenings = tuple(sorted({*recorded, session.isoformat()}))
-        marker = _write_dry_week_marker(runtime, evenings)
-    _print_dry_week(session=session, document=document, path=journal_file, marker=marker)
+    _print_dry_week(
+        session=session,
+        document=document,
+        path=journal_file,
+        marker=marker,
+        started=len(started),
+    )
     return AgentEveningExit.ok
 
 
@@ -1817,6 +1855,13 @@ def _run(
     session = pinned.astimezone(SHANGHAI).date()
     _required(options, "runtime_dir", step="evidence")
     runtime = Path(options.runtime_dir)
+    # F2: the registered evening files forward records, and a runtime the evaluator refuses as a
+    # D7 scratch would strand six months of C's records in unreadable storage. The refusal is
+    # step 1's, before the admission read, any request and any write.
+    try:
+        refuse_a_dry_week_runtime(runtime)
+    except AgentEvaluationError as error:
+        raise StepFailedError("registration", str(error)) from error
     root, admitted = _admit(options)
     step0 = _step0_registration(options, root)
     # Plan C Review Focus 2's coupling, enforced at the only place both salts are known: C's
@@ -2026,6 +2071,13 @@ def _pin_worktree(options: argparse.Namespace) -> int:
     """
     repository = Path(options.repo)
     registration = _registration_path(options)
+    if options.runtime_dir:
+        # F2: a pin names the runtime C will run in; pinning a dry-week scratch would pin the
+        # wrong store, so the marker is refused before the checkout is looked up or moved.
+        try:
+            refuse_a_dry_week_runtime(Path(options.runtime_dir))
+        except AgentEvaluationError as error:
+            raise StepFailedError("registration", str(error)) from error
     try:
         root, commit, _code = registry.registered_checkout(
             registration, repository, also_bound=C_SCRIPTS
