@@ -113,18 +113,19 @@ STRUCTURED_SIGNAL_PROMPT_V1: Final[PromptTemplate] = PromptTemplate(
 `V2-P7-012`, plus the rendering that produced the same user message."""
 
 STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT: Final[PromptTemplate] = PromptTemplate(
-    name="structured-signal/v2-json-object-examples",
+    name="structured-signal/v2-json-object-examples-v2",
     system=(
         "Return exactly one json object and nothing else -- no prose and no code fences. "
         'The object has two keys: "signal" (one structured research signal) and "rationale" '
         "(one short sentence explaining it). The signal has subject, as_of, direction (one of "
         '"bullish", "bearish", "neutral", "abstain"), strength, confidence, horizon, '
-        "evidence_ids, confirmation_conditions, invalidation_conditions and risk_flags. Cite "
-        "only supplied evidence IDs; the evidence facts in the user payload are the only facts "
-        "to reason about, and a directional signal must cite at least one of them. If the "
-        "evidence cannot support a direction, abstain with strength 0 and an empty "
-        "evidence_ids. Two examples follow, one scored and one abstaining, with placeholder "
-        "values that are not facts: "
+        "evidence_ids, confirmation_conditions, invalidation_conditions, risk_flags and "
+        'abstention_reason (a short reason; required when direction is "abstain" and must be '
+        "absent otherwise). Cite only supplied evidence IDs; the evidence facts in the user "
+        "payload are the only facts to reason about, and a directional signal must cite at "
+        "least one of them. If the evidence cannot support a direction, abstain with strength "
+        "0 and give the required abstention_reason. Two examples follow, one scored and one "
+        "abstaining, with placeholder values that are not facts: "
         '{"signal": {"subject": "000001.SZ", "as_of": "2026-01-05T07:00:00+00:00", '
         '"direction": "bullish", "strength": 0.2, "confidence": 0.6, "horizon": "5d", '
         '"evidence_ids": ["ev-placeholder-1"], "confirmation_conditions": [], '
@@ -134,7 +135,8 @@ STRUCTURED_SIGNAL_PROMPT_V2_JSON_OBJECT: Final[PromptTemplate] = PromptTemplate(
         '{"signal": {"subject": "000001.SZ", "as_of": "2026-01-05T07:00:00+00:00", '
         '"direction": "abstain", "strength": 0.0, "confidence": 0.0, "horizon": "5d", '
         '"evidence_ids": [], "confirmation_conditions": [], '
-        '"invalidation_conditions": [], "risk_flags": []}, '
+        '"invalidation_conditions": [], "risk_flags": [], '
+        '"abstention_reason": "No usable evidence was supplied."}, '
         '"rationale": "No usable evidence was supplied."}'
     ),
     user_format="{payload_json}",
@@ -146,7 +148,11 @@ and worked JSON objects showing the whole answer shape. Fix round 1 (F13) change
 worked object into two -- one scored, one abstaining -- with neutral placeholder values, because
 a lone abstention example at temperature 0 could anchor a model toward abstaining and bias the
 abstention rate C reports; the artifact name was bumped with it since no prompt version was bound
-yet. V1 remains the default; a caller opts in by passing this template, and
+yet. Fix round 2 (N2) made both examples answers the real payload contract accepts: the
+abstaining one now carries the required `abstention_reason` and the field list names it, because
+a model copying the old example had every genuine abstention retried and filed as
+`model_invalid_output`; the artifact name was bumped again with the text (no prompt version was
+bound). V1 remains the default; a caller opts in by passing this template, and
 `StructuredSignalAgent(include_facts=True)` is what fills the user payload with the evidence facts
 the examples refer to.
 """

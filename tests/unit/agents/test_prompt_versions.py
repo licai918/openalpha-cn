@@ -188,7 +188,7 @@ def test_v2_prompt_mentions_json_and_carries_an_example() -> None:
 
     assert "json" in prompt.system.lower()
     assert prompt.name != STRUCTURED_SIGNAL_PROMPT_V1.name
-    assert prompt.name == "structured-signal/v2-json-object-examples"
+    assert prompt.name == "structured-signal/v2-json-object-examples-v2"
     assert "provisional" not in prompt.system.lower()
 
     fields = [
@@ -214,6 +214,21 @@ def test_v2_prompt_mentions_json_and_carries_an_example() -> None:
         # Neutral placeholder values: a generic security, a fixed instant, no real facts.
         assert example["signal"]["subject"] == "000001.SZ"
         assert example["signal"]["as_of"] == "2026-01-05T07:00:00+00:00"
+        # Fix round 2, N2: in json_object mode the examples are the only description of the
+        # answer contract, so each one must be an answer the real payload model accepts -- the
+        # old abstaining example omitted `abstention_reason`, which `SignalFrame` requires, so a
+        # model that copied it was retried and filed as model_invalid_output.
+        validated = StructuredAgentPayload.model_validate(example)
+        assert validated.signal.subject == "000001.SZ"
+    abstaining = next(
+        example for example in examples if example["signal"]["direction"] == "abstain"
+    )
+    assert abstaining["signal"].get("abstention_reason"), (
+        "the abstaining example must carry the required abstention_reason"
+    )
+    assert "abstention_reason" in prompt.system, (
+        "the field list must name abstention_reason, which is required when abstaining"
+    )
     assert prompt.user_format.format(payload_json='{"subject": "000001.SZ"}') == (
         '{"subject": "000001.SZ"}'
     )
