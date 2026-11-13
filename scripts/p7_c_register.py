@@ -13,8 +13,8 @@ that is wanted, because it runs once.
 
 `config` carries the three sample parameters C's evening command reads with no default -- `kind`,
 `salt` and `primary_size` -- and `criteria` is the free JSON text of the decisions. `settings` is
-`grid.protocol_settings()` plus four closed companion blocks that the evaluator, the report and the
-chain test read by name:
+`grid.protocol_settings()` plus five closed companion blocks that the evaluator, the report and
+the chain test read by name:
 
 - `agent_forward_protocol` (`agent-forward-protocol/v1`): D2's one primary statistic
   (the LLM family, the primary set, h=1), the three exploratory arms D5 names, the 120-session
@@ -28,12 +28,17 @@ chain test read by name:
 - `agent_forward_step0` (`agent-step0-registration/v1`): the committed Step 0 registration C
   evaluates -- its repository-relative path, sha256, `config_id` and `seed`;
 - `agent_forward_anchor` (`agent-forward-anchor/v1`): `--anchor`, the registered first forward
-  session the evaluator's window starts at.
+  session the evaluator's window starts at;
+- `agent_forward_protocol_document` (`agent-forward-protocol-document/v1`): fix round 1's F7 --
+  the committed protocol text's repository-relative path and sha256, so the registration names
+  the exact prose it froze.
 
 ## The D1 power decision is made before the body, never by code choosing a threshold
 
 The writer reads the `--power-report` document `scripts/p7_c_power.py` produced (zero requests, a
-stored panel only). It selects N=300 when that row is `testable`; otherwise it selects the census
+stored panel only), and refuses one that does not name this Step 0 registration's committed sha256
+and `config_id` or that was planned under other floors (fix round 1, F5). It selects N=300 when
+that row is `testable`; otherwise it selects the census
 when that row is `testable` (`primary_size = CENSUS_DRAW_SIZE`, a draw large enough that the sample
 is the whole survivor set); when neither is testable it **refuses**, because "register C as
 not testable, or do not register it at all" is the user's choice at L5, not the writer's. The only
@@ -44,8 +49,9 @@ detectable mean is design information; D1 ruled no effect-size threshold.
 ## The signature deviation from the plan's sketch
 
 Plan C task 3.3 sketched `c_registration_body(*, salt, step0_registration)`; the body also needs
-the D1 power decision and the registered window anchor, so the shipped constructor is
-`c_registration_body(*, salt, step0_registration, power, anchor)` and returns
+the D1 power decision, the registered window anchor and the committed protocol text, so the shipped
+constructor is
+`c_registration_body(*, salt, step0_registration, power, anchor, protocol_document)` and returns
 `(config, criteria, settings)`. Everything else the plan sketched is here.
 
 ## What the writer refuses, each by name and with nothing written
@@ -55,12 +61,15 @@ the D1 power decision and the registered window anchor, so the shipped construct
 - a salt that is, or carries, Step 0's registered seed
   (`domain.agent_forward.refuse_a_salt_tied_to_the_book`), re-checked at read-back;
 - Step 0's registration absent, uncommitted, edited after its commit, or of another `config.kind`;
-- a missing or malformed power report, and both rows `not_testable` without the user's flag (or
-  the flag with a testable chosen set);
-- an anchor that is not a weekday, is in the future, or is older than the conservative 16-calendar-
-  day bound the smoke writer uses for its epoch (the exact trading-session check is the report's);
-- a path outside `docs/research/*.json`;
-- an uncommitted bound tree (`registry.REGISTERED_PATHS` plus `AGENT_SCRIPTS`);
+- a missing or malformed power report, one that does not name this Step 0 registration or not the
+  adopted planning floors, a row whose verdict its own fields do not support, and both rows
+  `not_testable` without the user's flag (or the flag with a testable chosen set);
+- an anchor that is a weekend or before today (Shanghai): the anchor is the first trading session
+  strictly after C's registration commit's time, the writer can only check weekday and
+  not-before-today, and the report checks the exact session against the commit's calendar;
+- an uncommitted, dirty or edited protocol document (F7: the registration freezes its committed
+  bytes), and a path outside `docs/research/*.json`;
+- an uncommitted bound tree (`registry.REGISTERED_PATHS`, `AGENT_SCRIPTS` and the protocol text);
 - a different registration already at the path, or any other registry refusal;
 - a written digest that differs from the printed one (the file just written is removed).
 
@@ -69,7 +78,8 @@ the D1 power decision and the registered window anchor, so the shipped construct
 `c_read_back` rebuilds the canonical document, reads it with `agent_evening.read_agent_registration`
 -- the command that will run it -- and with every companion-block reader the evaluator and report
 use, re-runs the salt rule, checks the recorded Step 0 identity against the committed registration,
-and refuses criteria that are empty or claim a verdict. A body that does not read back here would be
+re-checks the frozen protocol document's committed sha256, and refuses criteria that are empty or
+claim a verdict. A body that does not read back here would be
 refused at the first evening or the first report, after the window had already started.
 
 ## What it never does
@@ -89,7 +99,9 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -126,10 +138,14 @@ from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
     AGENT_FORWARD_ANCHOR_SCHEMA,
     AGENT_FORWARD_POWER_KEY,
     AGENT_FORWARD_POWER_SCHEMA,
+    AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY,
+    AGENT_FORWARD_PROTOCOL_DOCUMENT_SCHEMA,
     AGENT_FORWARD_PROTOCOL_KEY,
     AGENT_FORWARD_PROTOCOL_SCHEMA,
     AGENT_FORWARD_STEP0_KEY,
     AGENT_FORWARD_STEP0_SCHEMA,
+    DETECTABLE_AT_POWER,
+    AgentForwardProtocolDocument,
 )
 from openalpha_cn.strategy_agent_forward import AGENT_SCRIPTS  # noqa: E402
 
@@ -147,17 +163,35 @@ CENSUS_DRAW_SIZE: Final[int] = 10**6
 (the draw is the whole set; the salt only orders it)."""
 POWER_REPORT_SCHEMA: Final[str] = "openalpha-p7-c-power/v1"
 """The document `scripts/p7_c_power.py` writes and `--power-report` reads (D1's two rows)."""
+PROTOCOL_DOCUMENT_PATH: Final[str] = "docs/research/p7-c-protocol.md"
+"""The protocol text C's registration freezes by committed bytes (fix round 1, F7)."""
+POWER_DETECTABLE_MEAN_THRESHOLD: Final[float] = 0.02
+"""D1/F4's adopted detectable-mean threshold: a power row is testable only at or below it."""
+POWER_MIN_OBSERVED_SESSIONS: Final[int] = 20
+"""D1/F4's adopted floor on observed sessions before a row may project the window."""
+POWER_PLANNING: Final[dict[str, object]] = {
+    "window_sessions": ADOPTED_WINDOW_SESSIONS,
+    "min_scored_names": ADOPTED_MIN_SCORED,
+    "min_measurable_sessions": ADOPTED_MIN_MEASURABLE_SESSIONS,
+    "test_level": ADOPTED_LEVEL,
+    "target_power": DETECTABLE_AT_POWER,
+    "detectable_mean_threshold": POWER_DETECTABLE_MEAN_THRESHOLD,
+    "min_observed_sessions": POWER_MIN_OBSERVED_SESSIONS,
+}
+"""The plan a `--power-report` must carry for D1 to decide C's sample (fix round 1, F5)."""
 C_SCRIPTS: Final[tuple[str, ...]] = AGENT_SCRIPTS
 """C's two shipped scripts, one spelling with `strategy_agent_forward.AGENT_SCRIPTS`: the
 registration writer, the evening command's admission and the report all bind the same pair."""
-BOUND_PATHS: Final[tuple[str, ...]] = (*registry.REGISTERED_PATHS, *C_SCRIPTS)
+BOUND_PATHS: Final[tuple[str, ...]] = (
+    *registry.REGISTERED_PATHS,
+    *C_SCRIPTS,
+    PROTOCOL_DOCUMENT_PATH,
+)
 """What must be clean at `HEAD` for the registration's `code_commit` to be the tree's bytes: the
-registry's paths and C's own scripts (the writer and the power calculator are not bound)."""
+registry's paths, C's own scripts and the protocol text the registration freezes (the writer
+and the power calculator are not bound)."""
 FORBIDDEN_WORDING: Final[tuple[str, ...]] = ("proven", "验证有效", "已证实", "已验证", "证实有效")
 """Claim words the criteria may never carry: C is 候选, never a verified result."""
-ANCHOR_LOOKBACK_DAYS: Final[int] = 16
-"""The most calendar days the anchor may precede today: the smoke writer's conservative calendar
-upper bound on 11 sessions (the exact check is the first evening's own calendar)."""
 SHA256_ALGORITHM: Final[str] = "sha256"
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
 _HEX_SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
@@ -220,6 +254,10 @@ class RegistrationRefusedError(RegistrationWriterError):
 
 class CriteriaRefusedError(RegistrationWriterError):
     """The criteria are empty, not text, or claim a verdict C never established."""
+
+
+class ProtocolDocumentRefusedError(RegistrationWriterError):
+    """The protocol document C's registration freezes is missing, uncommitted, dirty or changed."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -405,21 +443,33 @@ def _anchor_block(anchor: date) -> dict[str, Any]:
     return {"schema_version": AGENT_FORWARD_ANCHOR_SCHEMA, "session": anchor.isoformat()}
 
 
+def _protocol_document_block(
+    protocol_document: AgentForwardProtocolDocument,
+) -> dict[str, Any]:
+    """`agent-forward-protocol-document/v1`: the committed protocol text C freezes (F7)."""
+    return {
+        "schema_version": AGENT_FORWARD_PROTOCOL_DOCUMENT_SCHEMA,
+        "path": protocol_document.path,
+        "sha256": protocol_document.sha256,
+    }
+
+
 def c_registration_body(
     *,
     salt: str,
     step0_registration: Step0Registration,
     power: PowerDecision,
     anchor: date,
+    protocol_document: AgentForwardProtocolDocument,
 ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
-    """C's `(config, criteria, settings)` for the registered salt, Step 0 binding, D1 decision and
-    anchor.
+    """C's `(config, criteria, settings)` for the registered salt, Step 0 binding, D1 decision,
+    anchor and committed protocol text.
 
     Pure: returns fresh copies, so a caller changing one cannot move the frozen literals. The
     signature is a documented deviation from plan C task 3.3's two-argument sketch: the D1 power
-    decision and the registered window anchor are part of the body, so the body cannot be built
-    without them (see the module docstring). `primary_size` is the sample the D1 decision chose:
-    `PRIMARY_SIZE` for `n300`, `CENSUS_DRAW_SIZE` for `census`.
+    decision, the registered window anchor and the frozen protocol document are part of the body,
+    so the body cannot be built without them (see the module docstring). `primary_size` is the
+    sample the D1 decision chose: `PRIMARY_SIZE` for `n300`, `CENSUS_DRAW_SIZE` for `census`.
     """
     primary_size = PRIMARY_SIZE if power.sample == "n300" else CENSUS_DRAW_SIZE
     config: dict[str, Any] = {
@@ -433,6 +483,7 @@ def c_registration_body(
         AGENT_FORWARD_POWER_KEY: _power_block(power),
         AGENT_FORWARD_STEP0_KEY: _step0_block(step0_registration),
         AGENT_FORWARD_ANCHOR_KEY: _anchor_block(anchor),
+        AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY: _protocol_document_block(protocol_document),
     }
     return config, copy.deepcopy(CRITERIA), settings
 
@@ -450,6 +501,14 @@ class _PowerRow:
     detectable_mean: float | None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _PowerPlan:
+    """The two planning floors a row's verdict is recomputed under (fix round 1, F5)."""
+
+    min_observed_sessions: int
+    min_measurable_sessions: int
+
+
 def _is_iso_date(value: object) -> bool:
     if not isinstance(value, str):
         return False
@@ -460,8 +519,37 @@ def _is_iso_date(value: object) -> bool:
     return True
 
 
-def _power_row(block: object, *, label: str, path: Path) -> _PowerRow:
-    """One row of the power report, or a refusal naming the field that is not the contract's."""
+def _finite_number(value: object, *, field: str, label: str, path: Path) -> float | None:
+    """A finite non-negative JSON number, or `None` when the field is null; else a refusal."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row {field} is {value!r}, not a number or null"
+        )
+    if not math.isfinite(value) or value < 0:
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row {field} is {value!r}, not a finite "
+            "non-negative number"
+        )
+    return float(value)
+
+
+def _power_row(
+    block: object,
+    *,
+    label: str,
+    path: Path,
+    planning: _PowerPlan,
+) -> _PowerRow:
+    """One row of the power report, or a refusal naming the field that is not the contract's.
+
+    Fix round 1 (F5): the row's `verdict` must be exactly what its own fields support, so a
+    hand-written `"verdict": "testable"` cannot pass D1's gate:
+    testable iff `observed_sessions >= min_observed_sessions` and
+    `measurable_sessions >= min_measurable_sessions` and a detectable mean exists at or below the
+    row's registered threshold.
+    """
     if not isinstance(block, Mapping):
         raise PowerReportRefusedError(
             f"the power report {path}'s {label!r} row is {type(block).__name__}, not an object"
@@ -471,46 +559,185 @@ def _power_row(block: object, *, label: str, path: Path) -> _PowerRow:
         raise PowerReportRefusedError(
             f"the power report {path}'s {label!r} row names sample {sample!r}, not {label!r}"
         )
+    size = block.get("sample_size")
+    if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size < 1):
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row sample_size is {size!r}, not a positive "
+            "integer or null"
+        )
+    counts: dict[str, int] = {}
+    for field in (
+        "observed_sessions",
+        "observed_measurable_sessions",
+        "measurable_sessions",
+        "periods",
+    ):
+        value = block.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise PowerReportRefusedError(
+                f"the power report {path}'s {label!r} row {field} is {value!r}, not a "
+                "non-negative integer"
+            )
+        counts[field] = value
+    projected = block.get("projected_scored_names")
+    if projected is not None and (
+        isinstance(projected, bool) or not isinstance(projected, int) or projected < 0
+    ):
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row projected_scored_names is {projected!r}, "
+            "not a non-negative integer or null"
+        )
+    _finite_number(block.get("sd"), field="sd", label=label, path=path)
+    mean = _finite_number(
+        block.get("detectable_mean"), field="detectable_mean", label=label, path=path
+    )
+    threshold = _finite_number(
+        block.get("detectable_threshold"),
+        field="detectable_threshold",
+        label=label,
+        path=path,
+    )
+    if threshold != POWER_DETECTABLE_MEAN_THRESHOLD:
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row detectable_threshold is {threshold!r}, not "
+            f"the adopted {POWER_DETECTABLE_MEAN_THRESHOLD!r}"
+        )
+    reason = block.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        raise PowerReportRefusedError(
+            f"the power report {path}'s {label!r} row reason is {reason!r}, not text or null"
+        )
     verdict = block.get("verdict")
     if verdict not in {"testable", "not_testable"}:
         raise PowerReportRefusedError(
             f"the power report {path}'s {label!r} row verdict is {verdict!r}, not "
             "'testable' or 'not_testable'"
         )
-    measurable = block.get("measurable_sessions")
-    if isinstance(measurable, bool) or not isinstance(measurable, int) or measurable < 0:
+    expected_testable = (
+        counts["observed_sessions"] >= planning.min_observed_sessions
+        and counts["measurable_sessions"] >= planning.min_measurable_sessions
+        and mean is not None
+        and mean <= POWER_DETECTABLE_MEAN_THRESHOLD
+    )
+    if (verdict == "testable") != expected_testable:
         raise PowerReportRefusedError(
-            f"the power report {path}'s {label!r} row measurable_sessions is {measurable!r}, "
-            "not a non-negative integer"
+            f"the power report {path}'s {label!r} row says {verdict!r} but its own fields say "
+            f"{'testable' if expected_testable else 'not_testable'}: observed_sessions "
+            f"{counts['observed_sessions']}, measurable_sessions "
+            f"{counts['measurable_sessions']}, detectable_mean {mean!r} (threshold "
+            f"{POWER_DETECTABLE_MEAN_THRESHOLD})"
         )
-    mean = block.get("detectable_mean")
-    if mean is not None:
-        if isinstance(mean, bool) or not isinstance(mean, int | float):
-            raise PowerReportRefusedError(
-                f"the power report {path}'s {label!r} row detectable_mean is {mean!r}, "
-                "not a number or null"
-            )
-        if not math.isfinite(mean) or mean < 0:
-            raise PowerReportRefusedError(
-                f"the power report {path}'s {label!r} row detectable_mean is {mean!r}, "
-                "not a finite non-negative number"
-            )
-        mean = float(mean)
     return _PowerRow(
         sample=label,
         verdict=verdict,
-        measurable_sessions=measurable,
+        measurable_sessions=counts["measurable_sessions"],
         detectable_mean=mean,
     )
 
 
-def _read_power(path_value: str | Path, *, register_untestable: bool) -> PowerDecision:
+def _power_planning(document: Mapping[str, object], *, path: Path) -> _PowerPlan:
+    """The report's planning object, held to the adopted D1 plan (fix round 1, F5)."""
+    planning = document.get("planning")
+    if not isinstance(planning, Mapping):
+        raise PowerReportRefusedError(
+            f"the power report {path} has no planning object; the D1 decision is read under the "
+            "plan it was computed with, not under a default"
+        )
+    for key, expected in POWER_PLANNING.items():
+        value = planning.get(key)
+        if value != expected:
+            raise PowerReportRefusedError(
+                f"the power report {path}'s planning.{key} is {value!r}, not the adopted "
+                f"{expected!r}"
+            )
+    assumptions: dict[str, float] = {}
+    for key in ("sd_between", "abstention_rate"):
+        value = planning.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+        ):
+            raise PowerReportRefusedError(
+                f"the power report {path}'s planning.{key} is {value!r}, not a finite number; "
+                "the planning model's dispersion and abstention assumptions are reported, not "
+                "defaulted"
+            )
+        assumptions[key] = float(value)
+    if not 0 <= assumptions["abstention_rate"] <= 1:
+        raise PowerReportRefusedError(
+            f"the power report {path}'s planning.abstention_rate is "
+            f"{assumptions['abstention_rate']!r}, not a fraction between 0 and 1"
+        )
+    return _PowerPlan(
+        min_observed_sessions=POWER_MIN_OBSERVED_SESSIONS,
+        min_measurable_sessions=ADOPTED_MIN_MEASURABLE_SESSIONS,
+    )
+
+
+def _names_the_same_registration(value: object, path: str) -> bool:
+    """Whether `value` names the committed registration at repo-relative `path`.
+
+    The power command records the path it was given, and the protocol runs it with a path
+    relative to the repository; a user who passes an absolute path must not be refused by name
+    alone, so the repository-relative tail is accepted too. The sha256 and config_id checked
+    beside this are what actually bind the registration.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    shown = Path(value).as_posix()
+    return shown == path or shown.endswith("/" + path)
+
+
+def _checked_power_source(
+    document: Mapping[str, object], *, step0_registration: Step0Registration, path: Path
+) -> None:
+    """The report must have been computed on this Step 0 registration (fix round 1, F5)."""
+    source = document.get("source")
+    if not isinstance(source, Mapping):
+        raise PowerReportRefusedError(
+            f"the power report {path}'s source is {type(source).__name__}, not the Step 0 "
+            "registration identity it was computed on; a report whose book C does not evaluate "
+            "is not D1's evidence"
+        )
+    if not _names_the_same_registration(source.get("step0_registration"), step0_registration.path):
+        raise PowerReportRefusedError(
+            f"the power report {path}'s source.step0_registration is "
+            f"{source.get('step0_registration')!r}, not this Step 0 registration "
+            f"({step0_registration.path!r}); the D1 decision must be computed on the "
+            "registration C evaluates"
+        )
+    for key, wanted in (
+        ("config_id", step0_registration.config_id),
+        ("registration_sha256", step0_registration.registration_sha256),
+    ):
+        value = source.get(key)
+        if value != wanted:
+            raise PowerReportRefusedError(
+                f"the power report {path}'s source.{key} is {value!r}, not this Step 0 "
+                f"registration's {wanted!r}; the D1 decision must be computed on the registration "
+                "C evaluates"
+            )
+    code_commit = source.get("code_commit")
+    if not isinstance(code_commit, str) or not code_commit.strip():
+        raise PowerReportRefusedError(
+            f"the power report {path}'s source names no Step 0 code_commit"
+        )
+
+
+def _read_power(
+    path_value: str | Path,
+    *,
+    step0_registration: Step0Registration,
+    register_untestable: bool,
+) -> PowerDecision:
     """D1's selection from the `POWER_REPORT_SCHEMA` document `--power-report` names.
 
     The rule is D1's and is applied here, never guessed: `n300` when its row is testable, else the
     census when its row is testable, else a refusal whose only overrides are the user's explicit
     `--register-untestable` (then `n300` is recorded as not testable). A missing, unreadable,
-    wrong-schema or malformed report is a refusal, not a default.
+    wrong-schema or malformed report is a refusal, not a default; so is one that does not name this
+    Step 0 registration under the adopted plan (fix round 1, F5).
     """
     path = Path(path_value)
     if not path.is_file():
@@ -542,6 +769,8 @@ def _read_power(path_value: str | Path, *, register_untestable: bool) -> PowerDe
                 f"the power report {path} names first/last as {document.get(field)!r}, not ISO "
                 "dates"
             )
+    planning = _power_planning(document, path=path)
+    _checked_power_source(document, step0_registration=step0_registration, path=path)
     rows = document.get("rows")
     if not isinstance(rows, Mapping):
         raise PowerReportRefusedError(
@@ -555,7 +784,7 @@ def _read_power(path_value: str | Path, *, register_untestable: bool) -> PowerDe
                 f"the power report {path} has no {label!r} row; D1 decides between N=300 and the "
                 "census and requires both rows"
             )
-        parsed[label] = _power_row(rows[label], label=label, path=path)
+        parsed[label] = _power_row(rows[label], label=label, path=path, planning=planning)
     n300, census = parsed["n300"], parsed["census"]
     if n300.verdict == "testable":
         chosen = n300
@@ -757,6 +986,7 @@ def c_read_back(
         power = strategy_agent_evaluation.read_agent_forward_power(settings)
         step0 = strategy_agent_evaluation.read_agent_forward_step0(settings)
         anchor = strategy_agent_evaluation.read_agent_forward_anchor(settings)
+        protocol_document = strategy_agent_evaluation.read_agent_forward_protocol_document(settings)
     except strategy_agent_evaluation.AgentEvaluationError as error:
         raise RegistrationWriterError(
             f"the registration's companion blocks do not read back: {error}"
@@ -766,6 +996,7 @@ def c_read_back(
     except ValueError as error:
         raise SaltRefusedError(str(error)) from error
     _checked_step_zero(repo, step0, step0_registration)
+    _checked_protocol_document(repo, protocol_document)
     expected_primary_size = PRIMARY_SIZE if power.sample == "n300" else CENSUS_DRAW_SIZE
     if registration.primary_size != expected_primary_size:
         raise RegistrationWriterError(
@@ -800,6 +1031,41 @@ def _git(repo: Path, *args: str) -> str:
         raise CheckoutRefusedError(str(error)) from error
 
 
+def _git_bytes(repo: Path, *args: str) -> bytes:
+    """Hermetic git whose stdout is the raw bytes a sha256 is taken over.
+
+    `_git` reads text, which a platform's newline translation could change; F7 compares the
+    committed protocol document byte for byte, so it needs bytes.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment |= {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        finished = subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=p7_register.GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise CheckoutRefusedError(
+            f"git {' '.join(args)} in {repo} could not run: {error}"
+        ) from error
+    if finished.returncode != 0:
+        raise CheckoutRefusedError(
+            f"git {' '.join(args)} in {repo} failed: "
+            f"{finished.stderr.decode(errors='replace').strip() or 'no message'}"
+        )
+    return finished.stdout
+
+
 def _repository() -> Path:
     """The top of the checkout the writer runs in."""
     try:
@@ -814,6 +1080,57 @@ def _refuse_a_dirty_bound_tree(repo: Path) -> None:
         raise BoundTreeRefusedError(
             f"the bound code of {repo} has uncommitted changes ({dirty.splitlines()[0]} ...): "
             "the registration would name a commit whose bytes are not the tree's"
+        )
+
+
+def _protocol_document(repo: Path) -> AgentForwardProtocolDocument:
+    """The committed protocol text C's registration freezes (fix round 1, F7).
+
+    The registration freezes prose, not just code, so the writer requires the file to be
+    committed, clean, and identical to `HEAD`'s bytes, and records its sha256; the read-back
+    re-checks it against the tree.
+    """
+    path = repo / PROTOCOL_DOCUMENT_PATH
+    if not path.is_file():
+        raise ProtocolDocumentRefusedError(
+            f"the protocol document {PROTOCOL_DOCUMENT_PATH} is not a file; C's registration "
+            "freezes the protocol text written before it"
+        )
+    dirty = _git(
+        repo, "status", "--porcelain", "--untracked-files=all", "--", PROTOCOL_DOCUMENT_PATH
+    )
+    if dirty:
+        raise ProtocolDocumentRefusedError(
+            f"the protocol document {PROTOCOL_DOCUMENT_PATH} is not committed and clean "
+            f"({dirty.splitlines()[0]} ...); C's registration freezes the committed text, not a "
+            "draft"
+        )
+    content = path.read_bytes()
+    committed = _git_bytes(repo, "show", f"HEAD:{PROTOCOL_DOCUMENT_PATH}")
+    if committed != content:
+        raise ProtocolDocumentRefusedError(
+            f"the bytes of {PROTOCOL_DOCUMENT_PATH} on disk are not the ones HEAD holds; C's "
+            "registration freezes the committed text"
+        )
+    return AgentForwardProtocolDocument(
+        path=PROTOCOL_DOCUMENT_PATH,
+        sha256=hashlib.sha256(committed).hexdigest(),
+    )
+
+
+def _checked_protocol_document(repo: Path, block: AgentForwardProtocolDocument) -> None:
+    """The read-back block must name the committed protocol text and its bytes."""
+    if block.path != PROTOCOL_DOCUMENT_PATH:
+        raise ProtocolDocumentRefusedError(
+            f"the registration's {AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY} names {block.path!r}, not "
+            f"{PROTOCOL_DOCUMENT_PATH!r}"
+        )
+    fresh = _protocol_document(repo)
+    if block.sha256 != fresh.sha256:
+        raise ProtocolDocumentRefusedError(
+            f"the registration's {AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY} sha256 is {block.sha256}, "
+            f"not the committed {fresh.sha256}; the frozen protocol text changed after the "
+            "registration was built"
         )
 
 
@@ -852,24 +1169,25 @@ def _checked_path(repo: Path, value: str) -> Path:
 
 
 def _checked_anchor(anchor: date, today: date) -> date:
-    """The registered first forward session: a weekday, not in the future, and not too old."""
+    """The registered first forward session: a weekday, and not before today.
+
+    Fix round 1, F3: the anchor is the first trading session **strictly after** C's registration
+    commit's time, so a future weekday is the ordinary case (the registration is written before
+    the window starts), not a refusal. The writer can only check that it is a weekday and not
+    before today (Shanghai); the report checks the exact session against the registration
+    commit's trading calendar.
+    """
     if anchor.weekday() >= 5:
         raise AnchorRefusedError(
-            f"{anchor} is not a weekday: the anchor is C's first forward session, and the exact "
-            "trading-session check is the report's and the first evening's calendar"
+            f"{anchor} is not a weekday: the anchor is the first trading session strictly after "
+            "C's registration commit's time"
         )
-    if anchor > today:
+    if anchor < today:
         raise AnchorRefusedError(
-            f"{anchor} is in the future relative to today ({today}, Shanghai): C's clock "
-            "starts at its registration and the anchor is the first forward session on or "
-            "after it"
-        )
-    age = (today - anchor).days
-    if age > ANCHOR_LOOKBACK_DAYS:
-        raise AnchorRefusedError(
-            f"{anchor} is {age} calendar days before today ({today}): more than the "
-            f"{ANCHOR_LOOKBACK_DAYS}-day upper bound, so the window would start before the "
-            "registration; the exact trading-session check is the report's"
+            f"{anchor} is before today ({today}, Shanghai): the anchor is the first trading "
+            "session strictly after C's registration commit's time, so it cannot precede the "
+            "registration; the writer checks only weekday and not-before-today, and the report "
+            "checks the exact session against the commit's trading calendar"
         )
     return anchor
 
@@ -916,8 +1234,10 @@ def _write(arguments: argparse.Namespace) -> None:
     anchor = _checked_anchor(arguments.anchor, _today())
     step0 = _step0_facts(repo, arguments.step0_registration)
     _refuse_a_salt_tied_to_the_seed(arguments.salt, step0.seed)
+    protocol_document = _protocol_document(repo)
     power = _read_power(
         _resolve_against(repo, arguments.power_report),
+        step0_registration=step0,
         register_untestable=arguments.register_untestable,
     )
     config, criteria, settings = c_registration_body(
@@ -925,6 +1245,7 @@ def _write(arguments: argparse.Namespace) -> None:
         step0_registration=step0,
         power=power,
         anchor=anchor,
+        protocol_document=protocol_document,
     )
     c_read_back(
         config,

@@ -44,6 +44,7 @@ register = _script("p7_c_register")
 register_step0 = _script("p7_register")
 agent_evening = _script("agent_evening")
 grid = _script("grid")
+power = _script("p7_c_power")
 registry = _script("registry")
 
 from openalpha_cn import strategy_agent_evaluation as evaluation  # noqa: E402
@@ -98,6 +99,15 @@ PROTOCOL_BLOCK: Final[dict[str, Any]] = {
     "random_seed": 20_260_926,
 }
 """The `agent-forward-protocol/v1` block D2/D3/D5 register, written out by hand."""
+
+PROTOCOL_DOCUMENT: Final[str] = "docs/research/p7-c-protocol.md"
+"""The protocol text C's registration freezes by committed bytes (fix round 1, F7)."""
+PROTOCOL_TEXT: Final[str] = "# 方案 C 协议\n\n候选，写出时 C 的登记还不存在。\n"
+PROTOCOL_DOCUMENT_BLOCK: Final[dict[str, Any]] = {
+    "schema_version": "agent-forward-protocol-document/v1",
+    "path": PROTOCOL_DOCUMENT,
+    "sha256": "d" * 64,
+}
 
 
 def _step0(**overrides: Any) -> Any:
@@ -154,12 +164,22 @@ def _anchor_block() -> dict[str, Any]:
     return {"schema_version": "agent-forward-anchor/v1", "session": VALID_ANCHOR.isoformat()}
 
 
+def _protocol_document() -> Any:
+    return evaluation.AgentForwardProtocolDocument(
+        path=PROTOCOL_DOCUMENT, sha256=PROTOCOL_DOCUMENT_BLOCK["sha256"]
+    )
+
+
 # --- Task 3.3 (body): the frozen registration body and its companion blocks ----------------------
 
 
 def test_the_registration_body_is_the_frozen_one() -> None:
     config, criteria, settings = register.c_registration_body(
-        salt=SALT, step0_registration=_step0(), power=_power(), anchor=VALID_ANCHOR
+        salt=SALT,
+        step0_registration=_step0(),
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_protocol_document(),
     )
 
     assert config == {
@@ -168,6 +188,7 @@ def test_the_registration_body_is_the_frozen_one() -> None:
         "primary_size": register.PRIMARY_SIZE,
     }
     assert register.AGENT_REGISTRATION_KIND == "agent_forward/v1"
+    assert register.PROTOCOL_DOCUMENT_PATH == PROTOCOL_DOCUMENT
     assert register.PRIMARY_SIZE == 300
     assert set(criteria) == CRITERIA_KEYS
     assert settings == {
@@ -176,6 +197,7 @@ def test_the_registration_body_is_the_frozen_one() -> None:
         evaluation.AGENT_FORWARD_POWER_KEY: _power_block(),
         evaluation.AGENT_FORWARD_STEP0_KEY: _step0_block(),
         evaluation.AGENT_FORWARD_ANCHOR_KEY: _anchor_block(),
+        evaluation.AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY: PROTOCOL_DOCUMENT_BLOCK,
     }
     assert settings["random_seed"] == settings[evaluation.AGENT_FORWARD_PROTOCOL_KEY]["random_seed"]
     assert (
@@ -193,6 +215,7 @@ def test_the_body_draws_the_census_when_the_power_decision_did() -> None:
         step0_registration=_step0(),
         power=_power(sample="census", measurable_sessions=118, detectable_mean=0.02),
         anchor=VALID_ANCHOR,
+        protocol_document=_protocol_document(),
     )
 
     assert register.CENSUS_DRAW_SIZE == 10**6
@@ -211,6 +234,7 @@ def test_the_body_records_an_untestable_decision_and_the_users_flag() -> None:
         step0_registration=_step0(),
         power=_power(verdict="not_testable", register_untestable=True, detectable_mean=None),
         anchor=VALID_ANCHOR,
+        protocol_document=_protocol_document(),
     )
 
     assert config["primary_size"] == register.PRIMARY_SIZE
@@ -223,19 +247,31 @@ def test_the_body_records_an_untestable_decision_and_the_users_flag() -> None:
 
 def test_the_body_is_fresh_state_not_the_frozen_literals() -> None:
     _, criteria, _ = register.c_registration_body(
-        salt=SALT, step0_registration=_step0(), power=_power(), anchor=VALID_ANCHOR
+        salt=SALT,
+        step0_registration=_step0(),
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_protocol_document(),
     )
     criteria["wording"] = "changed"
 
     _, criteria_again, _ = register.c_registration_body(
-        salt=SALT, step0_registration=_step0(), power=_power(), anchor=VALID_ANCHOR
+        salt=SALT,
+        step0_registration=_step0(),
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_protocol_document(),
     )
     assert criteria_again["wording"] != "changed"
 
 
 def test_the_criteria_freeze_every_decision_and_claim_no_verdict() -> None:
     _, criteria, _ = register.c_registration_body(
-        salt=SALT, step0_registration=_step0(), power=_power(), anchor=VALID_ANCHOR
+        salt=SALT,
+        step0_registration=_step0(),
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_protocol_document(),
     )
 
     assert set(criteria) == CRITERIA_KEYS
@@ -279,13 +315,16 @@ BOUND_FILES: Final[tuple[str, ...]] = (
 """One file under every bound path (`registry.REGISTERED_PATHS` plus C's two scripts)."""
 
 
-def _repository(root: Path) -> Path:
+def _repository(root: Path, *, protocol: bool = True) -> Path:
     repo = root / "repo"
     repo.mkdir(parents=True)
     research_repo.git(repo, "init", "-q", "--template=", "-b", "main")
     for name in BOUND_FILES:
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
         (repo / name).write_text(tds.LOCK if name == "uv.lock" else "RULES = 1\n", encoding="utf-8")
+    if protocol:
+        (repo / PROTOCOL_DOCUMENT).parent.mkdir(parents=True, exist_ok=True)
+        (repo / PROTOCOL_DOCUMENT).write_text(PROTOCOL_TEXT, encoding="utf-8")
     (repo / ".python-version").write_text(f"{tds.RUNNING_PYTHON}\n", encoding="utf-8")
     (repo / ".gitignore").write_text(".venv/\n.env\n", encoding="utf-8")
     (repo / ".gitattributes").write_text("* text=auto eol=lf\n", encoding="utf-8")
@@ -324,11 +363,15 @@ def _row(**overrides: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
         "sample": "n300",
         "sample_size": 300,
-        "projected_scored_names": 18,
+        "observed_sessions": 100,
         "observed_measurable_sessions": 70,
+        "projected_scored_names": 18,
         "measurable_sessions": 72,
         "periods": 72,
-        "detectable_mean": 0.031,
+        "sd": 0.12,
+        "detectable_mean": 0.015,
+        "detectable_threshold": 0.02,
+        "reason": None,
         "verdict": "testable",
     }
     row.update(overrides)
@@ -342,38 +385,70 @@ def _census_row(**overrides: Any) -> dict[str, Any]:
         projected_scored_names=118,
         measurable_sessions=118,
         periods=118,
-        detectable_mean=0.02,
+        detectable_mean=0.012,
     )
     row.update(overrides)
     return row
 
 
+def _planning(**overrides: Any) -> dict[str, Any]:
+    planning: dict[str, Any] = {
+        "window_sessions": 120,
+        "primary_horizon": 1,
+        "test_level": 0.05,
+        "target_power": 0.8,
+        "primary_sample_size": 300,
+        "min_scored_names": 10,
+        "min_measurable_sessions": 60,
+        "detectable_mean_threshold": 0.02,
+        "min_observed_sessions": 20,
+        "sd_between": 0.15,
+        "abstention_rate": 0.05,
+    }
+    planning.update(overrides)
+    return planning
+
+
+_DEFAULT_SOURCE: Final[object] = object()
+
+
+def _source(step0: Any) -> dict[str, Any]:
+    return {
+        "step0_registration": step0.path,
+        "config_id": step0.config_id,
+        "registration_sha256": step0.registration_sha256,
+        "code_commit": "e" * 40,
+    }
+
+
 def _power_report(
-    path: Path, *, rows: dict[str, Any] | None = None, schema: str = "openalpha-p7-c-power/v1"
+    path: Path,
+    *,
+    step0: Any,
+    rows: dict[str, Any] | None = None,
+    planning: dict[str, Any] | None = None,
+    source: object = _DEFAULT_SOURCE,
+    schema: str = "openalpha-p7-c-power/v1",
 ) -> Path:
-    if rows is None:
-        rows = {"n300": _row(), "census": _census_row()}
     document = {
         "schema": schema,
         "wording": ["候选", "no labels and no returns were read", "not evidence"],
         "first": "2026-01-05",
         "last": "2026-06-05",
         "sessions_observed": 100,
-        "planning": {
-            "window_sessions": 120,
-            "primary_horizon": 1,
-            "between_day_sd": 0.15,
-            "test_level": 0.05,
-            "target_power": 0.8,
-            "primary_sample_size": 300,
-            "min_scored_names": 10,
-            "min_measurable_sessions": 60,
-        },
-        "source": None,
-        "rows": rows,
+        "planning": _planning() if planning is None else planning,
+        "source": _source(step0) if source is _DEFAULT_SOURCE else source,
+        "rows": {"n300": _row(), "census": _census_row()} if rows is None else rows,
     }
     path.write_text(json.dumps(document) + "\n", encoding="utf-8")
     return path
+
+
+def _committed_protocol_document(repo: Path) -> Any:
+    content = (repo / PROTOCOL_DOCUMENT).read_bytes()
+    return evaluation.AgentForwardProtocolDocument(
+        path=PROTOCOL_DOCUMENT, sha256=hashlib.sha256(content).hexdigest()
+    )
 
 
 def _pin_world(
@@ -457,7 +532,7 @@ def _success(
 ) -> tuple[Path, dict[str, Any]]:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json", rows=rows)
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo), rows=rows)
     code, _out, err = _run(
         capsys, *_arguments(power=power, register_untestable=register_untestable)
     )
@@ -470,7 +545,7 @@ def test_dry_run_writes_nothing_and_prints_the_canonical_document(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
     before_status, before_files = _status(repo), _files(repo)
 
     code, out, err = _run(capsys, *_arguments(power=power, dry_run=True))
@@ -498,7 +573,7 @@ def test_a_relative_power_report_resolves_against_the_repository(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    _power_report(repo / "docs/research/p7-c-power.json")
+    _power_report(repo / "docs/research/p7-c-power.json", step0=_committed_step_zero(repo))
 
     code, _, err = _run(capsys, *_arguments(power=Path("docs/research/p7-c-power.json")))
 
@@ -511,7 +586,7 @@ def test_writes_once_never_commits_and_the_bytes_are_the_printed_digest(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
     commits = research_repo.git(repo, "rev-list", "--count", "HEAD").strip()
     before = _status(repo)
 
@@ -583,13 +658,20 @@ def test_the_written_document_reads_back_with_every_companion_block(
     anchor = evaluation.read_agent_forward_anchor(settings)
     assert anchor.session == VALID_ANCHOR
 
+    protocol_document = evaluation.read_agent_forward_protocol_document(settings)
+    assert protocol_document.path == PROTOCOL_DOCUMENT
+    assert (
+        protocol_document.sha256
+        == hashlib.sha256((repo / PROTOCOL_DOCUMENT).read_bytes()).hexdigest()
+    )
+
 
 def test_code_commit_is_head_passed_explicitly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
     captures: list[str | None] = []
     original = registry.register
 
@@ -614,12 +696,12 @@ def test_selects_n300_when_it_is_testable(
 ) -> None:
     power_path = tmp_path / "p7-c-power.json"
     rows = {
-        "n300": _row(verdict="testable", measurable_sessions=72, detectable_mean=0.031),
-        "census": _census_row(verdict="testable", measurable_sessions=118, detectable_mean=0.02),
+        "n300": _row(verdict="testable", measurable_sessions=72, detectable_mean=0.015),
+        "census": _census_row(verdict="testable", measurable_sessions=118, detectable_mean=0.012),
     }
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    _power_report(power_path, rows=rows)
+    _power_report(power_path, step0=_committed_step_zero(repo), rows=rows)
 
     code, _, err = _run(capsys, *_arguments(power=power_path))
 
@@ -631,7 +713,7 @@ def test_selects_n300_when_it_is_testable(
     assert block["verdict"] == "testable"
     assert block["register_untestable"] is False
     assert block["measurable_sessions"] == 72
-    assert block["detectable_mean"] == 0.031
+    assert block["detectable_mean"] == 0.015
     assert block["report_sha256"] == hashlib.sha256(power_path.read_bytes()).hexdigest()
 
 
@@ -641,7 +723,7 @@ def test_falls_back_to_the_census_when_only_it_is_testable(
     power_path = tmp_path / "p7-c-power.json"
     rows = {
         "n300": _row(verdict="not_testable", measurable_sessions=12, detectable_mean=None),
-        "census": _census_row(verdict="testable", measurable_sessions=118, detectable_mean=0.02),
+        "census": _census_row(verdict="testable", measurable_sessions=118, detectable_mean=0.012),
     }
     _repo, document = _success(tmp_path, monkeypatch, capsys, rows=rows)
 
@@ -651,7 +733,7 @@ def test_falls_back_to_the_census_when_only_it_is_testable(
     assert block["verdict"] == "testable"
     assert block["register_untestable"] is False
     assert block["measurable_sessions"] == 118
-    assert block["detectable_mean"] == 0.02
+    assert block["detectable_mean"] == 0.012
     assert block["report_sha256"] == hashlib.sha256(power_path.read_bytes()).hexdigest()
 
 
@@ -662,6 +744,7 @@ def test_both_untestable_refuses_and_names_the_users_unmade_choice(
     _pin_world(monkeypatch, repo)
     power = _power_report(
         tmp_path / "p7-c-power.json",
+        step0=_committed_step_zero(repo),
         rows={
             "n300": _row(verdict="not_testable", detectable_mean=None),
             "census": _census_row(verdict="not_testable", detectable_mean=None),
@@ -698,10 +781,10 @@ def test_register_untestable_writes_a_not_testable_registration(
 @pytest.mark.parametrize(
     "rows",
     [
-        {"n300": _row(verdict="testable", detectable_mean=0.031), "census": _census_row()},
+        {"n300": _row(verdict="testable", detectable_mean=0.015), "census": _census_row()},
         {
             "n300": _row(verdict="not_testable", detectable_mean=None),
-            "census": _census_row(verdict="testable", detectable_mean=0.02),
+            "census": _census_row(verdict="testable", detectable_mean=0.012),
         },
     ],
 )
@@ -713,7 +796,7 @@ def test_register_untestable_is_refused_when_the_chosen_set_is_testable(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json", rows=rows)
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo), rows=rows)
 
     code, _, err = _run(capsys, *_arguments(power=power, register_untestable=True))
 
@@ -727,24 +810,30 @@ def test_a_missing_or_malformed_power_report_is_refused(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
+    step0 = _committed_step_zero(repo)
     missing = tmp_path / "missing.json"
     not_json = tmp_path / "not-json.json"
     not_json.write_text("{", encoding="utf-8")
-    wrong_schema = _power_report(tmp_path / "schema.json", schema="openalpha-other/v1")
+    wrong_schema = _power_report(tmp_path / "schema.json", step0=step0, schema="openalpha-other/v1")
     rows_not_a_mapping = tmp_path / "rows-list.json"
     rows_not_a_mapping.write_text(
         json.dumps({"schema": "openalpha-p7-c-power/v1", "rows": []}), encoding="utf-8"
     )
-    missing_census = _power_report(tmp_path / "census.json", rows={"n300": _row()})
+    missing_census = _power_report(tmp_path / "census.json", step0=step0, rows={"n300": _row()})
     bad_verdict = _power_report(
-        tmp_path / "verdict.json", rows={"n300": _row(verdict="maybe"), "census": _census_row()}
+        tmp_path / "verdict.json",
+        step0=step0,
+        rows={"n300": _row(verdict="maybe"), "census": _census_row()},
     )
     bad_count = _power_report(
         tmp_path / "count.json",
+        step0=step0,
         rows={"n300": _row(measurable_sessions="seventy"), "census": _census_row()},
     )
     bad_mean = _power_report(
-        tmp_path / "mean.json", rows={"n300": _row(detectable_mean="low"), "census": _census_row()}
+        tmp_path / "mean.json",
+        step0=step0,
+        rows={"n300": _row(detectable_mean="low"), "census": _census_row()},
     )
 
     for path in (
@@ -771,7 +860,7 @@ def test_refuses_an_unverified_deepseek_endpoint(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo, verified=False)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
     code, _, err = _run(capsys, *_arguments(power=power))
 
@@ -791,7 +880,7 @@ def test_refuses_a_salt_tied_to_the_step_zero_seed(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
     code, _, err = _run(capsys, *_arguments(power=power, salt=salt))
 
@@ -803,10 +892,9 @@ def test_refuses_a_salt_tied_to_the_step_zero_seed(
 def test_refuses_a_step_zero_registration_that_is_absent_uncommitted_or_edited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    power = _power_report(tmp_path / "p7-c-power.json")
-
     absent = _repository(tmp_path / "absent")
     _pin_world(monkeypatch, absent)
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(absent))
     code, _, err = _run(capsys, *_arguments(power=power, step0="docs/research/not-there.json"))
     assert code == 2
     assert "not-there.json" in err
@@ -836,7 +924,7 @@ def test_refuses_a_step_zero_registration_of_another_kind(
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
     other = _commit_another_kind(repo)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
     code, _, err = _run(capsys, *_arguments(power=power, step0=other))
 
@@ -845,15 +933,32 @@ def test_refuses_a_step_zero_registration_of_another_kind(
     assert not (repo / C_REGISTRATION).exists()
 
 
+def test_a_future_weekday_anchor_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F3: C's first forward session is strictly after the registration commit, so a future
+    weekday is the ordinary case, not a refusal."""
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
+    future = date(2026, 11, 13)  # a Friday, the session after today
+
+    code, _, err = _run(capsys, *_arguments(power=power, anchor=future))
+
+    assert code == 0, err
+    anchor = _written(repo)["settings"][evaluation.AGENT_FORWARD_ANCHOR_KEY]
+    assert anchor["session"] == future.isoformat()
+
+
 @pytest.mark.parametrize(
     ("anchor", "reason"),
     [
-        (date(2026, 11, 13), "future"),
-        (date(2026, 11, 14), "weekday"),
-        (date(2026, 10, 1), "16"),
+        (date(2026, 11, 11), "before today"),  # yesterday
+        (date(2026, 11, 14), "weekday"),  # Saturday
+        (date(2026, 10, 27), "before today"),  # 16 days ago, the old lookback's edge
     ],
 )
-def test_refuses_an_anchor_that_is_a_weekend_in_the_future_or_too_old(
+def test_refuses_an_anchor_before_today_or_on_a_weekend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -862,12 +967,13 @@ def test_refuses_an_anchor_that_is_a_weekend_in_the_future_or_too_old(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
     code, _, err = _run(capsys, *_arguments(power=power, anchor=anchor))
 
     assert code == 2
     assert reason in err
+    assert "16-day" not in err
     assert not (repo / C_REGISTRATION).exists()
 
 
@@ -876,7 +982,7 @@ def test_refuses_a_path_outside_docs_research(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
     outside = _run(capsys, *_arguments(power=power, path="docs/p7-c-registration.json"))
     suffix = _run(capsys, *_arguments(power=power, path="docs/research/p7-c-registration.txt"))
@@ -896,7 +1002,7 @@ def test_refuses_an_existing_path_with_other_content(
     _pin_world(monkeypatch, repo)
     (repo / C_REGISTRATION).parent.mkdir(parents=True, exist_ok=True)
     (repo / C_REGISTRATION).write_text("{}\n", encoding="utf-8")
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
     code, _, err = _run(capsys, *_arguments(power=power))
 
@@ -907,7 +1013,12 @@ def test_refuses_an_existing_path_with_other_content(
 
 @pytest.mark.parametrize(
     "changed",
-    ["src/openalpha_cn/strategy.py", "scripts/agent_evening.py", "scripts/agent_report.py"],
+    [
+        "src/openalpha_cn/strategy.py",
+        "scripts/agent_evening.py",
+        "scripts/agent_report.py",
+        "docs/research/p7-c-protocol.md",
+    ],
 )
 def test_refuses_a_dirty_bound_tree(
     tmp_path: Path,
@@ -918,7 +1029,7 @@ def test_refuses_a_dirty_bound_tree(
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
     (repo / changed).write_text("RULES = 2\n", encoding="utf-8")
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
     code, _, err = _run(capsys, *_arguments(power=power))
 
@@ -927,12 +1038,190 @@ def test_refuses_a_dirty_bound_tree(
     assert not (repo / C_REGISTRATION).exists()
 
 
+# --- F7: the protocol document the registration freezes ----------------------------------------
+
+
+def test_refuses_an_uncommitted_protocol_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path, protocol=False)
+    _pin_world(monkeypatch, repo)
+    (repo / PROTOCOL_DOCUMENT).parent.mkdir(parents=True, exist_ok=True)
+    (repo / PROTOCOL_DOCUMENT).write_text(PROTOCOL_TEXT, encoding="utf-8")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
+
+    code, _, err = _run(capsys, *_arguments(power=power))
+
+    assert code == 2
+    assert "protocol" in err
+    assert not (repo / C_REGISTRATION).exists()
+
+
+def test_refuses_a_dirty_protocol_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    with (repo / PROTOCOL_DOCUMENT).open("a", encoding="utf-8") as handle:
+        handle.write("edited after the commit\n")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
+
+    code, _, err = _run(capsys, *_arguments(power=power))
+
+    assert code == 2
+    assert "protocol" in err
+    assert not (repo / C_REGISTRATION).exists()
+
+
+# --- F5: the D1 report must be this Step 0 registration's, under the adopted plan --------------
+
+
+def test_refuses_a_power_report_that_does_not_name_this_step_zero_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    step0 = _committed_step_zero(repo)
+    source = _source(step0)
+    documents: dict[str, object] = {
+        "null": None,
+        "empty": {},
+        "sha": {**source, "registration_sha256": "0" * 64},
+        "config": {**source, "config_id": "0" * 64},
+        "path": {**source, "step0_registration": "docs/research/another-registration.json"},
+        "no-code-commit": {key: value for key, value in source.items() if key != "code_commit"},
+    }
+
+    for label, source_document in documents.items():
+        power = _power_report(
+            tmp_path / f"power-source-{label}.json", step0=step0, source=source_document
+        )
+        code, _, err = _run(capsys, *_arguments(power=power))
+        assert code == 2, (label, err)
+        assert "source" in err.lower(), (label, err)
+        assert not (repo / C_REGISTRATION).exists()
+
+
+@pytest.mark.parametrize(
+    "planning_change",
+    [
+        {"window_sessions": 60},
+        {"min_scored_names": 5},
+        {"min_measurable_sessions": 30},
+        {"test_level": 0.10},
+        {"target_power": 0.9},
+        {"detectable_mean_threshold": 0.05},
+        {"min_observed_sessions": 10},
+    ],
+)
+def test_refuses_a_power_report_that_does_not_use_the_adopted_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    planning_change: dict[str, Any],
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    power = _power_report(
+        tmp_path / "p7-c-power.json",
+        step0=_committed_step_zero(repo),
+        planning=_planning(**planning_change),
+    )
+
+    code, _, err = _run(capsys, *_arguments(power=power))
+
+    assert code == 2
+    assert "planning" in err.lower()
+    assert not (repo / C_REGISTRATION).exists()
+
+
+@pytest.mark.parametrize("missing", ["planning", "sd_between", "abstention_rate"])
+def test_refuses_a_power_report_without_the_planning_block_or_its_dispersion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    missing: str,
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
+    document = json.loads(power.read_text(encoding="utf-8"))
+    if missing == "planning":
+        document.pop("planning")
+    else:
+        document["planning"].pop(missing)
+    power.write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+    code, _, err = _run(capsys, *_arguments(power=power))
+
+    assert code == 2
+    assert "planning" in err.lower()
+    assert not (repo / C_REGISTRATION).exists()
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _row(verdict="not_testable"),
+        _row(detectable_mean=0.03),
+        _row(observed_sessions=5),
+        _row(measurable_sessions=30),
+        _row(detectable_mean=None),
+        _row(detectable_mean=0.015, verdict="not_testable"),
+    ],
+)
+def test_refuses_a_power_row_whose_verdict_its_own_fields_do_not_support(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    row: dict[str, Any],
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    power = _power_report(
+        tmp_path / "p7-c-power.json",
+        step0=_committed_step_zero(repo),
+        rows={"n300": row, "census": _census_row()},
+    )
+
+    code, _, err = _run(capsys, *_arguments(power=power))
+
+    assert code == 2
+    assert "row" in err.lower()
+    assert not (repo / C_REGISTRATION).exists()
+
+
+def test_refuses_a_power_row_outside_the_frozen_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    rows = [
+        _row(detectable_threshold=0.05),
+        _row(reason=3),
+        _row(sd="wide"),
+        _row(periods=-1),
+        _row(sample="n400"),
+    ]
+
+    for index, row in enumerate(rows):
+        power = _power_report(
+            tmp_path / f"p7-c-power-row-{index}.json",
+            step0=_committed_step_zero(repo),
+            rows={"n300": row, "census": _census_row()},
+        )
+        code, _, err = _run(capsys, *_arguments(power=power))
+        assert code == 2, index
+        assert "row" in err.lower(), (index, err)
+        assert not (repo / C_REGISTRATION).exists()
+
+
 def test_a_digest_mismatch_removes_the_file_it_just_wrote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
     monkeypatch.setattr(register, "_document", lambda *arguments, **keywords: b"{}\n")
 
     code, _, err = _run(capsys, *_arguments(power=power))
@@ -948,7 +1237,7 @@ def test_another_registration_error_is_its_own_refusal(
 ) -> None:
     repo = _repository(tmp_path)
     _pin_world(monkeypatch, repo)
-    power = _power_report(tmp_path / "p7-c-power.json")
+    power = _power_report(tmp_path / "p7-c-power.json", step0=_committed_step_zero(repo))
 
     def refuse(*arguments: Any, **keywords: Any) -> str:
         raise registry.RegistrationError("the registry said no")
@@ -1036,7 +1325,11 @@ def test_c_read_back_accepts_the_body(tmp_path: Path) -> None:
     repo = _repository(tmp_path)
     step0 = _committed_step_zero(repo)
     config, criteria, settings = register.c_registration_body(
-        salt=SALT, step0_registration=step0, power=_power(), anchor=VALID_ANCHOR
+        salt=SALT,
+        step0_registration=step0,
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_committed_protocol_document(repo),
     )
 
     assert (
@@ -1058,7 +1351,11 @@ def test_c_read_back_refuses_a_step0_block_that_names_a_different_registration(
     repo = _repository(tmp_path)
     step0 = _committed_step_zero(repo)
     config, criteria, settings = register.c_registration_body(
-        salt=SALT, step0_registration=step0, power=_power(), anchor=VALID_ANCHOR
+        salt=SALT,
+        step0_registration=step0,
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_committed_protocol_document(repo),
     )
     settings[evaluation.AGENT_FORWARD_STEP0_KEY] = _step0_block(config_id="0" * 64)
 
@@ -1077,7 +1374,11 @@ def test_c_read_back_refuses_a_salt_tied_to_the_step_zero_seed(tmp_path: Path) -
     repo = _repository(tmp_path)
     step0 = _committed_step_zero(repo)
     config, criteria, settings = register.c_registration_body(
-        salt="2026-09-26", step0_registration=step0, power=_power(), anchor=VALID_ANCHOR
+        salt="2026-09-26",
+        step0_registration=step0,
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_committed_protocol_document(repo),
     )
 
     with pytest.raises(register.SaltRefusedError):
@@ -1095,7 +1396,11 @@ def test_c_read_back_refuses_criteria_that_claim_a_verdict(tmp_path: Path) -> No
     repo = _repository(tmp_path)
     step0 = _committed_step_zero(repo)
     config, criteria, settings = register.c_registration_body(
-        salt=SALT, step0_registration=step0, power=_power(), anchor=VALID_ANCHOR
+        salt=SALT,
+        step0_registration=step0,
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_committed_protocol_document(repo),
     )
     criteria["wording"] = "已验证"
 
@@ -1120,6 +1425,7 @@ def test_c_read_back_refuses_a_primary_size_that_does_not_match_the_power_decisi
         step0_registration=step0,
         power=_power(sample="census", measurable_sessions=118, detectable_mean=0.02),
         anchor=VALID_ANCHOR,
+        protocol_document=_committed_protocol_document(repo),
     )
     config["primary_size"] = register.PRIMARY_SIZE
 
@@ -1132,3 +1438,107 @@ def test_c_read_back_refuses_a_primary_size_that_does_not_match_the_power_decisi
             step0_registration=step0,
             repo=repo,
         )
+
+
+def test_c_read_back_refuses_a_mismatched_protocol_document(tmp_path: Path) -> None:
+    """F7: the read-back re-checks the block against the committed protocol bytes."""
+    repo = _repository(tmp_path)
+    step0 = _committed_step_zero(repo)
+    config, criteria, settings = register.c_registration_body(
+        salt=SALT,
+        step0_registration=step0,
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_committed_protocol_document(repo),
+    )
+    settings[evaluation.AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY] = {**PROTOCOL_DOCUMENT_BLOCK}
+
+    with pytest.raises(register.ProtocolDocumentRefusedError):
+        register.c_read_back(
+            config,
+            criteria,
+            settings,
+            code_commit=research_repo.head(repo),
+            step0_registration=step0,
+            repo=repo,
+        )
+
+
+def test_c_read_back_refuses_a_dirty_protocol_document(tmp_path: Path) -> None:
+    repo = _repository(tmp_path)
+    step0 = _committed_step_zero(repo)
+    config, criteria, settings = register.c_registration_body(
+        salt=SALT,
+        step0_registration=step0,
+        power=_power(),
+        anchor=VALID_ANCHOR,
+        protocol_document=_committed_protocol_document(repo),
+    )
+    with (repo / PROTOCOL_DOCUMENT).open("a", encoding="utf-8") as handle:
+        handle.write("edited after the commit\n")
+
+    with pytest.raises(register.ProtocolDocumentRefusedError):
+        register.c_read_back(
+            config,
+            criteria,
+            settings,
+            code_commit=research_repo.head(repo),
+            step0_registration=step0,
+            repo=repo,
+        )
+
+
+def test_accepts_a_power_report_whose_source_path_is_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The power command records the Step 0 path it was given; an absolute path is that file."""
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    step0 = _committed_step_zero(repo)
+    source = {**_source(step0), "step0_registration": str((repo / STEP0).resolve())}
+    power_report = _power_report(tmp_path / "p7-c-power.json", step0=step0, source=source)
+
+    code, _, err = _run(capsys, *_arguments(power=power_report))
+
+    assert code == 0, err
+    assert (repo / C_REGISTRATION).is_file()
+
+
+def test_the_frozen_power_calculators_own_report_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Cross-track: the D1 document `scripts/p7_c_power.py` writes is the one the writer reads.
+
+    Five observed sessions cannot project the window (F4's minimum-observed floor), so both rows
+    are `not_testable` with `too_few_observed_sessions`; the D1 branch is then the user's
+    `--register-untestable`. The row fields, the planning block and the source are the frozen
+    cross-track schema, supplied by the power calculator itself rather than hand-built here.
+    """
+    repo = _repository(tmp_path)
+    _pin_world(monkeypatch, repo)
+    step0 = _committed_step_zero(repo)
+    document = power.power_report(
+        tuple(
+            power.SessionCount(session=date(2026, 1, day), survivors=2000, event_names=400)
+            for day in (5, 6, 7, 8, 9)
+        ),
+        first=date(2026, 1, 5),
+        last=date(2026, 1, 9),
+        source=_source(step0),
+    )
+    path = tmp_path / "p7-c-power.json"
+    path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+    refused, _, err = _run(capsys, *_arguments(power=path))
+    assert refused == 2
+    assert "not_testable" in err
+
+    code, _, err = _run(capsys, *_arguments(power=path, register_untestable=True))
+    assert code == 0, err
+    block = _written(repo)["settings"][evaluation.AGENT_FORWARD_POWER_KEY]
+    assert block["sample"] == "n300"
+    assert block["verdict"] == "not_testable"
+    assert block["register_untestable"] is True
+    assert block["measurable_sessions"] == 0
+    assert block["detectable_mean"] is None
+    assert block["report_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()

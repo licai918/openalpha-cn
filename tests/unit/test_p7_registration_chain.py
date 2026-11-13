@@ -8,6 +8,7 @@ the set is empty, and an empty set is one rooted chain; the loop below never ass
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -42,6 +43,7 @@ from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
     ADOPTED_WINDOW_SESSIONS,
     read_agent_forward_anchor,
     read_agent_forward_power,
+    read_agent_forward_protocol_document,
     read_agent_forward_step0,
     read_agent_protocol,
 )
@@ -126,6 +128,22 @@ def _git(repo: Path, *arguments: str) -> str:
     )
     assert finished.returncode == 0, finished.stderr
     return finished.stdout.strip()
+
+
+def _git_bytes(repo: Path, *arguments: str) -> bytes:
+    """git in `repo`, hermetic, with stdout left as the bytes `sha256` is taken over."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment |= {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    finished = subprocess.run(
+        ["git", *GIT, *arguments],
+        cwd=repo,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+    )
+    assert finished.returncode == 0, finished.stderr.decode(errors="replace")
+    return finished.stdout
 
 
 def _registration(**keywords: Any) -> dict[str, Any]:
@@ -251,3 +269,17 @@ def test_the_real_c_registrations_power_block_agrees_with_the_body() -> None:
     if power.sample == "census":
         assert power.verdict == "testable"
         assert power.register_untestable is False
+
+
+PROTOCOL_DOCUMENT: Final[str] = "docs/research/p7-c-protocol.md"
+
+
+def test_the_real_c_registration_freezes_the_committed_protocol_document() -> None:
+    """F7: the registration names the committed protocol text by path and sha256."""
+    settings = _real_c_registration()["settings"]
+
+    block = read_agent_forward_protocol_document(settings)
+    assert block.path == PROTOCOL_DOCUMENT
+    committed = _git_bytes(ROOT, "show", f"HEAD:{PROTOCOL_DOCUMENT}")
+    assert block.sha256 == hashlib.sha256(committed).hexdigest()
+    assert (ROOT / PROTOCOL_DOCUMENT).read_bytes() == committed
