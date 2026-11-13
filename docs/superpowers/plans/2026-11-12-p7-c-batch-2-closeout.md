@@ -224,3 +224,11 @@
 - `ruff check .` 全部通过；`ruff format --check .` 701 文件；`mypy --cache-dir=/dev/null src scripts` 213 文件无问题；`PYTHONPATH=src lint-imports` 10 kept / 0 broken；`python scripts/build_feature_coverage.py --check` exit 0（240 项、真实完成 235）。
 - 台账行 `OA-AGENT-011`（N1/N4）与 `OA-OPS-052`（N3）的正文与备注同步更新；探针模板加了提前停止、`stopped:` 行与退出码 3。没有新增测试文件（都加在既有文件里），所以 features.csv 的测试文件计数不变。
 - **本轮没有任何网络请求**：全部模型/数据交换都由脚本化传输提供，`main` 测试都 monkeypatch `_default_transport`；没有运行 `--live`，没有构造真实传输。
+
+### 8.3 复审通过后的 G 注记（不阻塞，已关闭）
+
+修复轮 2 的只读验收给出 PASS，另有三条不阻塞的注记；三条都在本轮末尾关闭（代码提交 `4a8984d` 与随后记录本节的文档提交）：
+
+- **N4 空覆盖集**：`_llm_batches_filed` 原先要求两个评分集都在，但覆盖集为空是受支持的状态（只 file 主集批次，记 `coverage_absent: "empty_set"`），所以这种崩溃重跑仍会索要凭据。现在谓词接收「当天应 file 的评分集」（主集，加上覆盖集非空时的覆盖集），只按这些集合判断。测试 `test_an_empty_coverage_set_day_still_replays_without_a_credential`（红：旧实现 journal 成 `no_record`；绿：退出 0、`llm_family.status == "filed"`、`coverage_absent == "empty_set"`、记录不变）。
+- **N4 外来登记**：谓词原先不看登记，别的登记在同一会话的 LLM 批次会被当成 C 的一天，把从未 file 的一天推进 replay，然后第 5 步按名拒绝缺交换。现在要求存下来的声明里的 `registration_sha256` 等于 C 自己的摘要。测试 `test_a_foreign_registrations_llm_batches_do_not_count_as_filed`（红：旧实现以 `ModelExchangeNotStoredError` 拒绝、没有日志；绿：退出 0、`llm_family.status == "no_record"`、`reason == "credential_missing"`，没有第 5 步拒绝）。
+- **台账陈句**：`OA-AGENT-011` 里「把引擎的 `NO_AGENT_WAS_ROUTED` 映射成 `agent_not_routed`」与 N1 之后的行为矛盾（聚合不再被读）；改为「引擎没有路由出任何 agent 结果的名字是 `agent_not_routed`」，并补上两条边界测试与本轮说明。
