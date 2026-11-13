@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+import research_repo
 from panel_fixtures import (
     LIMIT_STREAK_FIRST_SESSION_INDEX,
     LIMIT_STREAK_SECURITY_INDEX,
@@ -2423,36 +2424,37 @@ def test_the_anchor_check_refuses_a_missing_step0_panel_without_creating_it(
 
 
 def _git_at(repository: Path, *arguments: str, at: datetime) -> str:
-    """Run a git command with pinned author/committer dates (the admission reads `%cI`)."""
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    environment |= {
-        "GIT_AUTHOR_NAME": "test",
-        "GIT_AUTHOR_EMAIL": "test@example.invalid",
-        "GIT_COMMITTER_NAME": "test",
-        "GIT_COMMITTER_EMAIL": "test@example.invalid",
-        "GIT_AUTHOR_DATE": at.isoformat(),
-        "GIT_COMMITTER_DATE": at.isoformat(),
-    }
-    finished = subprocess.run(
-        ["git", *arguments],
-        cwd=repository,
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return finished.stdout.strip()
+    """Run git on `repository` with pinned dates through the suite's hermetic helper (N5).
+
+    `research_repo.git` drops every inherited `GIT_*` variable, pins `GIT_CONFIG_NOSYSTEM=1` and
+    `GIT_CONFIG_GLOBAL=os.devnull`, and fixes the author/committer identity; this wrapper adds the
+    fixed `-c user.name`/`-c user.email` and always passes `-C <repository>`.
+    """
+    return research_repo.git(
+        repository,
+        "-C",
+        str(repository),
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        *arguments,
+        at=at,
+    ).strip()
 
 
 def _git_unpinned(repository: Path, *arguments: str) -> str:
-    finished = subprocess.run(
-        ["git", *arguments],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return finished.stdout.strip()
+    """The hermetic, unpinned-date form of `_git_at` (N5): same env and `-C repository`."""
+    return research_repo.git(
+        repository,
+        "-C",
+        str(repository),
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        *arguments,
+    ).strip()
 
 
 def _copy_bound_code(repository: Path) -> None:
@@ -2462,6 +2464,45 @@ def _copy_bound_code(repository: Path) -> None:
         shutil.copytree(ROOT / name, repository / name, ignore=ignore)
     for name in ("pyproject.toml", "uv.lock"):
         shutil.copy2(ROOT / name, repository / name)
+
+
+def test_the_real_admission_git_helpers_are_hermetic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N5: the subprocess test's git helpers must not honour an inherited git environment.
+
+    They run `git` on a throwaway repository; an inherited `GIT_DIR` would act on the outer
+    repository (the incident class that once set `core.bare=true` on the shared repo), and an
+    inherited global config could sign or hook the commit. The helpers drop every `GIT_*`
+    variable, pin `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`, and pass `-C` to the
+    throwaway repository.
+    """
+    repository = tmp_path / "hermetic"
+    repository.mkdir()
+    (repository / "file.txt").write_text("content\n", encoding="utf-8")
+    hostile_global = tmp_path / "hostile.gitconfig"
+    hostile_global.write_text("[commit]\n\tgpgsign = true\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "hostile-outer-repo"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile_global))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "0")
+
+    _git_unpinned(repository, "init", "-q", "--template=")
+    _git_unpinned(repository, "add", "file.txt")
+    _git_at(
+        repository,
+        "commit",
+        "-q",
+        "-m",
+        "pinned",
+        at=datetime(2026, 1, 5, 9, 0, tzinfo=SHANGHAI),
+    )
+
+    assert (
+        _git_unpinned(repository, "-C", str(repository), "rev-parse", "--is-inside-work-tree")
+        == "true"
+    )
+    assert _git_unpinned(repository, "rev-parse", "--is-inside-work-tree") == "true"
 
 
 def test_the_real_admission_derives_the_anchor_from_the_committed_registration(
@@ -2493,10 +2534,6 @@ def test_the_real_admission_derives_the_anchor_from_the_committed_registration(
     _git_unpinned(repository, "add", "-A")
     _git_at(
         repository,
-        "-c",
-        "user.name=test",
-        "-c",
-        "user.email=test@example.invalid",
         "commit",
         "-q",
         "-m",
@@ -2538,10 +2575,6 @@ def test_the_real_admission_derives_the_anchor_from_the_committed_registration(
     _git_unpinned(repository, "add", "docs/research")
     _git_at(
         repository,
-        "-c",
-        "user.name=test",
-        "-c",
-        "user.email=test@example.invalid",
         "commit",
         "-q",
         "-m",
@@ -2573,7 +2606,7 @@ def test_the_real_admission_derives_the_anchor_from_the_committed_registration(
         "import agent_evening as agent\n"
         "class Refusing:\n"
         "    calls = 0\n"
-        "    def post(self, *args, **kwargs):\n"
+        "    def post_json(self, *args, **kwargs):\n"
         "        raise AssertionError('the evening must send no request')\n"
         f"code = agent.main({arguments!r}, clock=lambda: datetime.datetime.fromisoformat("
         f"{evening.isoformat()!r}), transport=Refusing())\n"
