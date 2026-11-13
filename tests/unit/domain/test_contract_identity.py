@@ -775,6 +775,12 @@ DECLARED_CONTENT_ADDRESS_MINTS: Final[dict[str, str]] = {
         "not an address at all: `part-<24 hex>.parquet` is a file name, and no prefix "
         "`CONTENT_ADDRESS_PATTERN` admits can be spelled with the `-` it uses"
     ),
+    "strategy_agent_forward.py::agent_run_id": (
+        "`agent-<date>-<code>-<16 hex>`: one research cycle's run id, the identity a rerun "
+        "recomputes and the key a stored run manifest is found by; the four fields are canonical "
+        "JSON (the one spelling) and the digest is truncated because the readable prefix carries "
+        "the session and the security (V2-P7-013)"
+    ),
 }
 
 """Every function under `src/` that narrows a digest, and what each one addresses.
@@ -884,6 +890,10 @@ DECLARED_PLAIN_DIGESTS: Final[dict[str, str]] = {
     "models/recording.py::exchange_response_digest": (
         "the whole 64 hex of one decoded model response, stored beside the exchange and "
         "re-derived on read; never prefixed, never truncated (V2-P7-012)"
+    ),
+    "domain/agent_forward.py::primary_sample": (
+        "the whole 64 hex of `salt|session|ts_code`, used only to order the survivors into the "
+        "registered draw; compared to nothing, stored nowhere and never an id (V2-P7-013, D2)"
     ),
 }
 """Every function under `src/` that hashes and does **not** narrow the result.

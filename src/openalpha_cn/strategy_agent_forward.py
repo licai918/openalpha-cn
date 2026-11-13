@@ -59,6 +59,7 @@ with an empty provenance.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -149,9 +150,26 @@ def agent_run_id(*, config_id: str, session: date, family: str, ts_code: str) ->
     the security is in the key and the scoring set is not, so primary and coverage share the one
     cycle that scored the name -- which is what makes the two records' overlapping names
     comparable and keeps `--no-llm` runs byte-identical.
+
+    The address is minted with the repository's one canonicalisation -- `json.dumps` with
+    sorted keys, fixed separators, `ensure_ascii=False` and `allow_nan=False`, the spelling
+    `domain/_identity.py`'s audit (`V2-P4-037`/`V2-P4-106`) requires of every mint -- then
+    truncated to 16 hex behind the readable `agent-<date>-<code>-` prefix. The audit's
+    `DECLARED_CONTENT_ADDRESS_MINTS` names this site and why it exists.
     """
-    payload = f"{config_id}|{session.isoformat()}|{family}|{ts_code}"
-    digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    payload = json.dumps(
+        {
+            "config_id": config_id,
+            "session": session.isoformat(),
+            "family": family,
+            "ts_code": ts_code,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+    digest = hashlib.sha256(payload).hexdigest()[:16]
     return f"agent-{session:%Y%m%d}-{ts_code}-{digest}"
 
 
