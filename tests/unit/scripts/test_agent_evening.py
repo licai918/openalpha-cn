@@ -22,7 +22,9 @@ import dataclasses
 import hashlib
 import importlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
@@ -2418,6 +2420,192 @@ def test_the_anchor_check_refuses_a_missing_step0_panel_without_creating_it(
     assert transport.calls == 0
     assert not (missing / "panel").exists(), "the refusal must not create the panel directory"
     assert not world.runtime.exists()
+
+
+def _git_at(repository: Path, *arguments: str, at: datetime) -> str:
+    """Run a git command with pinned author/committer dates (the admission reads `%cI`)."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment |= {
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        "GIT_AUTHOR_DATE": at.isoformat(),
+        "GIT_COMMITTER_DATE": at.isoformat(),
+    }
+    finished = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return finished.stdout.strip()
+
+
+def _git_unpinned(repository: Path, *arguments: str) -> str:
+    finished = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return finished.stdout.strip()
+
+
+def _copy_bound_code(repository: Path) -> None:
+    """The code the registration binds, copied into the throwaway repository (rule 6: generated)."""
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache")
+    for name in ("src", "scripts"):
+        shutil.copytree(ROOT / name, repository / name, ignore=ignore)
+    for name in ("pyproject.toml", "uv.lock"):
+        shutil.copy2(ROOT / name, repository / name)
+
+
+def test_the_real_admission_derives_the_anchor_from_the_committed_registration(
+    tmp_path: Path,
+) -> None:
+    """The real `_admit` wiring (review-batch3-3 coverage note), not a monkeypatched seam.
+
+    `admit_registered_code` requires the registration committed in a repository whose bound code
+    is the registration's `code_commit`, and the running package/scripts imported from that
+    repository. That cannot hold in the test process (the package is imported from this worktree),
+    so the test builds a throwaway repository from the worktree's `src`/`scripts` and runs the
+    real `agent_evening` in a child process with `PYTHONPATH` pointing at the copy. The registered
+    anchor is the anchor session itself, but the registration commit lands at 16:31 on that
+    session: the first trading session after the commit is the next one, so real step 1 must
+    refuse by name with no model request and no write.
+    """
+    panel = _on_sse(generate_limit_streak_panel())
+    step0 = tmp_path / "step0"
+    write_generated_panel(PanelStore(step0 / "panel"), panel)
+    session = panel.sessions[LIMIT_STREAK_FIRST_SESSION_INDEX + 1]
+    expected = panel.sessions[LIMIT_STREAK_FIRST_SESSION_INDEX + 2]
+    evening = datetime.combine(session, time(18, 30), tzinfo=SHANGHAI)
+    committed_at = datetime.combine(session, time(16, 31), tzinfo=SHANGHAI)
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    _git_unpinned(repository, "init", "-q", "--template=")
+    _copy_bound_code(repository)
+    _git_unpinned(repository, "add", "-A")
+    _git_at(
+        repository,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "code",
+        at=datetime.combine(session, time(9, 0), tzinfo=SHANGHAI),
+    )
+    code_commit = _git_unpinned(repository, "rev-parse", "HEAD")
+
+    step0_config = {
+        "kind": "survivor_book/v1",
+        "survivor_book": BOOK.model_dump(mode="json", exclude_computed_fields=True),
+        "adapter": ADAPTER,
+    }
+    registry.register(
+        step0_config,
+        {"note": "fixture"},
+        repository / "docs" / "research" / "p7-registration.json",
+        code_commit=code_commit,
+        settings={"random_seed": SEED},
+    )
+    c_config = {
+        "kind": "agent_forward/v1",
+        "salt": "c-real-admission-salt-2026",
+        "primary_size": C_PRIMARY_SIZE,
+    }
+    registry.register(
+        c_config,
+        {"note": "fixture"},
+        repository / "docs" / "research" / "p7-c-registration.json",
+        code_commit=code_commit,
+        settings={
+            "random_seed": C_SEED,
+            "agent_forward_anchor": {
+                "schema_version": "agent-forward-anchor/v1",
+                "session": session.isoformat(),
+            },
+        },
+    )
+    _git_unpinned(repository, "add", "docs/research")
+    _git_at(
+        repository,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "register",
+        at=committed_at,
+    )
+
+    runtime = tmp_path / "runtime"
+    before = _files(step0, skip_panel_locks=True)
+    arguments = [
+        "--runtime-dir",
+        str(runtime),
+        "--step0-runtime-dir",
+        str(step0),
+        "--step0-registration",
+        "docs/research/p7-registration.json",
+        "--registration",
+        "docs/research/p7-c-registration.json",
+        "--repo",
+        str(repository),
+        "--as-of",
+        evening.isoformat(),
+    ]
+    snippet = (
+        "import datetime\n"
+        "import sys\n"
+        f"sys.path.insert(0, {str(repository / 'scripts')!r})\n"
+        f"sys.path.insert(0, {str(repository / 'scripts' / 'research')!r})\n"
+        "import agent_evening as agent\n"
+        "class Refusing:\n"
+        "    calls = 0\n"
+        "    def post(self, *args, **kwargs):\n"
+        "        raise AssertionError('the evening must send no request')\n"
+        f"code = agent.main({arguments!r}, clock=lambda: datetime.datetime.fromisoformat("
+        f"{evening.isoformat()!r}), transport=Refusing())\n"
+        "print('EXIT', code)\n"
+    )
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"PYTHONPATH", "PYTHONHOME", "DEEPSEEK_API_KEY", "NO_COLOR"}
+    }
+    environment |= {
+        "PYTHONPATH": str(repository / "src"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    finished = subprocess.run(
+        [sys.executable, "-c", snippet],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=240,
+        check=False,
+    )
+
+    assert finished.returncode == 0, finished.stderr
+    assert "EXIT 2" in finished.stdout, (finished.stdout, finished.stderr)
+    assert "step 1 (registration) failed" in finished.stderr
+    assert session.isoformat() in finished.stderr, "the registered anchor is named"
+    assert expected.isoformat() in finished.stderr, "the expected session is named"
+    assert committed_at.isoformat() in finished.stderr, "the commit instant is named"
+    assert not runtime.exists(), "a step-1 refusal writes nothing"
+    assert _files(step0, skip_panel_locks=True) == before
 
 
 def test_the_registered_evening_refuses_a_dry_week_marked_runtime(
