@@ -39,6 +39,7 @@ from panel_fixtures import (
 )
 
 from openalpha_cn.domain.agent_forward import (
+    ABSTAIN_ALL_ABSTAINED,
     ABSTAIN_INVALID_OUTPUT,
     ABSTAIN_NOT_ROUTED,
     AGENT_LLM_FAMILY,
@@ -669,8 +670,85 @@ class ScriptedModel:
         }
 
 
+class FrameModel:
+    """A model transport that answers every request with one scripted `SignalFrame` (N1).
+
+    `subject` and `as_of` are read from the request, because the agent refuses a frame that
+    disagrees with its context; everything else is the test's. `cite_evidence` decides whether
+    the answer repeats the evidence IDs it was handed -- an abstention is allowed to cite the
+    facts it read, and the prompt cannot stop a model from doing so.
+    """
+
+    def __init__(
+        self,
+        *,
+        direction: str,
+        strength: float,
+        cite_evidence: bool = True,
+    ) -> None:
+        self.direction = direction
+        self.strength = strength
+        self.cite_evidence = cite_evidence
+        self.requests: list[dict[str, Any]] = []
+
+    @property
+    def calls(self) -> int:
+        return len(self.requests)
+
+    def post_json(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        self.requests.append(payload)
+        user = json.loads(payload["messages"][1]["content"])
+        signal: dict[str, Any] = {
+            "subject": user["subject"],
+            "as_of": user["as_of"],
+            "direction": self.direction,
+            "strength": self.strength,
+            "confidence": 0.5,
+            "horizon": "5d",
+            "evidence_ids": (
+                [item["evidence_id"] for item in user["evidence"]] if self.cite_evidence else []
+            ),
+            "confirmation_conditions": [],
+            "invalidation_conditions": [],
+            "risk_flags": [],
+        }
+        if self.direction == "abstain":
+            signal["strength"] = 0.0
+            signal["abstention_reason"] = "the scripted model declined to take a direction"
+        return {
+            "id": f"req-{len(self.requests)}",
+            "model": "deepseek-flash",
+            "system_fingerprint": "fp-c-test",
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps({"signal": signal, "rationale": "the scripted frame"})
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+        }
+
+
 def _journal(world: World) -> dict[str, Any]:
     return json.loads(world.journal_path().read_text(encoding="utf-8"))
+
+
+def _llm_predictions(world: World, ts_code: str) -> list[Prediction]:
+    """Every stored LLM prediction for one name, across both scoring sets."""
+    return [
+        prediction
+        for record in _records(world, AGENT_LLM_FAMILY)
+        for prediction in record.batch.predictions
+        if prediction.ts_code == ts_code
+    ]
 
 
 def _instant_retries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -877,6 +955,96 @@ def test_an_invalid_answer_after_retries_is_an_abstention_coded_model_invalid_ou
     assert {prediction.abstention for prediction in invalid} == {ABSTAIN_INVALID_OUTPUT}
 
 
+# --- the LLM score is the agent's own frame, not the engine's aggregate (N1) --------------------
+
+
+def test_an_abstention_that_cites_evidence_is_a_coded_abstention_never_a_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N1: declining to take a direction while citing the facts read is an abstention, not 0.0.
+
+    `SignalFrame` allows an abstaining frame to carry `evidence_ids`, and the prompt's "empty
+    evidence_ids" instruction cannot be enforced against a model. The engine's aggregate read
+    that frame as `neutral` with zero strength and stored a permanent numeric `0.0` -- the
+    abstention-as-zero D3 forbids, in a record that cannot be revised. The score must come from
+    the one agent's own frame: an abstention is `None` plus `agent_abstained`.
+    """
+    world = _world(tmp_path, monkeypatch)
+    model = FrameModel(direction="abstain", strength=0.0, cite_evidence=True)
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=model)
+
+    capsys.readouterr()
+    assert code == 0
+    assert model.calls == 1, "only the evidence-bearing subject is routed"
+    predictions = _llm_predictions(world, world.evidence_subject)
+    assert predictions, "the evidence subject must be filed by the model family"
+    assert {prediction.score for prediction in predictions} == {None}
+    assert {prediction.abstention for prediction in predictions} == {ABSTAIN_ALL_ABSTAINED}
+
+
+def test_a_weak_bullish_answer_keeps_its_own_strength_instead_of_the_engines_band(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N1: a directional answer with |strength| <= 0.15 is not collapsed to neutral 0.0.
+
+    The engine's aggregate applies a 0.15 neutral band, which is not C's scoring rule: the
+    family stores the signed strength the agent answered with. A bullish 0.1 is exactly 0.1,
+    not the zero that would read as "no opinion" and enter the statistic as a ranked value.
+    """
+    world = _world(tmp_path, monkeypatch)
+    model = FrameModel(direction="bullish", strength=0.1, cite_evidence=True)
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=model)
+
+    capsys.readouterr()
+    assert code == 0
+    predictions = _llm_predictions(world, world.evidence_subject)
+    assert predictions
+    assert {prediction.score for prediction in predictions} == {0.1}
+    assert {prediction.abstention for prediction in predictions} == {None}
+
+
+def test_an_abstention_without_evidence_is_abstained_and_an_unrouted_name_is_not_routed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N1: the two coded abstentions of the model family are still told apart.
+
+    An abstention the agent itself concluded (no evidence IDs cited) is `agent_abstained`; a
+    name the router dropped for want of evidence never runs an agent, so it is `agent_not_routed`.
+    Neither is a number.
+    """
+    world = _world(tmp_path, monkeypatch)
+    model = FrameModel(direction="abstain", strength=0.0, cite_evidence=False)
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=model)
+
+    capsys.readouterr()
+    assert code == 0
+    predictions = {
+        prediction.ts_code: prediction
+        for record in _records(world, AGENT_LLM_FAMILY)
+        for prediction in record.batch.predictions
+    }
+    abstained = predictions[world.evidence_subject]
+    assert abstained.score is None
+    assert abstained.abstention == ABSTAIN_ALL_ABSTAINED
+    others = [
+        prediction
+        for ts_code, prediction in predictions.items()
+        if ts_code != world.evidence_subject
+    ]
+    assert others, "the fixture must have a subject with no evidence to route"
+    assert {prediction.score for prediction in others} == {None}
+    assert {prediction.abstention for prediction in others} == {ABSTAIN_NOT_ROUTED}
+
+
 # --- the deadline and the cap are spent on HTTP requests only (F2/F8) ---------------------------
 
 
@@ -953,6 +1121,61 @@ def test_a_crash_after_filing_before_the_journal_is_finished_by_a_post_deadline_
     journal = _journal(world)
     assert journal["llm_family"]["status"] == "filed"
     assert {record.record_id for record in _records(world, AGENT_LLM_FAMILY)} == first_records
+
+
+def test_a_crash_after_filing_before_the_journal_replays_without_a_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """N4: a rerun that only has to read filed batches must not demand the credential.
+
+    Step 5 filed both LLM batches and the evening died before step 6 (F2). The rerun happens
+    without `DEEPSEEK_API_KEY`, for example from launchd with a different environment. Because
+    the session's batches are already in the prediction store the provider is assembled in
+    replay mode -- no key, no usage store -- so the day is finished from the stored exchanges.
+    The credential pre-check still fired on the current command, journalling `credential_missing`
+    while the store held the two records.
+    """
+    world = _world(tmp_path, monkeypatch)
+    live = ScriptedModel("valid")
+    real_write_journal = agent._write_journal
+
+    def crash_after_filing(path: Path, document: Any) -> str:
+        raise agent.StepFailedError("summary", "scripted crash after the batches were filed")
+
+    monkeypatch.setattr(agent, "_write_journal", crash_after_filing)
+    assert (
+        agent.main(world.arguments(), clock=lambda: world.evening, transport=live)
+        == agent.AgentEveningExit.refused
+    )
+    capsys.readouterr()
+    assert not world.journal_path().exists()
+    before = {
+        record.record_id: agent.batch_digest(record.batch)
+        for record in _records(world, AGENT_LLM_FAMILY)
+    }
+    assert len(before) == 2, "both LLM batches were filed before the crash"
+
+    monkeypatch.setattr(agent, "_write_journal", real_write_journal)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    replay = ScriptedModel()
+
+    code = agent.main(world.arguments(), clock=lambda: world.evening, transport=replay)
+
+    printed = capsys.readouterr().out
+    assert code == 0
+    assert replay.calls == 0, "replaying a filed day spends no request and needs no key"
+    journal = _journal(world)
+    assert journal["llm_family"]["status"] == "filed"
+    assert journal["llm_family"]["reason"] is None
+    after = {
+        record.record_id: agent.batch_digest(record.batch)
+        for record in _records(world, AGENT_LLM_FAMILY)
+    }
+    assert after == before, "the filed records must be unchanged, not re-filed"
+    assert "credential_missing" not in json.dumps(journal)
+    assert "credential_missing" not in printed
 
 
 def test_a_zero_request_cap_rerun_of_a_filed_day_replays_and_is_unchanged(

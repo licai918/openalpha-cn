@@ -26,14 +26,21 @@ command is where both are produced. It runs six steps, named by `AGENT_STEPS`:
 5. **llm family** -- skipped by `--no-llm` and journalled `no_record: llm_disabled`. Otherwise
    the **same engine as step 4** runs one `ResearchRunRequest` per name with
    `StructuredSignalAgent(prompt=V2, include_facts=True, evidence_families={"market_event"})`
-   and `max_attempts=2` over `llm_provider(DEEPSEEK_V4_1_FLASH, replay=False)`. The engine path
-   is what makes 015's `refuse_llm_agents_in_history` history/72-hour guard structural on the
-   only production model path and what stores a run manifest recording the model and prompt
-   versions. The provider's transport is a request budget applied **inside**
-   `RecordingJsonTransport`: the hard `--max-model-requests` cap (default 600) and the wall
-   `--deadline` (default 23:30 Shanghai) are spent only on requests that would reach the
-   endpoint, and every HTTP attempt -- a provider retry included -- is one request, while a
-   replayed answer costs none and is not deadline-gated. A missing or blank credential, any
+   and `max_attempts=2` over `llm_provider(DEEPSEEK_V4_1_FLASH)`. The engine path is what makes
+   015's `refuse_llm_agents_in_history` history/72-hour guard structural on the only production
+   model path and what stores a run manifest recording the model and prompt versions. The engine
+   is there for the guard, the manifest and the replay record, **not for the number**: each
+   name's stored score is the one composed agent's own structured frame -- its signed strength
+   with no neutral band, or `None` plus `agent_abstained` when the agent declines, whatever
+   evidence it cites -- never the engine's aggregate (fix round 2's N1). The provider's
+   transport is a request budget applied **inside** `RecordingJsonTransport`: the hard
+   `--max-model-requests` cap (default 600) and the wall `--deadline` (default 23:30 Shanghai)
+   are spent only on requests that would reach the endpoint, and every HTTP attempt -- a
+   provider retry included -- is one request, while a replayed answer costs none and is not
+   deadline-gated. The provider is assembled `replay=False` only while a request still has to be
+   sent; a rerun whose two batches are already filed sends none, so it is assembled
+   `replay=True` -- no credential, no usage store -- and an unrecorded request is a refusal
+   rather than a key error (fix round 2's N4). A missing or blank credential, any
    other `ModelConfigurationError`, a transport failure, the cap or the deadline leaves **no
    batch for that set** and journals the reason (decision D6, fix round 1's F1/F2/F8); an
    invalid answer after its retries is an abstention coded `model_invalid_output`, never a zero.
@@ -56,7 +63,9 @@ it: the family is not fileable that session (D6), so the rerun makes no model re
 journals the same reason. A day that *did* file is different: its rerun walks the stored
 exchanges and the engine's completed runs, so it spends nothing against the cap, is not stopped
 by the wall deadline, and reproduces the journal byte for byte -- including a rerun after a
-crash that filed the batches but died before step 6.
+crash that filed the batches but died before step 6. Such a rerun needs no credential: the two
+filed batches put the provider in replay mode (N4), so a launchd environment without
+`DEEPSEEK_API_KEY` finishes the day instead of journalling `credential_missing` over the store.
 
 ## What it never does
 
@@ -120,6 +129,7 @@ from openalpha_cn.models.openai_compatible import (  # noqa: E402
     ModelConfigurationError,
     ModelTransportError,
 )
+from openalpha_cn.models.recording import ModelExchangeNotStoredError  # noqa: E402
 from openalpha_cn.panel.store import PanelStore  # noqa: E402
 from openalpha_cn.panel_ingest import session_publication_instant  # noqa: E402
 from openalpha_cn.panel_limit_events import limit_events_on  # noqa: E402
@@ -131,10 +141,6 @@ from openalpha_cn.runtime.composition import (  # noqa: E402
     model_exchange_store_at,
     prediction_store_at,
     research_engine,
-)
-from openalpha_cn.runtime.engine import (  # noqa: E402
-    EVERY_ROUTED_AGENT_ABSTAINED,
-    NO_AGENT_WAS_ROUTED,
 )
 from openalpha_cn.strategy_agent_forward import (  # noqa: E402
     AgentScore,
@@ -913,19 +919,29 @@ def _prior_reason(runtime: Path, session: date) -> str | None:
     return None
 
 
-def _aggregate_abstention(result: Any) -> str:
-    """Which coded abstention an engine aggregate is (F6).
+def _llm_batches_filed(runtime: Path, session: date, *, clock: Callable[[], datetime]) -> bool:
+    """Whether both of the session's LLM batches are already in the prediction store (N4).
 
-    The engine named its own two abstentions in `runtime/engine.py`; C's closed vocabulary codes
-    them separately so a reader can tell "nothing was routed that could read this subject" from
-    "the one agent that ran declined". The fallback is the rule family's own reading: no agent
-    results means nothing was routed, any results means everything that ran abstained.
+    Read from the store *before* the credential is checked, because a rerun that only has to
+    reproduce the day sends no request and so must not need a key. A filed batch is a fact of
+    the day; the run that will replay it is a later reader. Both scoring sets are required, at
+    the session's own publication instant: anything less is a day that still has a request to
+    spend.
     """
-    if result.signal.abstention_reason == NO_AGENT_WAS_ROUTED:
-        return ABSTAIN_NOT_ROUTED
-    if result.signal.abstention_reason == EVERY_ROUTED_AGENT_ABSTAINED:
-        return ABSTAIN_ALL_ABSTAINED
-    return ABSTAIN_NOT_ROUTED if not result.agent_results else ABSTAIN_ALL_ABSTAINED
+    published = session_publication_instant(session)
+    store = prediction_store_at(runtime, clock=clock)
+    filed: set[str] = set()
+    for record_id in store.list_ids():
+        record = store.get(record_id)
+        if record is None:
+            continue
+        declaration = record.batch.artifact.declaration
+        if declaration.family != AGENT_LLM_FAMILY:
+            continue
+        if record.batch.as_of != published:
+            continue
+        filed.add(str(dict(declaration.hyperparameters).get("scoring_set")))
+    return {"primary", "coverage"} <= filed
 
 
 def _llm_family(
@@ -942,12 +958,21 @@ def _llm_family(
     """Step 5: the model-backed family through the research engine, capped and journalled.
 
     Three orderings are load-bearing. The credential is checked before the provider is
-    assembled, so a missing key can never become an invalid answer (F1). The request budget is
-    handed to `llm_provider` as `wrap_transport`, so it decorates the HTTP transport inside the
-    exchange recorder and a replay costs nothing (F2/F8). And every cycle goes through
+    assembled, so a missing key can never become an invalid answer (F1) -- but a rerun whose
+    two LLM batches are already filed sends no request, so it is assembled `replay=True` and
+    needs neither a credential nor a usage store (N4). The request budget is handed to
+    `llm_provider` as `wrap_transport`, so it decorates the HTTP transport inside the exchange
+    recorder and a replay costs nothing (F2/F8). And every cycle goes through
     `ResearchEngine.run_cycle`, so `refuse_llm_agents_in_history` runs before the agent does and
-    every run id names a stored manifest (F6). The engine's aggregate decides the score; its
-    two named abstentions map to C's closed vocabulary through `_aggregate_abstention`.
+    every run id names a stored manifest (F6).
+
+    The engine is on the path for the guard, the manifest and the replay record -- **not for the
+    number**. Each name's stored score is the one composed agent's own structured frame
+    (`result.agent_results`): its signed strength with no neutral band, or `None` plus
+    `agent_abstained` when the agent declines, whatever evidence it cites; no agent routed is
+    `agent_not_routed`. The engine's aggregate is deliberately not read: its 0.15 band would zero
+    a weak directional answer and its evidence rule would turn an evidence-citing abstention into
+    `0.0` (N1).
     """
     if options.no_llm:
         return _no_record(NO_RECORD_LLM_DISABLED)
@@ -961,10 +986,12 @@ def _llm_family(
             "requests one evening may spend, zero or more",
         )
     deadline = _parse_deadline(options.deadline, session)
-    # F1: a credential that is unset or blank has asked the model nothing, so no answer can have
-    # been invalid. Checked before the provider is assembled and before any transport exists.
+    # N4: a rerun of a day whose two LLM batches are already filed will send no request, so it
+    # reads them back in replay mode -- the credential is not needed and the usage store is not
+    # opened. Only a day that still has a request to spend is checked for the key (F1).
+    replay = _llm_batches_filed(runtime, session, clock=clock)
     key_env = DEEPSEEK_V4_1_FLASH.api_key_env
-    if key_env is not None and not os.environ.get(key_env, "").strip():
+    if not replay and key_env is not None and not os.environ.get(key_env, "").strip():
         return _no_record(NO_RECORD_CREDENTIAL_MISSING)
     budget = _ModelBudget(
         allowance=options.max_model_requests,
@@ -976,9 +1003,9 @@ def _llm_family(
             DEEPSEEK_V4_1_FLASH,
             runtime_dir=runtime,
             clock=clock,
-            replay=False,
-            transport=transport,
-            wrap_transport=budget.decorate,
+            replay=replay,
+            transport=None if replay else transport,
+            wrap_transport=None if replay else budget.decorate,
         )
     except ModelConfigurationError:
         # F1: an endpoint whose reading has not been recorded or a malformed endpoint is a
@@ -1047,16 +1074,36 @@ def _llm_family(
             return _no_record(NO_RECORD_REQUEST_CAP_REACHED)
         except _DeadlineReached:
             return _no_record(NO_RECORD_DEADLINE_REACHED)
+        except ModelExchangeNotStoredError as error:
+            # N4: replay has no transport by design, so a filed day whose stored exchange is
+            # missing is a refusal of step 5 -- never a credential error and never an invented
+            # answer.
+            raise StepFailedError(
+                "llm_family", f"{ts_code}: {type(error).__name__}: {error}"
+            ) from error
         except (RuntimeError, ValueError) as error:
             # Everything else the engine raises is a refusal of the day, not a family gap: 015's
             # history/72h guard lands here, and the operator sees step 5 refuse by name.
             raise StepFailedError(
                 "llm_family", f"{ts_code}: {type(error).__name__}: {error}"
             ) from error
-        if result.signal.direction == "abstain":
-            score, abstention = score_of("abstain", 0.0, _aggregate_abstention(result))
+        # N1: the stored score is the one composed agent's own frame, not `result.signal` (the
+        # engine's aggregate). The aggregate re-thresholds the direction with a 0.15 neutral
+        # band -- a bullish 0.1 becomes `neutral` and stores 0.0 -- and reads an abstention that
+        # cites evidence as `neutral`, storing an abstention as 0.0. Both would file a number
+        # the model did not answer, and a stored record cannot be revised. So: no agent routed is
+        # `agent_not_routed`; an agent that declined is `agent_abstained` whatever it cites; a
+        # direction keeps its own signed strength with no band.
+        if not result.agent_results:
+            score, abstention = score_of("abstain", 0.0, ABSTAIN_NOT_ROUTED)
         else:
-            score, abstention = score_of(result.signal.direction, result.signal.strength, None)
+            # Exactly one agent is composed above, so the cycle's results are that agent's own
+            # frame or nothing.
+            agent_signal = result.agent_results[0].signal
+            if agent_signal.direction == "abstain":
+                score, abstention = score_of("abstain", 0.0, ABSTAIN_ALL_ABSTAINED)
+            else:
+                score, abstention = score_of(agent_signal.direction, agent_signal.strength, None)
         scores[ts_code] = AgentScore(
             ts_code=ts_code, score=score, abstention=abstention, run_id=run_id
         )
