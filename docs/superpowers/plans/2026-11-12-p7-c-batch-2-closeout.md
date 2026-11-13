@@ -199,3 +199,28 @@
 
 - touched 测试文件 + 本轮点名的四类文件 + `test_source_counts_match_the_tree.py`/`test_source_cited_tests.py`/`test_surface_parity.py`/`tests/integration/test_usage_claims_match_the_shipped_paths.py`：**254 passed（1175.10s）**。
 - `ruff check .` 全部通过；`ruff format --check .` 701 文件已格式化；`mypy --cache-dir=/dev/null src scripts` 213 文件无问题；`PYTHONPATH=src lint-imports` 10 kept / 0 broken；`python scripts/build_feature_coverage.py --check` exit 0（240 项、真实完成 235）。
+
+## 8. 修复轮 2（复审 N1–N4）
+
+复审 `.superpowers/sdd/plan-c/review-batch2-2.md`（不入库）确认 13 条 F 全部关闭，但指出修复轮 1 的 F6（把模型家族改走引擎）引入一个 blocking 回归 N1，另有 N2、N3、N4。四项全部修复：代码提交 `b7a6fe5`（N1+N4）、`7abe5d1`（N2）、`b57fa4a`（N3），然后是记录本轮的文档提交与台账。
+
+| 项 | 修法 | 测试节点 |
+|---|---|---|
+| **N1（blocking）** 引擎聚合使模型分数失真：带证据的弃权被存成 `0.0`，`\|strength\| <= 0.15` 的方向答案被中和成 0 | 家族仍走 `research_engine`/`run_cycle`（015 的历史/72 小时护栏、运行清单、恢复与回放保持结构性），但**每个名字的分数取自单个 agent 自己的 `SignalFrame`**，不再取引擎聚合：没有 agent 结果 -> `agent_not_routed`；agent 的信号是 abstain -> `agent_abstained`（无论它引用多少证据，永远不是数字）；否则用它自己的带符号 `strength`（没有 0.15 中性带）。删掉失效的 `_aggregate_abstention` 及其 import；docstring 写明引擎在这条路径上是为了护栏与清单，不是为了数字。规则家族不变 | `tests/unit/scripts/test_agent_evening.py::test_an_abstention_that_cites_evidence_is_a_coded_abstention_never_a_zero`、`::test_a_weak_bullish_answer_keeps_its_own_strength_instead_of_the_engines_band`、`::test_an_abstention_without_evidence_is_abstained_and_an_unrouted_name_is_not_routed` |
+| **N2（important）** V2 提示词的弃权示例本身不合约（缺 `abstention_reason`），抄它的真实弃权会被重试并记成 `model_invalid_output` | 弃权示例补上必需的 `abstention_reason`，system 文本的字段表点名该字段并说明「弃权时必需、有方向时不得出现」；测试把提示词文本里的**两个示例**都解析出来并用真实的 `StructuredAgentPayload` 校验（不绑定版本，artifact 名再次升为 `structured-signal/v2-json-object-examples-v2`）；V1 逐字节不变 | `tests/unit/agents/test_prompt_versions.py::test_v2_prompt_mentions_json_and_carries_an_example` |
+| **N3（important）** 探针在凭据被拒后继续发送，一个错 token 会花掉整份计划 | `run_probe` 在**第一次**凭据拒绝（Tushare `40101`）或限流（`40203`）时停止：只记录该 finding，不再发任何后续计划调用或 follow-up 页。`run_probe` 返回 `ProbeRun`（`findings`、`planned`、`stop: ProbeStop|None`、`not_sent`）；报告加 `stopped: credential refused, N planned calls not sent.`（限流时 `rate limited`）；`--live` 以新的具名 `STOPPED_EXIT = 3` 退出并在 stderr 点名原因、接口与计数，**累计预算文件只记实际发出的请求**（始终 40101 时为 1）。其它非零码与权限错误仍是继续运行的 finding | `tests/unit/scripts/test_p7_event_probe.py::test_a_credential_rejection_stops_the_run_after_one_request`、`::test_a_rate_limit_rejection_stops_the_run_after_one_request`、`::test_an_other_rejection_code_is_a_finding_that_continues`、`::test_a_live_credential_rejection_records_one_request_and_exits_nonzero` |
+| **N4（minor）** 凭据预检早于回放：崩溃后已 file 的一天，没有 key 的重跑会记 `credential_missing`，与库里的记录矛盾 | 新的 `_llm_batches_filed(runtime, session)` 在预测库里查该会话两个评分集的 `AGENT_LLM_FAMILY` 批次；都在时跳过凭据预检并以 `replay=True` 装配 provider（无 key、无用量库），因此 file 完成后的崩溃重跑即使没有 `DEEPSEEK_API_KEY` 也能复现已 file 的一天；凭据检查仍在「真的会发请求」时才触发。回放中遇到未记录的请求现在是具名的第 5 步拒绝，不是 key 错误 | `tests/unit/scripts/test_agent_evening.py::test_a_crash_after_filing_before_the_journal_replays_without_a_credential` |
+
+### 8.1 本轮的行为改变与记录
+
+- **N1 让模型家族的分数语义回到 D3**：弃权永远是编码弃权、不是 0；方向答案保留自己的强度。F6 的 docstring 与台账 `OA-AGENT-011` 都写明「引擎在路径上是为了护栏/清单/回放，不是为了数字」，并写明不存在 0.15 中性带——这正是复审指出修复轮 1 未披露的那一点。
+- **N2 让 F13 从 partial 变为完整**：两个示例都是真实 `StructuredAgentPayload` 能接受的答案；提示词未绑定版本，所以改名是地址变更而不是重写已记录交换。`test_v2_prompt_mentions_json_and_carries_an_example` 现在逐个 `model_validate`。
+- **N3 的退出码**：`STOPPED_EXIT = 3` 与 0（正常）和 `REFUSED_EXIT` = 2（发请求前拒绝、不写文件）区分开；停止的运行**已经发出并记账**了请求，所以退出码要把「已发并记录」与「什么都没发」分开。`docs/research/p7-event-probe-report.template.md` 的退出码、`stopped:` 行与修订记录已同步。
+- **N4 的失败方向**：如果 file 只完成了一半（只有一个评分集），凭据预检仍照旧（仍然需要 key），因此不会把部分记录误当成可回放的完成日。
+
+### 8.2 修复轮 2 之后的定向闸门
+
+- `tests/unit/scripts/test_agent_evening.py` 32、`tests/unit/scripts/test_p7_event_probe.py` 24、`tests/unit/agents/test_prompt_versions.py` + `test_model_agent.py`、`tests/integration/test_usage_claims_match_the_shipped_paths.py` 48、`tests/unit/test_panel_ingest_import_isolation.py`、`tests/unit/test_forward_and_agent_layering.py`、`tests/unit/test_feature_ledger_test_tree.py` 一起跑：**175 passed（253.48s）**。
+- `ruff check .` 全部通过；`ruff format --check .` 701 文件；`mypy --cache-dir=/dev/null src scripts` 213 文件无问题；`PYTHONPATH=src lint-imports` 10 kept / 0 broken；`python scripts/build_feature_coverage.py --check` exit 0（240 项、真实完成 235）。
+- 台账行 `OA-AGENT-011`（N1/N4）与 `OA-OPS-052`（N3）的正文与备注同步更新；探针模板加了提前停止、`stopped:` 行与退出码 3。没有新增测试文件（都加在既有文件里），所以 features.csv 的测试文件计数不变。
+- **本轮没有任何网络请求**：全部模型/数据交换都由脚本化传输提供，`main` 测试都 monkeypatch `_default_transport`；没有运行 `--live`，没有构造真实传输。
