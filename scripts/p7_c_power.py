@@ -50,8 +50,12 @@ observed score count. Both make the projection a plan, not a forecast.
 ## The session sd and the verdict (F4)
 
 A session's IC standard deviation has a non-sampling part and a sampling part. `sd_between`
-(`PLANNING_SD_BETWEEN`, 0.15) is the **non-sampling part** -- day-to-day variation in the true IC --
-and is a planning assumption, not a measurement. With `n` post-abstention scored names on a session,
+(`PLANNING_SD_BETWEEN`, 0.15) is the **non-sampling part** -- day-to-day variation in the true IC.
+It is a **frozen planning prior**: the user's 2026-11-13 ruling fixed it at 0.15 because there is
+no measured source for an IC dispersion before C runs. It is not operator-settable (an earlier
+`--sd-between` option is gone; the operator cannot lower it into a testable verdict), the report
+always records 0.15, and D7's dry week can supply at most the **abstention rate**, never an IC
+dispersion. With `n` post-abstention scored names on a session,
 
     session_sd = min(1.0, sqrt(sd_between**2 + 1 / (n - 1)))     n >= 2
     session_sd = 1.0                                             n == 1
@@ -75,22 +79,26 @@ detect an increment no larger than 0.02 at the target power. It is **not** a gat
 test's magnitude -- D5's primary test is a one-sided sign-flip at alpha=0.05 on the mean, and the
 magnitude is reported, never gated. Its provenance is in `THRESHOLD_NOTE`.
 
-**The default assumptions make both rows not_testable, and the row says why.** With
+**The frozen prior makes both rows not_testable, and the report says so.** With
 `sd_between` 0.15 and at most 120 periods the detectable mean is at least
-0.227 * 0.15 = 0.034, above 0.02, so a default run reports `detectable_above_threshold` whenever the
-observed and measurable floors pass. That is the honest design conclusion, not a bug: the old 0.02
-bar is not detectable at 120 sessions under that planning sd. L5 can lower `--sd-between` from a
-measured dry-week value (for census-sized cross sections the two-component sd crosses 0.02 at about
-0.071; for the primary sample's small cross sections it cannot reach 0.02 at any `sd_between`,
-because the sampling part alone is already about 0.137 for ~54 scored names), and the verdict then
-follows the threshold. The D1 branch is still the user's at L5.
+0.227 * 0.15 = 0.034, above 0.02, so whenever it is computed the row reports
+`detectable_above_threshold` (and `too_few_observed_sessions` or `below_measurable_floor` before
+that). **No panel can make either row testable at the frozen prior**, and the primary sample could
+not reach 0.02 at any `sd_between` anyway: its ~54 scored names carry a sampling part of about
+0.137 alone. D1 is therefore the user's choice at L5 between registering C as not testable
+(`--register-untestable`, recorded in the registration) and not registering it at all. The
+constant is imported by the registration writer, so the frozen value and the report cannot drift
+apart.
 
 ## The command
 
     python scripts/p7_c_power.py --panel-dir DIR \
         --step0-registration docs/research/p7-registration.json \
         --first YYYY-MM-DD --last YYYY-MM-DD \
-        [--sd-between 0.15] [--abstention-rate 0.10] [--json PATH]
+        [--abstention-rate 0.10] [--json PATH]
+
+There is no option for `sd_between`: it is `PLANNING_SD_BETWEEN` (0.15), the one place the value
+lives, imported by the registration writer.
 
 It prints the two rows; only `--json PATH` writes anything, and then exactly one report
 (`POWER_REPORT_SCHEMA` = `openalpha-p7-c-power/v1`, atomic temporary file plus `os.replace`),
@@ -207,7 +215,14 @@ NO_LABELS_WORDING: Final[str] = (
     "no labels and no returns were read: this counts stored survivors and their limit events only"
 )
 SD_BETWEEN_NOTE: Final[str] = (
-    "the non-sampling part of a session IC sd; planning assumption, not measured"
+    "the non-sampling part of a session IC sd, frozen at 0.15 by the user's 2026-11-13 ruling; a "
+    "planning prior with no measured source before C runs -- D7's dry week can measure the "
+    "abstention rate, never an IC dispersion, and L5 cannot override it"
+)
+FROZEN_PRIOR_CONSEQUENCE_NOTE: Final[str] = (
+    "at the frozen prior of 0.15 the detectable mean is at least 0.034 whenever it is computed, so "
+    "both rows are not_testable at 0.15 for every panel; D1 is the user's choice to register C as "
+    "not testable or not at all"
 )
 ABSTENTION_NOTE: Final[str] = (
     "the planning share of scored names a model abstains on; planning assumption, not a "
@@ -383,6 +398,9 @@ def event_power(
     reason `too_few_observed_sessions`. The measurable fraction is taken over the observed sessions
     and projected onto the forward `sessions`; the sd and the scored-name count are over the
     **measurable** sessions, because those are the sessions the registered test would measure.
+
+    `sd_between` is **test-only**: the report passes `PLANNING_SD_BETWEEN` and no command-line
+    option sets it, but the arithmetic tests exercise other values here.
     """
     observed = tuple(counts)
     _check_design(
@@ -452,7 +470,6 @@ def _planning_form(
     *,
     sessions: int,
     horizon: int,
-    sd_between: float,
     abstention_rate: float,
     level: float,
     power: float,
@@ -460,7 +477,7 @@ def _planning_form(
     return {
         "window_sessions": sessions,
         "primary_horizon": horizon,
-        "sd_between": sd_between,
+        "sd_between": PLANNING_SD_BETWEEN,
         "sd_between_note": SD_BETWEEN_NOTE,
         "abstention_rate": abstention_rate,
         "abstention_note": ABSTENTION_NOTE,
@@ -484,7 +501,6 @@ def power_report(
     last: date,
     sessions: int = WINDOW_SESSIONS,
     horizon: int = PRIMARY_HORIZON,
-    sd_between: float = PLANNING_SD_BETWEEN,
     abstention_rate: float = PLANNING_ABSTENTION_RATE,
     level: float = LEVEL,
     power: float = TARGET_POWER,
@@ -494,7 +510,9 @@ def power_report(
 
     Rows are keyed by their sample label -- `n{sample_size}` for the primary sample and
     `census` for the whole survivor set -- and `source` records what produced the counts (Step
-    0's registration identity, when the command has it).
+    0's registration identity, when the command has it). `planning.sd_between` is always
+    `PLANNING_SD_BETWEEN` (0.15): the value is frozen and this function has no parameter for it,
+    so no caller can lower the planning prior into a testable verdict.
     """
     if last < first:
         raise PowerRequestError(
@@ -509,7 +527,7 @@ def power_report(
                 sample=PRIMARY_SAMPLE_SIZE,
                 sessions=sessions,
                 horizon=horizon,
-                sd_between=sd_between,
+                sd_between=PLANNING_SD_BETWEEN,
                 abstention_rate=abstention_rate,
                 level=level,
                 power=power,
@@ -519,7 +537,7 @@ def power_report(
                 sample=None,
                 sessions=sessions,
                 horizon=horizon,
-                sd_between=sd_between,
+                sd_between=PLANNING_SD_BETWEEN,
                 abstention_rate=abstention_rate,
                 level=level,
                 power=power,
@@ -535,7 +553,6 @@ def power_report(
         "planning": _planning_form(
             sessions=sessions,
             horizon=horizon,
-            sd_between=sd_between,
             abstention_rate=abstention_rate,
             level=level,
             power=power,
@@ -573,7 +590,15 @@ def render_report(report: Mapping[str, Any]) -> str:
         )
     lines.append(
         "  notes: "
-        + " | ".join((SD_BETWEEN_NOTE, ABSTENTION_NOTE, EXPECTED_COUNT_NOTE, THRESHOLD_NOTE))
+        + " | ".join(
+            (
+                SD_BETWEEN_NOTE,
+                FROZEN_PRIOR_CONSEQUENCE_NOTE,
+                ABSTENTION_NOTE,
+                EXPECTED_COUNT_NOTE,
+                THRESHOLD_NOTE,
+            )
+        )
     )
     for row in report["rows"].values():
         sample_size = row["sample_size"]
@@ -795,15 +820,6 @@ def _parser() -> argparse.ArgumentParser:
         help=f"write the {POWER_REPORT_SCHEMA} report here; without it nothing is written",
     )
     parser.add_argument(
-        "--sd-between",
-        type=float,
-        default=PLANNING_SD_BETWEEN,
-        help=(
-            "the non-sampling part of a session IC sd "
-            f"(default {PLANNING_SD_BETWEEN}; a planning assumption)"
-        ),
-    )
-    parser.add_argument(
         "--abstention-rate",
         type=float,
         default=PLANNING_ABSTENTION_RATE,
@@ -856,7 +872,6 @@ def _run(options: argparse.Namespace) -> int:
         counts,
         first=first,
         last=last,
-        sd_between=options.sd_between,
         abstention_rate=options.abstention_rate,
         level=options.level,
         power=options.power,

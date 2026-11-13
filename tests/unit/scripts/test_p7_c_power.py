@@ -7,12 +7,16 @@ registered window would be measurable for two scoring domains -- the primary ran
 N=300 and the full survivor census -- and gives each row a `testable` / `not_testable` verdict
 with the reason it is not testable.
 
-Fix round 1 (`review-batch3-1.md` F4 and F9) changed the model the tests below hold:
+Fix round 1 (`review-batch3-1.md` F4 and F9) changed the model the tests below hold, and fix
+round 2 (`review-batch3-2.md` N1) froze its dispersion prior:
 
 * the session sd is two-component -- `sqrt(sd_between**2 + 1/(n-1))` capped at 1, where
   `sd_between` is the non-sampling part of a session's IC sd and `n` the post-abstention scored
   names -- and the row reports the **maximum** over measurable sessions, so a printed sd is never
-  greater than 1;
+  greater than 1; `sd_between` is a **frozen prior of 0.15** with no measured source before C
+  runs: an operator cannot set it (there is no CLI option), the report always records it, and
+  D7's dry week can at most supply the abstention rate. `event_power` keeps its internal parameter
+  for these arithmetic tests only;
 * the projection multiplies the expected event count by the planning abstention rate (F9), so a
   parameter standing in for observed model abstention lowers the scored names;
 * the verdict gates on the previous G-C h1 bar (0.02) as a **planning detectability threshold**
@@ -355,22 +359,19 @@ def test_the_verdict_flips_at_the_detectable_mean_threshold() -> None:
 
 def test_a_detectable_mean_above_one_is_never_printed() -> None:
     counts = _series(power.MIN_OBSERVED_SESSIONS, 1000, 1000)
-    report = power.power_report(
-        counts,
-        first=START,
-        last=_days(power.MIN_OBSERVED_SESSIONS)[-1],
-        sessions=2,
-        sd_between=1.0,
-        abstention_rate=0.0,
-    )
 
+    # The arithmetic's own cap (the frozen report cannot reach it): 1.758 without min(..., 1).
     row = power.event_power(counts, sample=None, sessions=2, sd_between=1.0, abstention_rate=0.0)
-
     assert row.periods == 2
-    assert row.detectable_mean == 1.0  # 1.758 would be printed without the cap
+    assert row.detectable_mean == 1.0
+
+    # The frozen report is printed from the same arithmetic, so no printed value exceeds 1.
+    report = power.power_report(
+        counts, first=START, last=_days(power.MIN_OBSERVED_SESSIONS)[-1], abstention_rate=0.0
+    )
     text = power.render_report(report)
-    assert "detectable mean IC 1.0000" in text
-    assert "detectable mean IC 1.7" not in text
+    printed = [part.split(";")[0] for part in text.split("detectable mean IC ")[1:]]
+    assert printed and all(float(value) <= 1.0 for value in printed)
 
 
 def test_fewer_than_twenty_observed_sessions_is_not_testable() -> None:
@@ -586,7 +587,6 @@ def test_the_report_is_the_writer_contract_and_round_trips(tmp_path: Path) -> No
         counts,
         first=first,
         last=last,
-        sd_between=0.05,
         abstention_rate=0.0,
         source={"step0_registration": "docs/research/p7-registration.json"},
     )
@@ -599,7 +599,7 @@ def test_the_report_is_the_writer_contract_and_round_trips(tmp_path: Path) -> No
     assert set(planning) == PLANNING_KEYS
     assert planning["window_sessions"] == 120
     assert planning["primary_horizon"] == 1
-    assert planning["sd_between"] == 0.05
+    assert planning["sd_between"] == power.PLANNING_SD_BETWEEN == 0.15
     assert planning["abstention_rate"] == 0.0
     assert planning["min_observed_sessions"] == 20
     assert planning["detectable_mean_threshold"] == 0.02
@@ -619,6 +619,8 @@ def test_the_report_is_the_writer_contract_and_round_trips(tmp_path: Path) -> No
     assert "expected count" in planning["expected_count_note"]
     assert "hypergeometric" in planning["expected_count_note"]
     assert "abstention" in planning["expected_count_note"]
+    assert "frozen" in planning["sd_between_note"]
+    assert "no measured source" in planning["sd_between_note"]
     assert report["source"] == {"step0_registration": "docs/research/p7-registration.json"}
 
     rows = report["rows"]
@@ -635,8 +637,8 @@ def test_the_report_is_the_writer_contract_and_round_trips(tmp_path: Path) -> No
         assert row["sd"] is not None and 0 < row["sd"] <= 1.0
         assert row["detectable_mean"] is not None and row["detectable_mean"] <= 1.0
         assert row["detectable_threshold"] == 0.02
-        assert row["verdict"] == "testable"
-        assert row["reason"] is None
+        assert row["verdict"] == "not_testable"
+        assert row["reason"] == "detectable_above_threshold"
 
     path = tmp_path / "p7-c-power.json"
     assert power.write_power_report(path, report) == path
@@ -650,7 +652,6 @@ def test_the_report_carries_no_label_or_return_and_prints_the_notes() -> None:
         counts,
         first=_days(20)[0],
         last=_days(20)[-1],
-        sd_between=0.05,
         abstention_rate=0.0,
     )
 
@@ -676,6 +677,7 @@ def test_the_report_carries_no_label_or_return_and_prints_the_notes() -> None:
     assert "候选" in text
     assert "expected count" in text
     assert "abstention" in text
+    assert "frozen" in text
     assert "Tushare" not in text and "DeepSeek" not in text
 
 
@@ -713,7 +715,7 @@ def test_main_without_json_prints_both_rows_and_writes_nothing(
     monkeypatch.setattr(power, "write_power_report", refuse)
     before = _tree(tmp_path)
 
-    code = power.main(_main_arguments(panel, tmp_path, "--sd-between", "0.05"))
+    code = power.main(_main_arguments(panel, tmp_path))
     captured = capsys.readouterr()
 
     assert code == 0
@@ -722,11 +724,14 @@ def test_main_without_json_prints_both_rows_and_writes_nothing(
     assert "census" in captured.out
     assert "N=300" in captured.out
     assert "observed 20 session(s)" in captured.out
-    assert "sd " in captured.out
+    assert "sd_between 0.15" in captured.out
+    assert "frozen" in captured.out
+    assert "both rows are not_testable at 0.15" in captured.out
     assert "detectable mean IC" in captured.out
     assert "threshold 0.0200" in captured.out
-    assert "verdict testable" in captured.out
+    # The prior is frozen at 0.15: no panel can make either row testable.
     assert "verdict not testable" in captured.out
+    assert "verdict testable" not in captured.out
     assert "detectable above threshold" in captured.out
     assert "expected count" in captured.out
     assert "abstention" in captured.out
@@ -751,8 +756,6 @@ def test_main_with_json_writes_the_report_it_prints(
         _main_arguments(
             panel,
             tmp_path,
-            "--sd-between",
-            "0.05",
             "--abstention-rate",
             "0.10",
             "--json",
@@ -766,7 +769,7 @@ def test_main_with_json_writes_the_report_it_prints(
     document = json.loads(report_path.read_text(encoding="utf-8"))
     assert document["schema"] == power.POWER_REPORT_SCHEMA
     assert set(document["rows"]) == {"n300", "census"}
-    assert document["planning"]["sd_between"] == 0.05
+    assert document["planning"]["sd_between"] == power.PLANNING_SD_BETWEEN == 0.15
     assert document["planning"]["abstention_rate"] == 0.10
     for label in ("n300", "census"):
         row = document["rows"][label]
@@ -774,7 +777,8 @@ def test_main_with_json_writes_the_report_it_prints(
         assert row["observed_sessions"] == 20
         assert row["sd"] is not None
         assert row["detectable_threshold"] == 0.02
-        assert row["verdict"] in {"testable", "not_testable"}
+        assert row["verdict"] == "not_testable"
+        assert row["reason"] == "detectable_above_threshold"
 
 
 def test_the_old_between_day_sd_flag_is_gone(
@@ -799,6 +803,58 @@ def test_the_old_between_day_sd_flag_is_gone(
     assert code == 2
     assert "unrecognized arguments" in captured.err
     assert "--between-day-sd" in captured.err
+
+
+def test_the_old_sd_between_flag_is_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N1's freeze: the operator can no longer set the planning dispersion."""
+    monkeypatch.chdir(tmp_path)
+
+    code = power.main(
+        [
+            "--panel-dir",
+            str(tmp_path / "panel"),
+            "--first",
+            "2020-01-02",
+            "--last",
+            "2020-01-21",
+            "--sd-between",
+            "0.05",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "unrecognized arguments" in captured.err
+    assert "--sd-between" in captured.err
+    assert "--sd-between" not in power.render_report(
+        power.power_report(
+            _series(power.MIN_OBSERVED_SESSIONS, 1000, 1000),
+            first=START,
+            last=_days(power.MIN_OBSERVED_SESSIONS)[-1],
+        )
+    )
+
+
+def test_the_report_freezes_sd_between_at_the_planning_prior() -> None:
+    """N1: `planning.sd_between` is the constant, for any counts, and the API cannot override it."""
+    for counts in (
+        _series(1, 1000, 3),
+        _series(power.MIN_OBSERVED_SESSIONS, 2000, 40),
+        _series(30, 1000, 1000),
+    ):
+        report = power.power_report(counts, first=START, last=START)
+        assert report["planning"]["sd_between"] == power.PLANNING_SD_BETWEEN == 0.15
+        assert report["planning"]["sd_between_note"] == power.SD_BETWEEN_NOTE
+
+    with pytest.raises(TypeError):
+        power.power_report(
+            _series(power.MIN_OBSERVED_SESSIONS, 1000, 1000),
+            first=START,
+            last=START,
+            sd_between=0.05,
+        )
 
 
 def test_a_committed_step0_registration_is_read_and_named_in_the_report(
