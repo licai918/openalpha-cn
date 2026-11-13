@@ -44,7 +44,7 @@ and the registered Step 0 configuration, and this script only states what it ans
   `one-sided p (descriptive, not a test)`, the fix's pass/fail labels are not used, `not_measurable`
   and `futility_stop` keep their substantive wording under the descriptive prefix (a description of
   the stored window, never a test result), and `--json` carries `"reading": "descriptive"` with a
-  descriptive `"outcome"` (`descriptive_positive_mean`/`descriptive_nonpositive_mean`, while
+  descriptive `"outcome"` (`descriptive_matured` for either increment label, while
   `not_measurable` and `futility_stop` keep their substance) and `"reading": "descriptive"` inside
   `primary.test` (a testable registration's reading is `"test"` and its JSON and printed text
   are unchanged).
@@ -209,8 +209,8 @@ def _descriptive_outcome_wording(outcome: str) -> str:
 
 
 _DESCRIPTIVE_OUTCOMES: Final[Mapping[str, str]] = {
-    "candidate_increment": "descriptive_positive_mean",
-    "no_increment_detected": "descriptive_nonpositive_mean",
+    "candidate_increment": "descriptive_matured",
+    "no_increment_detected": "descriptive_matured",
     "not_measurable": "not_measurable",
     "futility_stop": "futility_stop",
     "not_yet": "not_yet",
@@ -218,10 +218,12 @@ _DESCRIPTIVE_OUTCOMES: Final[Mapping[str, str]] = {
 """N4: the `--json` outcome value for a descriptive reading.
 
 The documented `outcome` key is what a downstream reader treats as the answer; for a registration
-made not_testable it must not carry a test's pass/fail label. The increment labels become
-descriptive values, while `not_measurable` and `futility_stop` keep their substantive outcomes (the
-text already frames them as descriptions of the stored window). The testable path keeps the
-evaluator's labels unchanged.
+made not_testable it must not carry a test's pass/fail label. Both increment labels become the
+one value `descriptive_matured` (N6): two values would encode pass/fail one-to-one, and a
+sign-named value would be false for a positive mean that missed the level; the mean's sign is
+read from `primary.mean`. Meanwhile `not_measurable` and `futility_stop` keep their substantive
+outcomes (the text already frames them as descriptions of the stored window). The testable path
+keeps the evaluator's labels unchanged.
 """
 
 

@@ -365,7 +365,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src" "$PWD/.venv/bin/python" scripts/
   样本数、可检出均值、弃权率与模型身份；**读数按描述性读**——即使窗口成熟、评估器按登记的检验给出数字，
   这段读数也不被当作这次登记的一次检验结论：没有通过/不通过的说法，不把 p 值写成结论，也不升级任何措辞。
   它是候选配置的描述性记录，不是证据。
-  这条由**绑定报告**（`scripts/agent_report.py`，登记绑定的两个脚本之一）直接执行，而不是只靠读者自觉：当登记的 power 块的 `register_untestable` 为真时，结论行以 `descriptive (registered not_testable):` 开头，p 值行标注 `one-sided p (descriptive, not a test)`，不打印采纳规则块（不把它当作本报告做出的决定），`--json` 的 `reading` 为 `descriptive`，且 `--json` 的 **`outcome`** 也换成描述性取值（增量类换成 `descriptive_positive_mean`/`descriptive_nonpositive_mean`；`not_measurable`/`futility_stop` 保留其自身取值），`primary.test` 块带 `reading: descriptive`；testable 登记的措辞与 JSON 不变，`--json` 的 `reading` 为 `test`。
+  这条由**绑定报告**（`scripts/agent_report.py`，登记绑定的两个脚本之一）直接执行，而不是只靠读者自觉：当登记的 power 块的 `register_untestable` 为真时，结论行以 `descriptive (registered not_testable):` 开头，p 值行标注 `one-sided p (descriptive, not a test)`，不打印采纳规则块（不把它当作本报告做出的决定），`--json` 的 `reading` 为 `descriptive`，且 `--json` 的 **`outcome`** 也换成描述性取值（两种增量类结论都换成同一个 `descriptive_matured`，不编码通过/失败，均值符号读 `primary.mean`；`not_measurable`/`futility_stop` 保留其自身取值），`primary.test` 块带 `reading: descriptive`；testable 登记的措辞与 JSON 不变，`--json` 的 `reading` 为 `test`。
 - 这是**如实的设计结果，不是缺陷**：它说的是「在冻结的规划先验下，这个设计检不出均值 0.02 的增量」，
   不是「智能体没有增量」，更不是任何读数。**已登记的检验本身没有变**：通过 iff 窗口均值 > 0 且单侧读数
   ≤ 0.05（第 5.4 节）；但设计既已登记为「不可测」，它的读数不能被写成那次检验的结果。
@@ -618,3 +618,4 @@ L1 的 300 次上限里已经花掉 20 次：2026-11-12 修复轮中发生过一
   仍未写出、前向窗口未开始、功效表仍是未运行。
 | 2026-11-13 | 修复轮 3（复审 N3）：把「登记为不可测时读数只作描述」从散文变成绑定报告的行为——`scripts/agent_report.py` 在 `register_untestable` 为真时打印 `descriptive (registered not_testable):` 结论、`one-sided p (descriptive, not a test)` 的单侧读数、不打印采纳规则块，并在 `--json` 里写 `reading: descriptive`；testable 登记的文本与措辞不变。另加一条真实 `_admit` 的晚间测试（抛掷仓库 + 子进程），覆盖提交时刻→锚点的接线。§5 的顺序、§5.2 的闸门与 issue 总数（254）不变。 |
 | 2026-11-13 | 修复轮 4（复审 N4/N5）：绑定报告 `--json` 在 `register_untestable` 登记下不再携带 `candidate_increment`/`no_increment_detected`——`outcome` 改为描述性取值（`descriptive_positive_mean`/`descriptive_nonpositive_mean`，`not_measurable`/`futility_stop` 保留），`primary.test` 带 `reading: descriptive`；testable 的 JSON 逐字节不变。另加固真实 `_admit` 测试的 git helper（丢弃全部 `GIT_*`、`GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=/dev/null`、`-C <tmp repo>`、固定 `-c user.name/email`）并把子进程传输桩改名为代码实际调用的 `post_json`。§5 顺序、§5.2 闸门与 issue 总数（254）不变。 |
+| 2026-11-13 | 修复轮 5（复审 N6）：描述性读数的 `--json` `outcome` 原先把两种增量类结论一一改名为 `descriptive_positive_mean`/`descriptive_nonpositive_mean`，既能直接反推通过/失败，又会把「正均值但未过检验水平」标成 nonpositive。现两者都映射为同一个 `descriptive_matured`，均值符号读 `primary.mean`；`not_measurable`/`futility_stop`/`not_yet` 不变；testable 的 JSON 与文本不变。§5 顺序、§5.2 闸门与 issue 总数（254）不变。 |

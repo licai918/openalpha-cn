@@ -735,7 +735,7 @@ def test_a_register_untestable_registration_prints_a_descriptive_reading(
     view = json.loads(report_path.read_text(encoding="utf-8"))
     assert view["reading"] == "descriptive"
     assert view["outcome"] not in {"candidate_increment", "no_increment_detected"}
-    assert view["outcome"] == "descriptive_positive_mean"
+    assert view["outcome"] == "descriptive_matured"
     assert view["outcome_wording"].startswith("descriptive (registered not_testable):")
     assert view["adopted"] == []
     assert view["primary"]["test"]["reading"] == "descriptive"
@@ -805,10 +805,11 @@ def test_the_descriptive_reading_keeps_the_futility_wording(
 def test_the_other_increment_label_is_mapped_descriptively_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """N4: `no_increment_detected` is the second forbidden JSON label and is mapped as well.
+    """N4/N6: `no_increment_detected` is the second forbidden JSON label and is mapped as well.
 
-    The evaluator returns it for a non-significant window (including one with a positive mean), so
-    the descriptive value names the reading category, not a claim about the mean's sign.
+    The evaluator returns it for a non-significant window, here one with a positive mean. N6: both
+    increment labels map to the same `descriptive_matured`, so the value neither encodes pass/fail
+    nor states a sign the mean does not have; the sign is read from `primary.mean`.
     """
     evaluation = make_evaluation(
         outcome="no_increment_detected",
@@ -834,7 +835,7 @@ def test_the_other_increment_label_is_mapped_descriptively_too(
     for phrase in FORBIDDEN_TEST_PHRASES:
         assert phrase not in out, f"the descriptive report printed {phrase!r}"
     view = json.loads(report_path.read_text(encoding="utf-8"))
-    assert view["outcome"] == "descriptive_nonpositive_mean"
+    assert view["outcome"] == "descriptive_matured"
     document = json.dumps(view, ensure_ascii=False)
     for phrase in ("candidate_increment", "no_increment_detected"):
         assert phrase not in document, f"the descriptive --json carries {phrase!r}"

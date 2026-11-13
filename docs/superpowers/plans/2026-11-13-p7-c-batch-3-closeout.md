@@ -277,3 +277,11 @@
 
 - 触碰的测试文件：`tests/unit/scripts/test_agent_report.py`（32）、`tests/unit/scripts/test_agent_evening.py`（50）；`tests/unit/domain/test_contract_identity.py`（44）与 `tests/unit/test_documentation_tables.py`（3）单独跑。
 - `ruff check .`、`ruff format --check .`、`mypy --cache-dir=/dev/null src scripts`、`PYTHONPATH=src lint-imports`、`scripts/verify_publication.py`、`scripts/build_feature_coverage.py --check` 在最终 tip 上跑；**串行全量闸门由控制者跑**（本记录不复制控制者的读数）。
+
+## 12. 修复轮 5（复审 N6，由控制者直接修）
+
+- **N6**（重要）：修复轮 4 的描述性 `outcome` 是 `candidate_increment`→`descriptive_positive_mean`、`no_increment_detected`→`descriptive_nonpositive_mean` 的一一改名，通过/失败仍可从取值直接读出；且正均值未过水平的窗口被标成 `descriptive_nonpositive_mean`，是错的。
+- 修法：两种增量类结论都映射为同一个 `descriptive_matured`；均值符号只从 `primary.mean` 读。`not_measurable`/`futility_stop`/`not_yet` 保留；testable 的 JSON 与文本逐字节不变。
+- 测试：`test_agent_report.py::test_a_register_untestable_registration_prints_a_descriptive_reading`（正均值、过水平 → `descriptive_matured`）与 `::test_the_other_increment_label_is_mapped_descriptively_too`（正均值、未过水平 → 同一个 `descriptive_matured`）；先改断言看到两条红，再改映射变绿。
+- 协议 §6.2.3 与运行手册同步；协议修订表追加一行，修复轮 4 那一行作为历史保留不改。
+- 第 11 节记录的 N4 「`descriptive_nonpositive_mean` 是读数类别」这一说明由本节取代。
