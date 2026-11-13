@@ -4,9 +4,11 @@ The probe is tooling only. Its default mode is `--dry-run`: it prints the planne
 requests and sends nothing. Its `--live` mode needs the user's explicit go and an environment
 token, and the only request budget it may spend is `PROBE_CAP` = 300, enforced by reusing
 `scripts/p7_smoke_requests.py`'s capped counter. A report is metadata only -- interface names,
-permission answers, row and page counts, field names, the earliest date seen and timestamp-like
-field names -- and never a row value. Every transport below is scripted, so nothing reaches the
-network.
+permission answers, row and page counts, field names, the earliest date seen, timestamp-like
+field names, and the vendor's `msg` for a rejection (truncated, token-redacted) -- and never a
+row value. A `40203` stops only its own interface while the other four continue; a `40101` stops
+the whole run; `--skip-interface` leaves an interface out of the plan at zero requests. Every
+transport below is scripted, so nothing reaches the network.
 """
 
 from __future__ import annotations
@@ -72,13 +74,14 @@ class Refusing:
 class Rejecting:
     """A transport whose every answer is a Tushare rejection carrying `code`."""
 
-    def __init__(self, code: int) -> None:
+    def __init__(self, code: int, msg: str = "scripted rejection") -> None:
         self.code = code
+        self.msg = msg
         self.posted: list[dict[str, Any]] = []
 
     def post(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.posted.append(dict(payload))
-        return {"code": self.code, "msg": "scripted rejection", "data": None}
+        return {"code": self.code, "msg": self.msg, "data": None}
 
 
 def _call(**overrides: Any) -> Any:
@@ -137,6 +140,16 @@ def test_the_plan_covers_the_five_named_interfaces() -> None:
     assert plan == probe.probe_plan(today=TODAY, depth_years=(2, 1))
 
 
+def test_the_plan_can_leave_out_an_interface_an_operator_skips() -> None:
+    plan = probe.probe_plan(today=TODAY, depth_years=(1, 2), skip_interfaces=("anns_d",))
+
+    assert len(plan) == 20  # 4 interfaces x (3 probes + 2 depth years)
+    assert {call.api_name for call in plan} == set(NAMED) - {"anns_d"}
+
+    with pytest.raises(ValueError, match="not_an_interface"):
+        probe.probe_plan(today=TODAY, depth_years=(1,), skip_interfaces=("not_an_interface",))
+
+
 # --- the cap ------------------------------------------------------------------------------------
 
 
@@ -156,7 +169,7 @@ def test_the_cap_stops_the_301st_request_unsent() -> None:
     assert len(stopped.findings) == 2
 
 
-# --- a credential or rate-limit rejection stops the run (fix round 2, N3) -----------------------
+# --- a credential rejection stops the whole run (fix round 2, N3) -------------------------------
 
 
 def test_a_credential_rejection_stops_the_run_after_one_request() -> None:
@@ -180,22 +193,124 @@ def test_a_credential_rejection_stops_the_run_after_one_request() -> None:
     assert f"{len(plan) - 1} planned calls not sent" in report
 
 
-def test_a_rate_limit_rejection_stops_the_run_after_one_request() -> None:
-    transport = Rejecting(40203)
+def test_a_40101_at_a_later_planned_call_stops_the_run_there() -> None:
+    """A refused credential ends the run exactly where it is met, not at the first call only."""
+    failed = "您的token不对"
     plan = probe.probe_plan(today=TODAY, depth_years=(1, 2, 3, 4, 5))
+    transport = Recording(
+        [
+            _page(1),
+            _page(1),
+            {"code": 40101, "msg": failed, "data": None},
+        ]
+    )
 
     run = probe.run_probe(plan, transport=transport)
 
-    assert len(transport.posted) == 1
-    assert len(run.findings) == 1
-    assert run.findings[0].error_code == "40203"
+    assert len(transport.posted) == 3  # two permitted calls, then the rejected one
+    assert len(run.findings) == 3
+    assert run.findings[2].error_code == "40101"
+    assert run.findings[2].msg == failed
     assert run.stop is not None
-    assert run.stop.reason == "rate_limited"
-    assert run.not_sent == len(plan) - 1
+    assert run.stop.error_code == "40101"
+    assert run.stop.api_name == plan[2].api_name
+    assert run.not_sent == len(plan) - 3
 
-    report = probe.render_report(run.findings, spent=1, stop=run.stop, not_sent=run.not_sent)
-    assert "rate limited" in report
-    assert f"{len(plan) - 1} planned calls not sent" in report
+    report = probe.render_report(run.findings, spent=3, stop=run.stop, not_sent=run.not_sent)
+    assert failed in report
+    assert "credential refused" in report
+
+
+def test_a_40101_on_a_follow_up_page_also_stops_the_whole_run() -> None:
+    """`40101` anywhere stops everything: a refused credential inside a paged call too."""
+    transport = Recording(
+        [
+            _page(probe.PAGE_ROW_LIMIT, more=True),
+            {"code": 40101, "msg": "您的token不对", "data": None},
+        ]
+    )
+
+    run = probe.run_probe((_call(purpose="full_day"),), transport=transport)
+
+    assert len(transport.posted) == 2
+    assert run.stop is not None
+    assert run.stop.reason == "credential_refused"
+    assert run.findings[0].error_code == "40101"
+    assert run.findings[0].truncated == "yes"
+
+
+# --- a 40203 stops only its own interface (V2-P7-010, L1 fix) -----------------------------------
+
+
+def test_a_40203_stops_only_that_interface_and_the_other_four_continue() -> None:
+    denied = "抱歉，您没有权限访问该接口"
+    plan = probe.probe_plan(today=TODAY, depth_years=(1, 2, 3, 4, 5))
+    transport = Recording(
+        [
+            _page(1),
+            _page(1),
+            _page(1),
+            _page(1),
+            {"code": 40203, "msg": denied, "data": None},
+        ]
+    )
+
+    run = probe.run_probe(plan, transport=transport)
+
+    sent = [payload["api_name"] for payload in transport.posted]
+    assert len(transport.posted) == 33  # 40 planned; the seven later anns_d calls never built
+    assert sent.count("anns_d") == 1  # the rejected one; no later anns_d request was sent
+    assert [index for index, name in enumerate(sent, start=1) if name == "anns_d"] == [5]
+    for api_name in ("moneyflow", "limit_list_d", "top_list", "top_inst"):
+        assert sent.count(api_name) == 8  # every remaining call to the other four continued
+
+    assert run.stop is None  # a 40203 no longer ends the run
+    assert run.not_sent == 7
+    assert len(run.findings) == 33
+    assert run.interfaces_stopped == (
+        probe.ProbeInterfaceStop(api_name="anns_d", error_code="40203", msg=denied),
+    )
+
+    report = probe.render_report(run.findings, spent=33, interfaces_stopped=run.interfaces_stopped)
+    assert "stopped: 40203" in report
+    assert denied in report
+
+
+def test_a_live_run_stopped_by_one_40203_still_completes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    denied = "抱歉，您没有权限访问该接口"
+    budget = tmp_path / "p7-event-probe-budget.json"
+    transport = Recording(
+        [
+            _page(1),
+            _page(1),
+            _page(1),
+            _page(1),
+            {"code": 40203, "msg": denied, "data": None},
+        ]
+    )
+    monkeypatch.setattr(probe, "_default_transport", lambda: transport)
+    monkeypatch.setenv("TUSHARE_TOKEN", "not-a-real-token")
+
+    code = probe.main(
+        [
+            "--live",
+            "--i-have-the-users-go",
+            "--budget-file",
+            str(budget),
+            "--depth-years",
+            "1",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0  # the run finishes; only the one interface is refused
+    assert len(transport.posted) == 17  # 20 planned, three later anns_d calls never built
+    assert probe.read_probe_budget(budget) == 17
+    assert "stopped: 40203" in captured.out
+    assert denied in captured.out
+    assert "anns_d" in captured.err
 
 
 def test_an_other_rejection_code_is_a_finding_that_continues() -> None:
@@ -355,6 +470,89 @@ def test_a_permission_error_is_a_finding_not_a_crash() -> None:
     assert failed[0].error_code == "OSError"
 
 
+# --- the vendor's message is recorded as metadata (V2-P7-010, L1 fix) ---------------------------
+
+
+def test_the_vendor_message_is_recorded_for_a_continuing_rejection() -> None:
+    transport = Rejecting(40001, msg="抱歉，您没有权限访问该接口")
+
+    run = probe.run_probe((_call(), _call()), transport=transport)
+
+    assert len(run.findings) == 2
+    assert run.findings[0].msg == "抱歉，您没有权限访问该接口"
+    assert "抱歉，您没有权限访问该接口" in probe.render_report(run.findings, spent=2)
+
+
+def test_a_rejection_message_is_truncated_to_200_characters() -> None:
+    assert probe.MAX_MESSAGE_CHARS == 200
+    transport = Recording([{"code": 40203, "msg": "x" * 500, "data": None}])
+
+    run = probe.run_probe((_call(),), transport=transport)
+    finding = run.findings[0]
+
+    assert finding.msg is not None
+    assert len(finding.msg) == probe.MAX_MESSAGE_CHARS
+    report = probe.render_report(run.findings, spent=1, interfaces_stopped=run.interfaces_stopped)
+    assert "x" * probe.MAX_MESSAGE_CHARS in report
+    assert "x" * (probe.MAX_MESSAGE_CHARS + 1) not in report
+
+
+def test_a_rejection_message_cannot_break_the_report_table() -> None:
+    transport = Recording(
+        [{"code": 40203, "msg": "no | permission\nfor this interface", "data": None}]
+    )
+
+    run = probe.run_probe((_call(),), transport=transport)
+    finding = run.findings[0]
+
+    assert finding.msg == "no \\| permission for this interface"  # folded, pipe escaped
+    report = probe.render_report(run.findings, spent=1, interfaces_stopped=run.interfaces_stopped)
+    row = next(line for line in report.splitlines() if line.startswith("| `moneyflow`"))
+    body = row.removeprefix("|").removesuffix("|")
+    # `\\|` is the only escape GitHub honours, so the escaped pipe stays inside its cell.
+    assert len(re.split(r"(?<!\\)\|", body)) == 9
+    assert "no \\| permission for this interface" in report
+
+
+def test_the_token_never_appears_in_the_report_or_on_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token = "probe-token-that-must-not-leak"
+    budget = tmp_path / "p7-event-probe-budget.json"
+    transport = Recording([{"code": 40101, "msg": f"bad credential {token}", "data": None}])
+    monkeypatch.setattr(probe, "_default_transport", lambda: transport)
+    monkeypatch.setenv("TUSHARE_TOKEN", token)
+
+    code = probe.main(
+        [
+            "--live",
+            "--i-have-the-users-go",
+            "--budget-file",
+            str(budget),
+            "--depth-years",
+            "1",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == probe.STOPPED_EXIT
+    assert len(transport.posted) == 1
+    assert probe.read_probe_budget(budget) == 1
+    assert token not in captured.out
+    assert token not in captured.err
+    assert "[redacted]" in captured.out  # the defensive redaction, not the token
+
+    rejected = probe.run_probe(
+        (_call(),),
+        transport=Recording([{"code": 40203, "msg": f"denied {token}", "data": None}]),
+    )
+    report = probe.render_report(
+        rejected.findings, spent=1, interfaces_stopped=rejected.interfaces_stopped
+    )
+    assert token not in report
+    assert "[redacted]" in report
+
+
 # --- the dry run writes and sends nothing -------------------------------------------------------
 
 
@@ -397,6 +595,65 @@ def test_nothing_is_written_to_disk(
     probe.render_report(run.findings, spent=len(run.findings))
 
     assert list(tmp_path.iterdir()) == []
+
+
+# --- --skip-interface plans and sends nothing for that interface --------------------------------
+
+
+def test_skip_interface_reduces_the_dry_run_plan_and_sends_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert probe.main(["--dry-run", "--skip-interface", "anns_d"]) == 0
+    dry = capsys.readouterr().out
+    assert "planned calls: 32 of PROBE_CAP (300)" in dry
+    assert "skipped by operator" in dry
+    assert "| `anns_d` |" not in dry  # no planned row for the skipped interface
+
+    budget = tmp_path / "p7-event-probe-budget.json"
+    transport = Recording()
+
+    def refuse() -> Any:
+        raise AssertionError("a dry run asked for a Tushare transport")
+
+    monkeypatch.setattr(probe, "_default_transport", refuse)
+    assert probe.main(["--dry-run", "--skip-interface", "anns_d"]) == 0  # still sends none
+    capsys.readouterr()
+
+    monkeypatch.setattr(probe, "_default_transport", lambda: transport)
+    monkeypatch.setenv("TUSHARE_TOKEN", "not-a-real-token")
+    code = probe.main(
+        [
+            "--live",
+            "--i-have-the-users-go",
+            "--budget-file",
+            str(budget),
+            "--skip-interface",
+            "anns_d",
+        ]
+    )
+    live = capsys.readouterr()
+
+    assert code == 0
+    assert len(transport.posted) == 32
+    assert all(payload["api_name"] != "anns_d" for payload in transport.posted)
+    assert probe.read_probe_budget(budget) == 32  # zero requests for the skipped interface
+    assert "skipped by operator" in live.out
+    assert "anns_d" in live.out
+
+
+def test_skip_interface_is_repeatable_and_rejects_a_name_it_does_not_know(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        probe.main(["--dry-run", "--skip-interface", "anns_d", "--skip-interface", "top_inst"]) == 0
+    )
+    out = capsys.readouterr().out
+    assert "planned calls: 24 of PROBE_CAP (300)" in out
+    assert "| `anns_d` |" not in out
+    assert "| `top_inst` |" not in out
+
+    with pytest.raises(SystemExit):
+        probe.main(["--dry-run", "--skip-interface", "not_an_interface"])
 
 
 # --- --live is gated, and its token comes from the environment ----------------------------------
@@ -544,6 +801,48 @@ def test_two_live_runs_add_their_requests_to_one_budget_file(
     capsys.readouterr()
     assert len(transport.posted) == 40
     assert probe.read_probe_budget(budget) == 40
+
+
+def test_the_budget_counts_every_sent_request_including_pages_and_rejections(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    budget = _budget_file(tmp_path / "p7-event-probe-budget.json", 10)
+    denied = "no permission for this interface"
+    transport = Recording(
+        [
+            _page(1),
+            _page(1),
+            _page(1),
+            _page(1),
+            _page(1),
+            _page(probe.PAGE_ROW_LIMIT, more=True),  # call 6, full_day page 1: buys a follow-up
+            _page(2, more=False),  # call 6, follow-up page
+            {"code": 40203, "msg": denied, "data": None},  # call 7, refused: counted and stopped
+        ]
+    )
+    monkeypatch.setattr(probe, "_default_transport", lambda: transport)
+    monkeypatch.setenv("TUSHARE_TOKEN", "not-a-real-token")
+
+    code = probe.main(
+        [
+            "--live",
+            "--i-have-the-users-go",
+            "--budget-file",
+            str(budget),
+            "--depth-years",
+            "1",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    # 20 planned calls; 18 sent, one of them paged twice, so 19 requests: a rejected request
+    # and a follow-up page are each counted too, and the two later limit_list_d calls are not.
+    assert code == 0
+    assert len(transport.posted) == 19
+    assert probe.read_probe_budget(budget) == 29
+    assert "Requests spent: 19 of PROBE_CAP (300)." in captured.out
+    assert "Cumulative budget: 29 of PROBE_CAP (300) requests spent." in captured.out
+    assert denied in captured.out
 
 
 def test_a_dry_run_leaves_a_preexisting_budget_file_byte_identical(
