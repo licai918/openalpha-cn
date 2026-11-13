@@ -1,73 +1,109 @@
-"""Plan C's event-level power calculation (`V2-P7-013`, plan C Task 3.1; user ruling D1).
+"""Plan C's event-level power calculation (`V2-P7-013`, plan C Task 3.1; ruling D1, fix round 1).
 
-The question this tool answers is **can C's registered test be measured at all**, not whether an
-effect exists. C's one primary statistic is the LLM family's h=1 partial rank IC on the primary
+The question this tool answers is **can C's registered test be measured and powered**, not whether
+an effect exists. C's one primary statistic is the LLM family's h=1 partial rank IC on the primary
 scoring set, measured over the 120 forward sessions that follow C's registration. The agents are
 only routed to securities that carry evidence, and v1's only evidence producer is 011's limit
 events, so the measured cross section of a session is not the sample's size but the number of
-**scored names**: the sampled survivors that carry at least one limit event. That is why the
-calculation is event-level, and why it reports two scoring domains side by side -- the primary
-random sample of `PRIMARY_SAMPLE_SIZE` (300) survivors and the full survivor census -- with a
-`testable` / `not_testable` verdict on each (D1).
+**scored names**: the sampled survivors that carry at least one limit event, less the names a model
+abstains on. That is why the calculation is event-level, and why it reports two scoring domains
+side by side -- the primary random sample of `PRIMARY_SAMPLE_SIZE` (300) survivors and the full
+survivor census -- with a `testable` / `not_testable` verdict and the reason on each (D1).
 
 ## What it reads
 
-A **stored panel** and Step 0's **committed** registration, both read-only. Per stored session
-of the panel's `trade_cal` between `--first` and `--last` it rebuilds the session the way the
-daily survivor day rebuilds it -- `strategy_survivor_facts.build_facts_day` at the session's own
-16:30 publication instant, then `domain.survivor_screen.screen` -- and counts the survivors that
+A **stored panel** and Step 0's **committed** registration, both read-only. Per stored session of
+the panel's `trade_cal` between `--first` and `--last` it rebuilds the session the way the daily
+survivor day rebuilds it -- `strategy_survivor_facts.build_facts_day` at the session's own 16:30
+publication instant, then `domain.survivor_screen.screen` -- and counts the survivors that
 `panel_limit_events.limit_events_on` reports an event for at that same instant. Those are
 **point-in-time replays of the evening the day was filed**: a session's survivors and events are
-what that evening's record would have shown, not the restated present. The calendar that names
-the sessions is read at the last session's publication instant, so every session it lists is
-already published when it is asked.
+what that evening's record would have shown, not the restated present. The calendar that names the
+sessions is read at the last session's publication instant, so every session it lists is already
+published when it is asked.
 
-**No label and no return is read.** This is a count of survivors and events plus arithmetic on
-the count; the module imports nothing that can produce an outcome (`model_view`,
+**No label and no return is read.** This is a count of survivors and events plus arithmetic on the
+count; the module imports nothing that can produce an outcome (`model_view`,
 `strategy_survivor_forward`), and no client exists here at all -- no Tushare, no DeepSeek, no
-socket. The report is planning information, never evidence.
+network. The report is planning information, never evidence.
 
-## The arithmetic
+## The projection (D1, F9)
 
-For one row (sample `s`, `None` meaning the census) and one observed session with `S` survivors
-and `E` survivors carrying an event:
+For one row (`sample` = the sample's size, `None` = the census) and one observed session with `S`
+survivors and `E` survivors carrying an event, the **expected post-abstention scored names** are
 
-* the effective scored names are `round(E * min(s, S) / S)`, or `E` for the census
-  (`s >= S` is the census too);
-* a session is **measurable** iff that count is at least `MIN_SCORED_NAMES` (10);
-* the measurable fraction of the observed sessions is projected onto the forward window:
-  `round(fraction * WINDOW_SESSIONS)`, and the periods are that projection divided by the
-  horizon (`horizon=1` gives one period per measurable session; `h=5` gives every fifth);
-* the planning between-day sd is inflated by `sqrt(mean_survivors / mean_scored)` over the
-  measured sessions -- a session scoring fewer names carries a noisier IC -- and
-  `domain.incremental_ic.detectable_mean` turns it into the mean detectable at the target
-  power: `(z_(1-level) + z_power) * sd / sqrt(periods)`;
-* the verdict is `testable` iff the projection reaches `MIN_MEASURABLE_SESSIONS` (60) **and** a
-  detectable mean is computable. The verdict is strictly a **measurability** verdict: a single
-  score below the detectable mean is design information, never an effect-size gate, because no
-  threshold was ruled.
+    round(E * min(sample, S) / S * (1 - abstention_rate))      (census: E * (1 - abstention_rate))
 
-`PLANNING_BETWEEN_DAY_SD` (0.15) is a **planning assumption of this batch**, not a measured
-value; the report says so and the protocol's power table is filled only by a real run at L5.
+where `abstention_rate` (`PLANNING_ABSTENTION_RATE`, 0.10) is the planning share of scored names a
+model abstains on -- an assumption, not a measurement; D7's dry week supplies the observed rate and
+L5 may override it on the command line. A session is **measurable** iff that count is at least
+`MIN_SCORED_NAMES` (10); the measurable fraction of the observed sessions is projected onto the
+forward window (`round(fraction * WINDOW_SESSIONS)`), and the periods are that projection divided by
+the horizon (`horizon=1` gives one period per measurable session; `h=5` gives every fifth).
+
+**Two simplifications are stated, not hidden** (`EXPECTED_COUNT_NOTE`). The projection uses the
+**expected** count, not the per-session count: for the primary sample the per-session count is
+hypergeometric, so a session whose expected count is just above the floor is below it about half the
+time. And the abstention rate is a parameter applied to the historical event count rather than an
+observed score count. Both make the projection a plan, not a forecast.
+
+## The session sd and the verdict (F4)
+
+A session's IC standard deviation has a non-sampling part and a sampling part. `sd_between`
+(`PLANNING_SD_BETWEEN`, 0.15) is the **non-sampling part** -- day-to-day variation in the true IC --
+and is a planning assumption, not a measurement. With `n` post-abstention scored names on a session,
+
+    session_sd = min(1.0, sqrt(sd_between**2 + 1 / (n - 1)))     n >= 2
+    session_sd = 1.0                                             n == 1
+
+and the row reports the **maximum** over its measurable sessions, because the narrowest measured
+cross section is the noisiest one. The cap and the row maximum keep the printed sd at or below 1,
+the largest value a rank IC can carry; `http`-style impossible sds (the one-component inflation
+this replaces printed 1.5 for 10 scored names) cannot come out of it.
+
+The detectable mean is `incremental_ic.detectable_mean(sd=row_sd, periods=periods,
+level=0.05, power=0.80)`, capped at 1.0 so an impossible number is never printed. The verdict is
+`testable` iff **all** of: at least `MIN_OBSERVED_SESSIONS` (20) historical sessions were observed
+(nothing is projected from a handful of sessions), the projected measurable sessions reach
+`MIN_MEASURABLE_SESSIONS` (60), and the detectable mean is at most `DETECTABLE_MEAN_THRESHOLD`
+(0.02). Otherwise the row is `not_testable` with `reason` one of `too_few_observed_sessions`,
+`below_measurable_floor`, `detectable_above_threshold` (in that precedence).
+
+**What the 0.02 threshold is.** It is the previous G-C h1 pass bar ("h1 >= 0.02 and t >= 2, or
+h5 >= 0.06"), used here only as a **planning detectability threshold**: it says the design could
+detect an increment no larger than 0.02 at the target power. It is **not** a gate on the registered
+test's magnitude -- D5's primary test is a one-sided sign-flip at alpha=0.05 on the mean, and the
+magnitude is reported, never gated. Its provenance is in `THRESHOLD_NOTE`.
+
+**The default assumptions make both rows not_testable, and the row says why.** With
+`sd_between` 0.15 and at most 120 periods the detectable mean is at least
+0.227 * 0.15 = 0.034, above 0.02, so a default run reports `detectable_above_threshold` whenever the
+observed and measurable floors pass. That is the honest design conclusion, not a bug: the old 0.02
+bar is not detectable at 120 sessions under that planning sd. L5 can lower `--sd-between` from a
+measured dry-week value (for census-sized cross sections the two-component sd crosses 0.02 at about
+0.071; for the primary sample's small cross sections it cannot reach 0.02 at any `sd_between`,
+because the sampling part alone is already about 0.137 for ~54 scored names), and the verdict then
+follows the threshold. The D1 branch is still the user's at L5.
 
 ## The command
 
     python scripts/p7_c_power.py --panel-dir DIR \
         --step0-registration docs/research/p7-registration.json \
-        --first YYYY-MM-DD --last YYYY-MM-DD [--json PATH]
+        --first YYYY-MM-DD --last YYYY-MM-DD \
+        [--sd-between 0.15] [--abstention-rate 0.10] [--json PATH]
 
 It prints the two rows; only `--json PATH` writes anything, and then exactly one report
 (`POWER_REPORT_SCHEMA` = `openalpha-p7-c-power/v1`, atomic temporary file plus `os.replace`),
-which is the file the registration writer's `--power-report` reads. Every refusal -- an
-unreadable registration, a missing panel directory, an empty session range, a design the
-arithmetic cannot answer -- exits 2 with the reason on stderr and nothing written.
+which is the file the registration writer's `--power-report` reads. Every refusal -- an unreadable
+registration, a missing panel directory, an empty session range, a design the arithmetic cannot
+answer -- exits 2 with the reason on stderr and nothing written.
 
 **One signature deviation from the plan's sketch.** The plan writes
 `historical_event_counts(store, *, first, last, book)`; the same sentence requires the
-registration's `transform`, `min_coverage`, `max_carry_sessions` and `exchange` for the facts
-day, which are the adapter's and not the book's. They are passed as a required `adapter`
-argument rather than defaulted, because a defaulted adapter would silently rebuild the day with
-settings the registration does not have.
+registration's `transform`, `min_coverage`, `max_carry_sessions` and `exchange` for the facts day,
+which are the adapter's and not the book's. They are passed as a required `adapter` argument rather
+than defaulted, because a defaulted adapter would silently rebuild the day with settings the
+registration does not have.
 """
 
 from __future__ import annotations
@@ -134,8 +170,18 @@ MIN_SCORED_NAMES: Final[int] = 10
 MIN_MEASURABLE_SESSIONS: Final[int] = 60
 """D3: fewer measurable positions than this over the window is `not_measurable`."""
 
-PLANNING_BETWEEN_DAY_SD: Final[float] = 0.15
-"""A planning assumption of this batch, not a measured value; the report says so."""
+MIN_OBSERVED_SESSIONS: Final[int] = 20
+"""F4: no projection is made from fewer observed historical sessions than this."""
+
+PLANNING_SD_BETWEEN: Final[float] = 0.15
+"""The NON-SAMPLING part of a session's IC sd: a planning assumption, not a measured value."""
+
+PLANNING_ABSTENTION_RATE: Final[float] = 0.10
+"""F9: the planning share of scored names a model abstains on; an assumption, not a measurement."""
+
+DETECTABLE_MEAN_THRESHOLD: Final[float] = 0.02
+"""The previous G-C h1 pass bar, used as a PLANNING detectability threshold, not a magnitude
+gate."""
 
 TARGET_POWER: Final[float] = 0.8
 """The design power the detectable mean is computed for."""
@@ -148,15 +194,41 @@ VERDICT_TESTABLE: Final[TestVerdict] = "testable"
 VERDICT_NOT_TESTABLE: Final[TestVerdict] = "not_testable"
 """The measurability verdict's two values, as machine text and as the printed wording."""
 
+TestReason = Literal[
+    "too_few_observed_sessions", "below_measurable_floor", "detectable_above_threshold"
+]
+REASON_TOO_FEW_OBSERVED_SESSIONS: Final[TestReason] = "too_few_observed_sessions"
+REASON_BELOW_MEASURABLE_FLOOR: Final[TestReason] = "below_measurable_floor"
+REASON_DETECTABLE_ABOVE_THRESHOLD: Final[TestReason] = "detectable_above_threshold"
+"""Why a row is `not_testable`, in precedence order: too few observations, floor, threshold."""
+
 CANDIDATE_WORDING: Final[str] = "candidate research protocol planning (候选), not evidence"
 NO_LABELS_WORDING: Final[str] = (
     "no labels and no returns were read: this counts stored survivors and their limit events only"
 )
-PLANNING_SD_NOTE: Final[str] = "a planning assumption of this batch, not a measured value"
+SD_BETWEEN_NOTE: Final[str] = (
+    "the non-sampling part of a session IC sd; planning assumption, not measured"
+)
+ABSTENTION_NOTE: Final[str] = (
+    "the planning share of scored names a model abstains on; planning assumption, not a "
+    "measurement (D7's dry week supplies the observed rate and L5 may override it)"
+)
+THRESHOLD_NOTE: Final[str] = (
+    "the 0.02 threshold is the previous G-C h1 pass bar ('h1 >= 0.02 and t >= 2' or "
+    "'h5 >= 0.06'), used here only as a planning detectability threshold; it is not a gate on "
+    "the registered test's magnitude"
+)
+EXPECTED_COUNT_NOTE: Final[str] = (
+    "the projection uses the expected count E[event_names] * min(sample, survivors) / survivors, "
+    "not the hypergeometric per-session count, so a session whose expected count is just above the "
+    "floor is below it about half the time; observed model abstention reduces the scored names by "
+    "abstention_rate -- both are stated simplifications, not measurements"
+)
 VERDICT_NOTE: Final[str] = (
-    "the verdict is a measurability verdict (projected measurable sessions reach the floor and a "
-    "detectable mean is computable); the detectable mean is design information, never an "
-    "effect-size gate -- no threshold was ruled"
+    "the verdict is testable iff at least min_observed_sessions were observed, projected "
+    "measurable sessions reach the floor, and the detectable mean is at most the threshold; "
+    "otherwise it is not_testable with its reason. The detectable mean is design information, "
+    "never an effect-size gate -- no threshold was ruled for the registered test's magnitude"
 )
 
 REPOSITORY: Final[Path] = _SCRIPTS.parent
@@ -198,12 +270,25 @@ class PowerRow:
     sample_size: int | None
     """The sample's size, or `None` for the census."""
     projected_scored_names: int | None
-    """The projected scored names per measured session; `None` when nothing is measurable."""
+    """The expected post-abstention scored names per measured session; `None` when not projected."""
+    observed_sessions: int
+    """The stored sessions the row was computed over."""
     observed_measurable_sessions: int
+    """How many of those observed sessions are measurable."""
     measurable_sessions: int
+    """The projected measurable sessions of the forward window; 0 when no projection is made."""
     periods: int
+    """The test's periods: the projection itself at h=1, divided by the horizon above it."""
+    sd: float | None
+    """The row's session sd: the maximum over its measurable sessions, at most 1."""
     detectable_mean: float | None
+    """The mean detectable at the target power, capped at 1; `None` when not computed."""
+    detectable_threshold: float
+    """The planning detectability threshold the verdict compares against (0.02)."""
     verdict: TestVerdict
+    """`testable` only when every floor and the threshold pass."""
+    reason: TestReason | None
+    """Why the row is `not_testable`; `None` exactly when it is testable."""
 
 
 def sample_label(sample: int | None) -> str:
@@ -211,20 +296,43 @@ def sample_label(sample: int | None) -> str:
     return "census" if sample is None else f"n{sample}"
 
 
-def _scored_names(count: SessionCount, sample: int | None) -> int:
-    """The effective scored names of one session under `sample` (census: `sample is None`)."""
+def _scored_names(count: SessionCount, sample: int | None, abstention_rate: float) -> int:
+    """The expected post-abstention scored names of one session under `sample` (F9)."""
     if count.survivors <= 0:
         return 0
     if sample is None or sample >= count.survivors:
-        return count.event_names
-    return round(count.event_names * sample / count.survivors)
+        drawn = float(count.event_names)
+    else:
+        drawn = count.event_names * sample / count.survivors
+    return round(drawn * (1 - abstention_rate))
+
+
+def _session_sd(scored_names: int, sd_between: float) -> float:
+    """One session's IC sd: the non-sampling sd plus the 1/(n-1) sampling part, capped at 1 (F4)."""
+    if scored_names <= 1:
+        return 1.0
+    return min(1.0, math.sqrt(sd_between**2 + 1.0 / (scored_names - 1)))
+
+
+def _refusal_reason(
+    *, observed_sessions: int, projected: int, detectable: float | None
+) -> TestReason | None:
+    """The first failing floor's reason, or `None` when the row is testable (F4)."""
+    if observed_sessions < MIN_OBSERVED_SESSIONS:
+        return REASON_TOO_FEW_OBSERVED_SESSIONS
+    if projected < MIN_MEASURABLE_SESSIONS or detectable is None:
+        return REASON_BELOW_MEASURABLE_FLOOR
+    if detectable > DETECTABLE_MEAN_THRESHOLD:
+        return REASON_DETECTABLE_ABOVE_THRESHOLD
+    return None
 
 
 def _check_design(
     *,
     sessions: int,
     horizon: int,
-    between_day_sd: float,
+    sd_between: float,
+    abstention_rate: float,
     level: float,
     power: float,
     sample: int | None,
@@ -240,9 +348,14 @@ def _check_design(
         not isinstance(sample, int) or isinstance(sample, bool) or sample < 1
     ):
         raise PowerRequestError(f"a sample size must be a positive whole number, got {sample!r}")
-    if not math.isfinite(between_day_sd) or between_day_sd <= 0:
+    if not math.isfinite(sd_between) or not 0 < sd_between <= 1:
         raise PowerRequestError(
-            f"the planning between-day sd must be positive and finite, got {between_day_sd!r}"
+            "the non-sampling part of a session IC sd must lie strictly between 0 and 1, got "
+            f"{sd_between!r}"
+        )
+    if not math.isfinite(abstention_rate) or not 0 <= abstention_rate < 1:
+        raise PowerRequestError(
+            f"the planning abstention rate must lie in [0, 1), got {abstention_rate!r}"
         )
     if not math.isfinite(level) or not 0 < level < 0.5:
         raise PowerRequestError(
@@ -258,60 +371,62 @@ def event_power(
     sample: int | None,
     sessions: int = WINDOW_SESSIONS,
     horizon: int = PRIMARY_HORIZON,
-    between_day_sd: float = PLANNING_BETWEEN_DAY_SD,
+    sd_between: float = PLANNING_SD_BETWEEN,
+    abstention_rate: float = PLANNING_ABSTENTION_RATE,
     level: float = LEVEL,
     power: float = TARGET_POWER,
 ) -> PowerRow:
     """One scoring domain's projection over the observed sessions; see the module docstring.
 
-    `sample` is the sample's size, or `None` for the census. The measurable fraction is taken
-    over the **observed** sessions and projected onto the forward `sessions`; the sd inflation
-    and the projected scored-name count are means over the **measurable** sessions, because
-    those are the sessions the registered test would measure.
+    `sample` is the sample's size, or `None` for the census. Nothing is projected from fewer than
+    `MIN_OBSERVED_SESSIONS` observed sessions: the row then keeps its observed counts and reports
+    reason `too_few_observed_sessions`. The measurable fraction is taken over the observed sessions
+    and projected onto the forward `sessions`; the sd and the scored-name count are over the
+    **measurable** sessions, because those are the sessions the registered test would measure.
     """
     observed = tuple(counts)
     _check_design(
         sessions=sessions,
         horizon=horizon,
-        between_day_sd=between_day_sd,
+        sd_between=sd_between,
+        abstention_rate=abstention_rate,
         level=level,
         power=power,
         sample=sample,
     )
     if not observed:
         raise PowerRequestError("there is no observed session to project from")
-    scored = tuple(_scored_names(count, sample) for count in observed)
+    scored = tuple(_scored_names(count, sample, abstention_rate) for count in observed)
     measurable = tuple(index for index, names in enumerate(scored) if names >= MIN_SCORED_NAMES)
     projected = 0
     periods = 0
     projected_scored: int | None = None
+    sd: float | None = None
     detectable: float | None = None
-    if measurable:
+    if len(observed) >= MIN_OBSERVED_SESSIONS and measurable:
         projected = round(len(measurable) / len(observed) * sessions)
         periods = projected if horizon <= 1 else projected // horizon
-        mean_survivors = math.fsum(observed[index].survivors for index in measurable) / len(
-            measurable
-        )
-        mean_scored = math.fsum(scored[index] for index in measurable) / len(measurable)
-        projected_scored = round(mean_scored)
-        if mean_survivors > 0 and mean_scored > 0:
-            inflated = between_day_sd * math.sqrt(mean_survivors / mean_scored)
-            if periods >= 2:
-                detectable = detectable_mean(sd=inflated, periods=periods, level=level, power=power)
-    verdict: TestVerdict = (
-        VERDICT_TESTABLE
-        if projected >= MIN_MEASURABLE_SESSIONS and detectable is not None
-        else VERDICT_NOT_TESTABLE
+        projected_scored = round(math.fsum(scored[index] for index in measurable) / len(measurable))
+        sd = max(_session_sd(scored[index], sd_between) for index in measurable)
+        if periods >= 2:
+            detectable = min(detectable_mean(sd=sd, periods=periods, level=level, power=power), 1.0)
+    reason = _refusal_reason(
+        observed_sessions=len(observed), projected=projected, detectable=detectable
     )
+    verdict: TestVerdict = VERDICT_TESTABLE if reason is None else VERDICT_NOT_TESTABLE
     return PowerRow(
         sample=sample_label(sample),
         sample_size=sample,
         projected_scored_names=projected_scored,
+        observed_sessions=len(observed),
         observed_measurable_sessions=len(measurable),
         measurable_sessions=projected,
         periods=periods,
+        sd=sd,
         detectable_mean=detectable,
+        detectable_threshold=DETECTABLE_MEAN_THRESHOLD,
         verdict=verdict,
+        reason=reason,
     )
 
 
@@ -321,11 +436,15 @@ def _row_form(row: PowerRow) -> dict[str, Any]:
         "sample": row.sample,
         "sample_size": row.sample_size,
         "projected_scored_names": row.projected_scored_names,
+        "observed_sessions": row.observed_sessions,
         "observed_measurable_sessions": row.observed_measurable_sessions,
         "measurable_sessions": row.measurable_sessions,
         "periods": row.periods,
+        "sd": row.sd,
         "detectable_mean": row.detectable_mean,
+        "detectable_threshold": row.detectable_threshold,
         "verdict": row.verdict,
+        "reason": row.reason,
     }
 
 
@@ -333,15 +452,22 @@ def _planning_form(
     *,
     sessions: int,
     horizon: int,
-    between_day_sd: float,
+    sd_between: float,
+    abstention_rate: float,
     level: float,
     power: float,
 ) -> dict[str, Any]:
     return {
         "window_sessions": sessions,
         "primary_horizon": horizon,
-        "between_day_sd": between_day_sd,
-        "between_day_sd_note": PLANNING_SD_NOTE,
+        "sd_between": sd_between,
+        "sd_between_note": SD_BETWEEN_NOTE,
+        "abstention_rate": abstention_rate,
+        "abstention_note": ABSTENTION_NOTE,
+        "min_observed_sessions": MIN_OBSERVED_SESSIONS,
+        "detectable_mean_threshold": DETECTABLE_MEAN_THRESHOLD,
+        "threshold_note": THRESHOLD_NOTE,
+        "expected_count_note": EXPECTED_COUNT_NOTE,
         "test_level": level,
         "target_power": power,
         "primary_sample_size": PRIMARY_SAMPLE_SIZE,
@@ -358,7 +484,8 @@ def power_report(
     last: date,
     sessions: int = WINDOW_SESSIONS,
     horizon: int = PRIMARY_HORIZON,
-    between_day_sd: float = PLANNING_BETWEEN_DAY_SD,
+    sd_between: float = PLANNING_SD_BETWEEN,
+    abstention_rate: float = PLANNING_ABSTENTION_RATE,
     level: float = LEVEL,
     power: float = TARGET_POWER,
     source: Mapping[str, Any] | None = None,
@@ -382,7 +509,8 @@ def power_report(
                 sample=PRIMARY_SAMPLE_SIZE,
                 sessions=sessions,
                 horizon=horizon,
-                between_day_sd=between_day_sd,
+                sd_between=sd_between,
+                abstention_rate=abstention_rate,
                 level=level,
                 power=power,
             ),
@@ -391,7 +519,8 @@ def power_report(
                 sample=None,
                 sessions=sessions,
                 horizon=horizon,
-                between_day_sd=between_day_sd,
+                sd_between=sd_between,
+                abstention_rate=abstention_rate,
                 level=level,
                 power=power,
             ),
@@ -406,7 +535,8 @@ def power_report(
         "planning": _planning_form(
             sessions=sessions,
             horizon=horizon,
-            between_day_sd=between_day_sd,
+            sd_between=sd_between,
+            abstention_rate=abstention_rate,
             level=level,
             power=power,
         ),
@@ -415,8 +545,12 @@ def power_report(
     }
 
 
+def _number(value: Any, *, digits: int = 4) -> str:
+    return "absent" if value is None else f"{value:.{digits}f}"
+
+
 def render_report(report: Mapping[str, Any]) -> str:
-    """The report as the printed lines: both rows, their verdicts, and the wording above."""
+    """The report as the printed lines: both rows, their verdicts and reasons, and the notes."""
     planning = report["planning"]
     lines = [
         f"p7_c_power: {CANDIDATE_WORDING}",
@@ -427,9 +561,9 @@ def render_report(report: Mapping[str, Any]) -> str:
         ),
         (
             f"  planning: forward window {planning['window_sessions']} session(s), primary horizon "
-            f"{planning['primary_horizon']}, between-day sd {planning['between_day_sd']:g} "
-            f"({PLANNING_SD_NOTE}), one-sided test level {planning['test_level']:g}, target power "
-            f"{planning['target_power']:g}"
+            f"{planning['primary_horizon']}, sd_between {planning['sd_between']:g}, abstention "
+            f"rate {planning['abstention_rate']:g}, one-sided test level "
+            f"{planning['test_level']:g}, target power {planning['target_power']:g}"
         ),
     ]
     source = report.get("source")
@@ -437,6 +571,10 @@ def render_report(report: Mapping[str, Any]) -> str:
         lines.append(
             "  Step 0 registration: " + ", ".join(f"{key} {source[key]}" for key in source)
         )
+    lines.append(
+        "  notes: "
+        + " | ".join((SD_BETWEEN_NOTE, ABSTENTION_NOTE, EXPECTED_COUNT_NOTE, THRESHOLD_NOTE))
+    )
     for row in report["rows"].values():
         sample_size = row["sample_size"]
         heading = (
@@ -444,19 +582,25 @@ def render_report(report: Mapping[str, Any]) -> str:
             if sample_size is not None
             else f"{row['sample']} (all survivors)"
         )
-        scored = (
-            "absent"
-            if row["projected_scored_names"] is None
-            else str(row["projected_scored_names"])
-        )
-        detectable = "absent" if row["detectable_mean"] is None else f"{row['detectable_mean']:.4f}"
+        if row["reason"] == REASON_TOO_FEW_OBSERVED_SESSIONS:
+            projection = (
+                f"no projection made (fewer than {MIN_OBSERVED_SESSIONS} observed sessions): "
+                f"the observed {row['observed_measurable_sessions']} measurable session(s) are "
+                "descriptive only"
+            )
+        else:
+            projection = (
+                f"projected scored names {_number(row['projected_scored_names'], digits=0)} per "
+                f"measured session; projected measurable {row['measurable_sessions']} of "
+                f"{planning['window_sessions']}; periods {row['periods']}"
+            )
+        reason = "" if row["reason"] is None else f" ({row['reason'].replace('_', ' ')})"
         lines.append(
-            f"  {heading}: projected {scored} scored name(s) per measured session; observed "
-            f"measurable {row['observed_measurable_sessions']} of "
-            f"{report['sessions_observed']} session(s); projected measurable "
-            f"{row['measurable_sessions']} of {planning['window_sessions']}; periods "
-            f"{row['periods']}; detectable mean IC {detectable}; "
-            f"verdict {row['verdict'].replace('_', ' ')}"
+            f"  {heading}: observed {row['observed_sessions']} session(s), measurable "
+            f"{row['observed_measurable_sessions']} of them; {projection}; sd "
+            f"{_number(row['sd'])}; detectable mean IC {_number(row['detectable_mean'])}; "
+            f"threshold {row['detectable_threshold']:.4f}; "
+            f"verdict {row['verdict'].replace('_', ' ')}{reason}"
         )
     lines.append(f"  {VERDICT_NOTE}")
     return "\n".join(lines)
@@ -628,9 +772,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="p7_c_power.py",
         description=(
-            "Project how many forward sessions of plan C's window would be measurable, for the "
-            "primary N=300 sample and the full survivor census. Reads a stored panel only: no "
-            "label, no return, no request, and no file unless --json is given."
+            "Project how many forward sessions of plan C's window would be measurable and "
+            "powered, for the primary N=300 sample and the full survivor census. Reads a stored "
+            "panel only: no label, no return, no request, and no file unless --json is given."
         ),
     )
     parser.add_argument(
@@ -651,10 +795,22 @@ def _parser() -> argparse.ArgumentParser:
         help=f"write the {POWER_REPORT_SCHEMA} report here; without it nothing is written",
     )
     parser.add_argument(
-        "--between-day-sd",
+        "--sd-between",
         type=float,
-        default=PLANNING_BETWEEN_DAY_SD,
-        help=f"the planning between-day sd (default {PLANNING_BETWEEN_DAY_SD}; an assumption)",
+        default=PLANNING_SD_BETWEEN,
+        help=(
+            "the non-sampling part of a session IC sd "
+            f"(default {PLANNING_SD_BETWEEN}; a planning assumption)"
+        ),
+    )
+    parser.add_argument(
+        "--abstention-rate",
+        type=float,
+        default=PLANNING_ABSTENTION_RATE,
+        help=(
+            "the planning share of scored names a model abstains on "
+            f"(default {PLANNING_ABSTENTION_RATE}; a planning assumption)"
+        ),
     )
     parser.add_argument(
         "--level", type=float, default=LEVEL, help=f"the one-sided test level (default {LEVEL})"
@@ -700,7 +856,8 @@ def _run(options: argparse.Namespace) -> int:
         counts,
         first=first,
         last=last,
-        between_day_sd=options.between_day_sd,
+        sd_between=options.sd_between,
+        abstention_rate=options.abstention_rate,
         level=options.level,
         power=options.power,
         source=_source_of(registration),

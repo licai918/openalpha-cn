@@ -4,8 +4,19 @@ The calculation is planning arithmetic over a **stored panel**: per stored sessi
 that session's survivors (`build_facts_day` then `screen`) and counts the survivors that carry a
 limit event (`limit_events_on`). From those counts it projects how many forward sessions of the
 registered window would be measurable for two scoring domains -- the primary random sample of
-N=300 and the full survivor census -- and gives each row a `testable` / `not_testable` verdict.
-It reads no label and no return, constructs no client, and sends no request.
+N=300 and the full survivor census -- and gives each row a `testable` / `not_testable` verdict
+with the reason it is not testable.
+
+Fix round 1 (`review-batch3-1.md` F4 and F9) changed the model the tests below hold:
+
+* the session sd is two-component -- `sqrt(sd_between**2 + 1/(n-1))` capped at 1, where
+  `sd_between` is the non-sampling part of a session's IC sd and `n` the post-abstention scored
+  names -- and the row reports the **maximum** over measurable sessions, so a printed sd is never
+  greater than 1;
+* the projection multiplies the expected event count by the planning abstention rate (F9), so a
+  parameter standing in for observed model abstention lowers the scored names;
+* the verdict gates on the previous G-C h1 bar (0.02) as a **planning detectability threshold**
+  and needs at least 20 observed sessions before it projects anything.
 
 Every reader below is scripted: the panel store is a placeholder, the calendar is a tuple of
 sessions, and the builders are test doubles that record how they were called. Nothing here
@@ -18,8 +29,9 @@ import ast
 import hashlib
 import importlib
 import json
+import math
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final
@@ -52,6 +64,7 @@ ADAPTER = SimpleNamespace(
     max_carry_sessions=250,
 )
 PANEL = object()
+START: Final[date] = date(2020, 1, 6)
 
 
 def _registration() -> Any:
@@ -63,6 +76,15 @@ def _registration() -> Any:
         code_commit="b" * 40,
         survivor=SimpleNamespace(book=BOOK, adapter=ADAPTER),
     )
+
+
+def _days(count: int) -> tuple[date, ...]:
+    return tuple(START + timedelta(days=index) for index in range(count))
+
+
+def _series(count: int, survivors: int, events: int) -> tuple[Any, ...]:
+    """`count` sessions, each with the same survivor and event counts."""
+    return tuple(power.SessionCount(day, survivors, events) for day in _days(count))
 
 
 def _counts(*specs: tuple[date, int, int]) -> tuple[Any, ...]:
@@ -183,11 +205,17 @@ def test_the_public_constants_are_the_registered_designs() -> None:
     assert power.PRIMARY_HORIZON == 1
     assert power.MIN_SCORED_NAMES == 10
     assert power.MIN_MEASURABLE_SESSIONS == 60
-    assert power.PLANNING_BETWEEN_DAY_SD == 0.15
+    assert power.MIN_OBSERVED_SESSIONS == 20
+    assert power.PLANNING_SD_BETWEEN == 0.15
+    assert power.PLANNING_ABSTENTION_RATE == 0.10
+    assert power.DETECTABLE_MEAN_THRESHOLD == 0.02
     assert power.TARGET_POWER == 0.8
     assert power.LEVEL == 0.05
     assert power.VERDICT_TESTABLE == "testable"
     assert power.VERDICT_NOT_TESTABLE == "not_testable"
+    assert power.REASON_TOO_FEW_OBSERVED_SESSIONS == "too_few_observed_sessions"
+    assert power.REASON_BELOW_MEASURABLE_FLOOR == "below_measurable_floor"
+    assert power.REASON_DETECTABLE_ABOVE_THRESHOLD == "detectable_above_threshold"
 
 
 # --- the counts: one stored session, its survivors, its survivors with an event -----------------
@@ -276,94 +304,225 @@ def test_the_sessions_are_the_stored_calendar_between_first_and_last(
         )
 
 
-# --- the power arithmetic ------------------------------------------------------------------------
+# --- the F4 sd model and the F9 abstention parameter -------------------------------------------
 
 
-def test_a_larger_measured_cross_section_can_detect_a_smaller_mean(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    counts = _counts(*((date(2020, 1, day), 2000, 400) for day in (2, 3, 6)))
+def test_the_row_sd_is_bounded_by_one_at_the_thousand_survivor_small_cross_section() -> None:
+    """Review F4's own case: 1000 survivors, 10 scored names -- sd <= 1 and not testable."""
+    row = power.event_power(
+        _series(power.MIN_OBSERVED_SESSIONS, 1000, 10), sample=None, abstention_rate=0.0
+    )
 
-    report = power.power_report(counts, first=date(2020, 1, 2), last=date(2020, 1, 6))
+    assert row.observed_measurable_sessions == 20
+    assert row.sd == pytest.approx(math.sqrt(power.PLANNING_SD_BETWEEN**2 + 1 / 9))
+    assert row.sd is not None and row.sd <= 1.0
+    assert row.detectable_mean is not None and 0 < row.detectable_mean < 1
+    assert row.detectable_mean > power.DETECTABLE_MEAN_THRESHOLD
+    assert row.verdict == "not_testable"
+    assert row.reason == "detectable_above_threshold"
+    assert row.detectable_threshold == power.DETECTABLE_MEAN_THRESHOLD
 
-    n300, census = report["rows"]["n300"], report["rows"]["census"]
-    # 400 events among 2000 survivors: about 60 of a 300-name sample carry a score.
-    assert n300["detectable_mean"] > census["detectable_mean"]
-    assert n300["verdict"] == "testable"
-    assert census["verdict"] == "testable"
+    # The cap itself: at the largest admissible non-sampling sd the sampling part pushes the
+    # two-component value past 1, and the row must still report 1 at most.
+    capped = power.event_power(
+        _series(power.MIN_OBSERVED_SESSIONS, 1000, 10),
+        sample=None,
+        sd_between=1.0,
+        abstention_rate=0.0,
+    )
+    assert capped.sd == 1.0  # sqrt(1 + 1/9) is 1.054 without the cap
+    assert capped.detectable_mean is not None and capped.detectable_mean <= 1.0
 
-    narrow = power.event_power(counts, sample=100)
-    wide = power.event_power(counts, sample=None)
-    assert narrow.detectable_mean is not None
-    assert wide.detectable_mean is not None
-    assert narrow.detectable_mean > wide.detectable_mean
+
+def test_the_verdict_flips_at_the_detectable_mean_threshold() -> None:
+    """Review F4: the verdict depends on power, and 0.02 is the planning threshold."""
+    above = power.event_power(
+        _series(20, 1000, 190), sample=None, sd_between=0.05, abstention_rate=0.0
+    )
+    below = power.event_power(
+        _series(20, 1000, 191), sample=None, sd_between=0.05, abstention_rate=0.0
+    )
+
+    assert above.measurable_sessions == below.measurable_sessions == 120
+    assert above.detectable_mean is not None and below.detectable_mean is not None
+    assert above.detectable_mean > power.DETECTABLE_MEAN_THRESHOLD >= below.detectable_mean
+    assert above.verdict == "not_testable"
+    assert above.reason == "detectable_above_threshold"
+    assert below.verdict == "testable"
+    assert below.reason is None
+    assert above.detectable_threshold == below.detectable_threshold == 0.02
+
+
+def test_a_detectable_mean_above_one_is_never_printed() -> None:
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 1000, 1000)
+    report = power.power_report(
+        counts,
+        first=START,
+        last=_days(power.MIN_OBSERVED_SESSIONS)[-1],
+        sessions=2,
+        sd_between=1.0,
+        abstention_rate=0.0,
+    )
+
+    row = power.event_power(counts, sample=None, sessions=2, sd_between=1.0, abstention_rate=0.0)
+
+    assert row.periods == 2
+    assert row.detectable_mean == 1.0  # 1.758 would be printed without the cap
+    text = power.render_report(report)
+    assert "detectable mean IC 1.0000" in text
+    assert "detectable mean IC 1.7" not in text
+
+
+def test_fewer_than_twenty_observed_sessions_is_not_testable() -> None:
+    row = power.event_power(_series(19, 1000, 400), sample=None, abstention_rate=0.0)
+
+    assert row.observed_sessions == 19
+    assert row.observed_measurable_sessions == 19
+    assert row.measurable_sessions == 0
+    assert row.periods == 0
+    assert row.sd is None
+    assert row.detectable_mean is None
+    assert row.verdict == "not_testable"
+    assert row.reason == "too_few_observed_sessions"
+
+    at_the_floor = power.event_power(_series(20, 1000, 400), sample=None, abstention_rate=0.0)
+    assert at_the_floor.observed_sessions == 20
+    assert at_the_floor.measurable_sessions == 120
+    assert at_the_floor.reason == "detectable_above_threshold"
 
 
 def test_a_session_with_fewer_than_ten_scored_names_is_not_measurable() -> None:
-    below = power.event_power(
-        (power.SessionCount(date(2020, 1, 6), survivors=1000, event_names=9),), sample=None
-    )
+    below = power.event_power(_series(20, 1000, 9), sample=None, abstention_rate=0.0)
+    assert below.observed_sessions == 20
     assert below.observed_measurable_sessions == 0
     assert below.measurable_sessions == 0
-    assert below.periods == 0
     assert below.detectable_mean is None
     assert below.verdict == "not_testable"
+    assert below.reason == "below_measurable_floor"
 
-    at_the_floor = power.event_power(
-        (power.SessionCount(date(2020, 1, 6), survivors=1000, event_names=10),), sample=None
-    )
-    assert at_the_floor.observed_measurable_sessions == 1
+    at_the_floor = power.event_power(_series(20, 1000, 10), sample=None, abstention_rate=0.0)
+    assert at_the_floor.observed_measurable_sessions == 20
     assert at_the_floor.measurable_sessions == 120
-    assert at_the_floor.verdict == "testable"
-    assert at_the_floor.detectable_mean is not None
+    assert at_the_floor.reason == "detectable_above_threshold"
 
 
-def test_the_primary_sample_can_be_unmeasurable_while_the_census_is_not() -> None:
-    counts = _counts((date(2020, 1, 6), 2000, 40))
+def test_model_abstention_reduces_the_scored_names_and_can_make_a_session_unmeasurable() -> None:
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 1000, 100)
 
-    report = power.power_report(counts, first=date(2020, 1, 6), last=date(2020, 1, 6))
+    without = power.event_power(counts, sample=None, abstention_rate=0.0)
+    with_ten_percent = power.event_power(counts, sample=None, abstention_rate=0.10)
+    with_thirty_percent = power.event_power(counts, sample=None, abstention_rate=0.30)
 
-    # 40 events among 2000 survivors: about 6 of a 300-name sample carry a score, below 10.
-    assert report["rows"]["n300"]["verdict"] == "not_testable"
-    assert report["rows"]["census"]["verdict"] == "testable"
+    assert without.projected_scored_names == 100
+    assert with_ten_percent.projected_scored_names == 90
+    assert with_thirty_percent.projected_scored_names == 70
+    assert without.sd is not None and with_thirty_percent.sd is not None
+    assert with_thirty_percent.sd > without.sd  # fewer scored names means a noisier session
+
+    crossing = _series(power.MIN_OBSERVED_SESSIONS, 1000, 11)
+    assert (
+        power.event_power(crossing, sample=None, abstention_rate=0.0).observed_measurable_sessions
+        == 20
+    )
+    assert (
+        power.event_power(crossing, sample=None, abstention_rate=0.30).observed_measurable_sessions
+        == 0
+    )
+
+
+def test_the_projection_is_the_expected_post_abstention_scored_count() -> None:
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 2000, 400)
+
+    row300 = power.event_power(counts, sample=300, abstention_rate=0.10)
+    census = power.event_power(counts, sample=None, abstention_rate=0.10)
+
+    assert row300.projected_scored_names == round(400 * 300 / 2000 * (1 - 0.10)) == 54
+    assert census.projected_scored_names == round(400 * (1 - 0.10)) == 360
+
+
+# --- the power arithmetic, projected from the observed sessions ---------------------------------
+
+
+def test_a_larger_measured_cross_section_can_detect_a_smaller_mean() -> None:
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 2000, 400)
+
+    report = power.power_report(counts, first=_days(20)[0], last=_days(20)[-1])
+    n300, census = report["rows"]["n300"], report["rows"]["census"]
+
+    assert n300["sd"] > census["sd"]
+    assert n300["detectable_mean"] > census["detectable_mean"]
+    assert n300["verdict"] == census["verdict"] == "not_testable"
+    assert n300["reason"] == census["reason"] == "detectable_above_threshold"
+
+    narrow = power.event_power(counts, sample=100)
+    wide = power.event_power(counts, sample=None)
+    assert narrow.detectable_mean is not None and wide.detectable_mean is not None
+    assert narrow.sd is not None and wide.sd is not None
+    assert narrow.sd > wide.sd
+    assert narrow.detectable_mean > wide.detectable_mean
 
 
 def test_the_verdict_is_not_testable_below_sixty_projected_measurable_sessions() -> None:
-    sessions = tuple(date(2020, 1, day) for day in range(1, 11))
-    four_of_ten = _counts(
-        *((session, 1000, 12 if index < 4 else 3) for index, session in enumerate(sessions))
+    below = power.event_power(
+        _counts(
+            *(
+                (day, 1000, 1000 if index < 9 else 3)
+                for index, day in enumerate(_days(power.MIN_OBSERVED_SESSIONS))
+            )
+        ),
+        sample=None,
+        abstention_rate=0.0,
     )
+    assert below.observed_sessions == 20
+    assert below.observed_measurable_sessions == 9
+    assert below.measurable_sessions == round(9 / 20 * power.WINDOW_SESSIONS) == 54
+    assert below.reason == "below_measurable_floor"
 
-    below = power.event_power(four_of_ten, sample=None)
-    assert below.observed_measurable_sessions == 4
-    assert below.measurable_sessions == round(4 / 10 * power.WINDOW_SESSIONS) == 48
-    assert below.detectable_mean is not None
-    assert below.verdict == "not_testable"
-
-    five_of_ten = _counts(
-        *((session, 1000, 12 if index < 5 else 3) for index, session in enumerate(sessions))
+    at_the_floor = power.event_power(
+        _counts(
+            *(
+                (day, 1000, 1000 if index < 10 else 3)
+                for index, day in enumerate(_days(power.MIN_OBSERVED_SESSIONS))
+            )
+        ),
+        sample=None,
+        sd_between=0.05,
+        abstention_rate=0.0,
     )
-    at_the_floor = power.event_power(five_of_ten, sample=None)
     assert at_the_floor.measurable_sessions == 60
     assert at_the_floor.verdict == "testable"
+    assert at_the_floor.reason is None
 
 
 def test_a_horizon_longer_than_one_uses_non_overlapping_periods() -> None:
-    counts = _counts(*((date(2020, 1, day), 1000, 100) for day in (2, 3, 6)))
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 1000, 1000)
 
-    row = power.event_power(counts, sample=None, horizon=5)
+    row = power.event_power(counts, sample=None, horizon=5, abstention_rate=0.0)
 
     assert row.measurable_sessions == 120
     assert row.periods == 24
 
 
+def test_the_primary_sample_can_be_unmeasurable_while_the_census_is_measurable() -> None:
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 2000, 40)
+
+    report = power.power_report(counts, first=_days(20)[0], last=_days(20)[-1])
+
+    assert report["rows"]["n300"]["reason"] == "below_measurable_floor"
+    assert report["rows"]["census"]["reason"] == "detectable_above_threshold"
+
+
 def test_event_power_refuses_a_design_it_cannot_answer() -> None:
-    counts = (power.SessionCount(date(2020, 1, 6), survivors=100, event_names=100),)
+    counts = (power.SessionCount(START, survivors=100, event_names=100),)
     for wrong in (
         {"sessions": 0},
         {"horizon": 0},
-        {"between_day_sd": 0.0},
-        {"between_day_sd": float("nan")},
+        {"sd_between": 0.0},
+        {"sd_between": float("nan")},
+        {"sd_between": 1.5},
+        {"abstention_rate": -0.1},
+        {"abstention_rate": 1.0},
+        {"abstention_rate": float("nan")},
         {"level": 1.0},
         {"power": 1.0},
         {"sample": 0},
@@ -373,55 +532,111 @@ def test_event_power_refuses_a_design_it_cannot_answer() -> None:
     with pytest.raises(power.PowerRequestError):
         power.event_power((), sample=None)
     with pytest.raises(power.PowerRequestError):
-        power.event_power(
-            (power.SessionCount(date(2020, 1, 6), survivors=3, event_names=4),), sample=None
-        )
+        power.event_power((power.SessionCount(START, survivors=3, event_names=4),), sample=None)
     with pytest.raises(power.PowerRequestError):
-        power.SessionCount(date(2020, 1, 6), survivors=-1, event_names=0)
+        power.SessionCount(START, survivors=-1, event_names=0)
 
 
 # --- the report the registration writer reads ----------------------------------------------------
 
 
+ROW_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "sample",
+        "sample_size",
+        "projected_scored_names",
+        "observed_sessions",
+        "observed_measurable_sessions",
+        "measurable_sessions",
+        "periods",
+        "sd",
+        "detectable_mean",
+        "detectable_threshold",
+        "verdict",
+        "reason",
+    }
+)
+PLANNING_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "window_sessions",
+        "primary_horizon",
+        "sd_between",
+        "sd_between_note",
+        "abstention_rate",
+        "abstention_note",
+        "min_observed_sessions",
+        "detectable_mean_threshold",
+        "threshold_note",
+        "expected_count_note",
+        "test_level",
+        "target_power",
+        "primary_sample_size",
+        "min_scored_names",
+        "min_measurable_sessions",
+        "verdict_note",
+    }
+)
+
+
 def test_the_report_is_the_writer_contract_and_round_trips(tmp_path: Path) -> None:
-    counts = _counts(*((date(2020, 1, day), 2000, 400) for day in (2, 3, 6)))
-    first, last = date(2020, 1, 2), date(2020, 1, 6)
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 1000, 1000)
+    first, last = _days(power.MIN_OBSERVED_SESSIONS)[0], _days(power.MIN_OBSERVED_SESSIONS)[-1]
 
     report = power.power_report(
         counts,
         first=first,
         last=last,
-        between_day_sd=0.2,
-        level=0.10,
-        power=0.9,
+        sd_between=0.05,
+        abstention_rate=0.0,
         source={"step0_registration": "docs/research/p7-registration.json"},
     )
 
     assert report["schema"] == power.POWER_REPORT_SCHEMA
     assert report["first"] == first.isoformat()
     assert report["last"] == last.isoformat()
-    assert report["sessions_observed"] == 3
+    assert report["sessions_observed"] == 20
     planning = report["planning"]
-    assert planning["window_sessions"] == power.WINDOW_SESSIONS
-    assert planning["primary_horizon"] == power.PRIMARY_HORIZON
-    assert planning["between_day_sd"] == 0.2
-    assert planning["test_level"] == 0.10
-    assert planning["target_power"] == 0.9
+    assert set(planning) == PLANNING_KEYS
+    assert planning["window_sessions"] == 120
+    assert planning["primary_horizon"] == 1
+    assert planning["sd_between"] == 0.05
+    assert planning["abstention_rate"] == 0.0
+    assert planning["min_observed_sessions"] == 20
+    assert planning["detectable_mean_threshold"] == 0.02
+    assert planning["test_level"] == 0.05
+    assert planning["target_power"] == 0.8
     assert planning["primary_sample_size"] == 300
     assert planning["min_scored_names"] == 10
     assert planning["min_measurable_sessions"] == 60
+    for note in (
+        "sd_between_note",
+        "abstention_note",
+        "threshold_note",
+        "expected_count_note",
+        "verdict_note",
+    ):
+        assert isinstance(planning[note], str) and planning[note]
+    assert "expected count" in planning["expected_count_note"]
+    assert "hypergeometric" in planning["expected_count_note"]
+    assert "abstention" in planning["expected_count_note"]
     assert report["source"] == {"step0_registration": "docs/research/p7-registration.json"}
 
     rows = report["rows"]
     assert set(rows) == {"n300", "census"}
     for label, size in (("n300", 300), ("census", None)):
         row = rows[label]
+        assert set(row) == ROW_KEYS
         assert row["sample"] == label
         assert row["sample_size"] == size
-        assert row["verdict"] in {"testable", "not_testable"}
-        for field in ("measurable_sessions", "periods", "detectable_mean"):
-            assert field in row
-        assert row["periods"] == row["measurable_sessions"]  # h=1
+        assert row["observed_sessions"] == 20
+        assert row["observed_measurable_sessions"] == 20
+        assert row["measurable_sessions"] == 120
+        assert row["periods"] == 120
+        assert row["sd"] is not None and 0 < row["sd"] <= 1.0
+        assert row["detectable_mean"] is not None and row["detectable_mean"] <= 1.0
+        assert row["detectable_threshold"] == 0.02
+        assert row["verdict"] == "testable"
+        assert row["reason"] is None
 
     path = tmp_path / "p7-c-power.json"
     assert power.write_power_report(path, report) == path
@@ -429,9 +644,15 @@ def test_the_report_is_the_writer_contract_and_round_trips(tmp_path: Path) -> No
     assert sorted(item.name for item in tmp_path.iterdir()) == ["p7-c-power.json"]
 
 
-def test_the_report_carries_no_label_or_return() -> None:
-    counts = _counts((date(2020, 1, 6), 2000, 400))
-    report = power.power_report(counts, first=date(2020, 1, 6), last=date(2020, 1, 6))
+def test_the_report_carries_no_label_or_return_and_prints_the_notes() -> None:
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 1000, 1000)
+    report = power.power_report(
+        counts,
+        first=_days(20)[0],
+        last=_days(20)[-1],
+        sd_between=0.05,
+        abstention_rate=0.0,
+    )
 
     forbidden = {"label", "labels", "return", "returns", "outcome", "ic", "rank_ic", "realized"}
     keys: set[str] = set()
@@ -453,11 +674,26 @@ def test_the_report_carries_no_label_or_return() -> None:
     assert "no labels and no returns were read" in text
     assert "not evidence" in text
     assert "候选" in text
-    assert "testable" in text
+    assert "expected count" in text
+    assert "abstention" in text
     assert "Tushare" not in text and "DeepSeek" not in text
 
 
 # --- the command line ----------------------------------------------------------------------------
+
+
+def _main_arguments(panel: Path, tmp_path: Path, *extra: str) -> list[str]:
+    return [
+        "--panel-dir",
+        str(panel),
+        "--first",
+        "2020-01-02",
+        "--last",
+        "2020-01-21",
+        "--repo",
+        str(tmp_path),
+        *extra,
+    ]
 
 
 def test_main_without_json_prints_both_rows_and_writes_nothing(
@@ -466,7 +702,7 @@ def test_main_without_json_prints_both_rows_and_writes_nothing(
     monkeypatch.chdir(tmp_path)
     panel = tmp_path / "panel"
     panel.mkdir()
-    counts = _counts((date(2020, 1, 6), 2000, 40))
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 2000, 400)
     monkeypatch.setattr(power, "_load_step_zero_registration", lambda path, repo: _registration())
     monkeypatch.setattr(power, "_open_panel", lambda path: PANEL)
     monkeypatch.setattr(power, "historical_event_counts", lambda store, **kwargs: counts)
@@ -477,20 +713,7 @@ def test_main_without_json_prints_both_rows_and_writes_nothing(
     monkeypatch.setattr(power, "write_power_report", refuse)
     before = _tree(tmp_path)
 
-    code = power.main(
-        [
-            "--panel-dir",
-            str(panel),
-            "--step0-registration",
-            "docs/research/p7-registration.json",
-            "--first",
-            "2020-01-02",
-            "--last",
-            "2020-01-03",
-            "--repo",
-            str(tmp_path),
-        ]
-    )
+    code = power.main(_main_arguments(panel, tmp_path, "--sd-between", "0.05"))
     captured = capsys.readouterr()
 
     assert code == 0
@@ -498,12 +721,15 @@ def test_main_without_json_prints_both_rows_and_writes_nothing(
     assert "n300" in captured.out
     assert "census" in captured.out
     assert "N=300" in captured.out
+    assert "observed 20 session(s)" in captured.out
+    assert "sd " in captured.out
+    assert "detectable mean IC" in captured.out
+    assert "threshold 0.0200" in captured.out
     assert "verdict testable" in captured.out
     assert "verdict not testable" in captured.out
-    assert "periods" in captured.out
-    assert "detectable mean IC" in captured.out
-    assert "projected" in captured.out
-    assert "planning assumption" in captured.out
+    assert "detectable above threshold" in captured.out
+    assert "expected count" in captured.out
+    assert "abstention" in captured.out
     assert "候选" in captured.out
     assert "not evidence" in captured.out
     assert _tree(tmp_path) == before
@@ -515,25 +741,23 @@ def test_main_with_json_writes_the_report_it_prints(
     monkeypatch.chdir(tmp_path)
     panel = tmp_path / "panel"
     panel.mkdir()
-    counts = _counts((date(2020, 1, 6), 2000, 400))
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 2000, 400)
     monkeypatch.setattr(power, "_load_step_zero_registration", lambda path, repo: _registration())
     monkeypatch.setattr(power, "_open_panel", lambda path: PANEL)
     monkeypatch.setattr(power, "historical_event_counts", lambda store, **kwargs: counts)
     report_path = tmp_path / "power.json"
 
     code = power.main(
-        [
-            "--panel-dir",
-            str(panel),
-            "--first",
-            "2020-01-02",
-            "--last",
-            "2020-01-03",
-            "--repo",
-            str(tmp_path),
+        _main_arguments(
+            panel,
+            tmp_path,
+            "--sd-between",
+            "0.05",
+            "--abstention-rate",
+            "0.10",
             "--json",
             str(report_path),
-        ]
+        )
     )
     captured = capsys.readouterr()
 
@@ -542,7 +766,39 @@ def test_main_with_json_writes_the_report_it_prints(
     document = json.loads(report_path.read_text(encoding="utf-8"))
     assert document["schema"] == power.POWER_REPORT_SCHEMA
     assert set(document["rows"]) == {"n300", "census"}
-    assert document["rows"]["n300"]["verdict"] == "testable"
+    assert document["planning"]["sd_between"] == 0.05
+    assert document["planning"]["abstention_rate"] == 0.10
+    for label in ("n300", "census"):
+        row = document["rows"][label]
+        assert set(row) == ROW_KEYS
+        assert row["observed_sessions"] == 20
+        assert row["sd"] is not None
+        assert row["detectable_threshold"] == 0.02
+        assert row["verdict"] in {"testable", "not_testable"}
+
+
+def test_the_old_between_day_sd_flag_is_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    code = power.main(
+        [
+            "--panel-dir",
+            str(tmp_path / "panel"),
+            "--first",
+            "2020-01-02",
+            "--last",
+            "2020-01-21",
+            "--between-day-sd",
+            "0.10",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "unrecognized arguments" in captured.err
+    assert "--between-day-sd" in captured.err
 
 
 def test_a_committed_step0_registration_is_read_and_named_in_the_report(
@@ -552,7 +808,7 @@ def test_a_committed_step0_registration_is_read_and_named_in_the_report(
     registration = _committed_registration(repo)
     panel = tmp_path / "panel"
     panel.mkdir()
-    counts = _counts((date(2020, 1, 6), 2000, 400))
+    counts = _series(power.MIN_OBSERVED_SESSIONS, 2000, 400)
     monkeypatch.setattr(power, "_open_panel", lambda directory: PANEL)
     monkeypatch.setattr(power, "historical_event_counts", lambda store, **kwargs: counts)
     report_path = tmp_path / "power.json"
@@ -566,7 +822,7 @@ def test_a_committed_step0_registration_is_read_and_named_in_the_report(
             "--first",
             "2020-01-02",
             "--last",
-            "2020-01-03",
+            "2020-01-21",
             "--repo",
             str(repo),
             "--json",
@@ -603,7 +859,7 @@ def test_main_refuses_an_unreadable_registration_by_name(
             "--first",
             "2020-01-02",
             "--last",
-            "2020-01-03",
+            "2020-01-21",
             "--repo",
             str(tmp_path),
             "--json",
@@ -657,7 +913,7 @@ def test_main_refuses_a_missing_panel_without_creating_it(
             "--first",
             "2020-01-02",
             "--last",
-            "2020-01-03",
+            "2020-01-21",
             "--repo",
             str(tmp_path),
         ]
