@@ -55,7 +55,7 @@ skip or read a record another configuration filed (`AgentEvaluationError`):
   the labels reader. This is the same bound-and-on-time pair `agent_evening._step0_day` makes.
 - **A duplicate record for one session**, of either family.
 
-## The futility look (PROVISIONAL pending D5)
+## The futility look (adopted by D5, 2026-11-12)
 
 "Not measurable" (D3/D5) is a distinct outcome and never "no evidence": a session is measurable
 when at least `min_scored` names survive the join of the two records and the label, and the
@@ -69,9 +69,11 @@ value. When those hold and the interim's cumulative mean is at or below zero the
 before the window-full outcomes, because it was decided on the first interim positions' immutable
 data, so a window that later fills or matures cannot erase it.
 
-The futility rule's *form* and the one-sided reading below are D5 content the user has not ruled
-on. Every evaluation carries `provisional` -- `PROVISIONAL_WORDINGS`, naming both -- and no report
-may present either as adopted.
+The user adopted this form and the one-sided reading below on 2026-11-12 (D5, "按推荐"), and the
+decision-chain's §9 records the amendment that replaced the old two-test wording ("h1 ≥ 0.02 and
+t ≥ 2, or h5 ≥ 0.06") with this one test. Every evaluation carries `adopted` -- the two adopted
+rules -- so a report can state the rule it applied and no reader mistakes it for a post-hoc
+choice.
 
 ## The test
 
@@ -96,11 +98,13 @@ exploratory arms; the primary arm may not appear there.
 from __future__ import annotations
 
 import dataclasses
+import json
 import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Final, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -123,7 +127,7 @@ from openalpha_cn.domain.incremental_ic import (
 from openalpha_cn.domain.labels import LabelWindow, OutcomeLabel
 from openalpha_cn.domain.prediction_record import PredictionRecord
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
-from openalpha_cn.domain.trading_calendar import TradingCalendar
+from openalpha_cn.domain.trading_calendar import CalendarHorizonError, TradingCalendar
 from openalpha_cn.panel_ingest import session_publication_instant
 from openalpha_cn.strategy_agent_forward import REGISTRATION_HYPERPARAMETER
 from openalpha_cn.strategy_registration import (
@@ -165,24 +169,48 @@ NOT_MEASURABLE_WORDING: Final = (
 MINIMUM_TEST_SAMPLE: Final[int] = 2
 """`outcome_statistics.MINIMUM_INTERVAL_SAMPLE_SIZE`: below two values there is no test."""
 
-PROVISIONAL_FUTILITY_WORDING: Final = (
-    "PROVISIONAL pending the user's D5 decision: the futility form -- a cumulative mean at or "
-    "below zero over the first interim_session positions stops the trial -- is plan C's "
-    "recommendation D5 has not ruled on, not an adopted rule, and no report may present it as "
-    "registered"
+ADOPTED_FUTILITY_WORDING: Final = (
+    "the adopted futility rule (D5, user 2026-11-12): at forward session 60, once all 60 interim "
+    "positions have matured and at least the pro-rated measurable floor carries a value, a "
+    "cumulative mean at or below zero stops the trial and the stop is sticky; the form was "
+    "adopted as recommended, and a thin or immature interim is not a stop"
 )
-"""D5: the futility rule's *form* is not adopted yet; see plan C's decisions D5 and F5."""
-PROVISIONAL_ONE_SIDED_WORDING: Final = (
-    "PROVISIONAL pending the user's D5 decision: the one-sided reading -- a two-sided sign-flip "
-    "p-value halved for a positive mean and 1 - p/2 below it -- is plan C's recommendation D5 has "
-    "not ruled on, not an adopted rule, and no report may present it as registered"
+"""D5's adopted futility form, with its guards restated. Plan C's decision D5 (2026-11-12)."""
+ADOPTED_ONE_SIDED_WORDING: Final = (
+    "the adopted one-sided reading (D5, user 2026-11-12): a two-sided sign-flip p-value halved "
+    "for a positive mean and 1 - p/2 below it, applied to the registered direction mean > 0 at "
+    "alpha = 0.05; adopted as recommended, and the h=5 and rule-family reads are exploratory"
 )
-"""D5: reading the two-sided sign-flip test one-sidedly is not adopted yet either."""
-PROVISIONAL_WORDINGS: Final[tuple[str, ...]] = (
-    PROVISIONAL_FUTILITY_WORDING,
-    PROVISIONAL_ONE_SIDED_WORDING,
+"""D5's adopted one-sided reading of the two-sided sign-flip test."""
+D5_WORDINGS: Final[tuple[str, ...]] = (
+    ADOPTED_FUTILITY_WORDING,
+    ADOPTED_ONE_SIDED_WORDING,
 )
-"""Every PROVISIONAL label an evaluation carries: both D5 items, always populated."""
+"""Every adopted D5 rule an evaluation carries: both, always populated."""
+
+ADOPTED_WINDOW_SESSIONS: Final[int] = 120
+"""D5: the forward window -- 120 forward sessions after C's registration commit."""
+ADOPTED_INTERIM_SESSION: Final[int] = 60
+"""D5: the one futility look is at forward session 60."""
+ADOPTED_MIN_SCORED: Final[int] = 10
+"""D3: a session is measurable with at least ten scored primary names after the join."""
+ADOPTED_MIN_MEASURABLE_SESSIONS: Final[int] = 60
+"""D3: fewer than 60 measurable of the 120 positions is `not_measurable`, its own outcome."""
+ADOPTED_LEVEL: Final[float] = 0.05
+"""D5: one-sided alpha = 0.05 for the one primary test."""
+ADOPTED_Q: Final[float] = 0.10
+"""D5: the exploratory family's Benjamini-Yekutieli false discovery rate."""
+ADOPTED_SECONDARY_ARMS: Final[tuple[tuple[str, str, int], ...]] = (
+    (AGENT_RULE_FAMILY, "primary", PRIMARY_HORIZON),
+    (AGENT_LLM_FAMILY, "primary", 5),
+    (AGENT_LLM_FAMILY, "coverage", PRIMARY_HORIZON),
+)
+"""D5: "everything else" is exploratory, controlled as one family at `q`.
+
+The three arms name the rule family, the h=5 read and the coverage set once each -- the plan's
+sentence "the rule family, h=5 and the coverage set are exploratory" enumerates the dimensions,
+not the full product. The horizon of an exploratory arm is the record's own 5d read at h=5; the
+coverage set's arm stays at the primary h=1 so it is the same reading on the other set."""
 
 DETECTABLE_IC_BASIS: Final = (
     "the mean detectable at probability DETECTABLE_AT_POWER from the window's measured "
@@ -190,6 +218,301 @@ DETECTABLE_IC_BASIS: Final = (
     "power and never a result"
 )
 """What every printed detectable mean is: the survivor power block's sentence, one plane over."""
+
+DRY_WEEK_SCRATCH_MARKER: Final = "c-dry-week-scratch.json"
+"""The marker file a D7 dry-week scratch runtime carries at its root (`V2-P7-013`).
+
+The dry week measures the model family's operational behaviour before C's registration exists
+(D7: at most five evenings, at most 600 model requests each, operational metrics only). Its
+journal is not a forward record: no prediction is filed and no score is kept, so its scratch
+runtime must never be read as C's. `scripts/agent_evening.py --dry-week` writes this marker;
+`scripts/agent_report.py` and `evaluate` refuse a runtime that holds it, rather than silently
+measuring an evening that was never a prediction."""
+DRY_WEEK_SCRATCH_SCHEMA: Final = "openalpha-c-dry-week-scratch/v1"
+"""The marker's schema; anything else in the marker file is a refusal, not a scratch runtime."""
+
+
+def refuse_a_dry_week_runtime(runtime_dir: Path) -> None:
+    """Refuse a runtime marked as a D7 dry-week scratch: it is never evaluated.
+
+    The dry week is operational measurement before registration; reading it as C's forward
+    sample would treat a run C never made as a prediction. A marker that cannot be read is a
+    refusal too (fail closed): a runtime whose status cannot be stated is not evaluated.
+    """
+    marker = Path(runtime_dir) / DRY_WEEK_SCRATCH_MARKER
+    if not marker.exists():
+        return
+    try:
+        body = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise AgentEvaluationError(
+            f"{runtime_dir} carries a {DRY_WEEK_SCRATCH_MARKER} that cannot be read "
+            f"({error}); a runtime whose dry-week status cannot be stated is not evaluated"
+        ) from error
+    if not isinstance(body, Mapping) or body.get("schema") != DRY_WEEK_SCRATCH_SCHEMA:
+        raise AgentEvaluationError(
+            f"{runtime_dir} carries a {DRY_WEEK_SCRATCH_MARKER} that is not a "
+            f"{DRY_WEEK_SCRATCH_SCHEMA} document; the evaluator does not read a runtime whose "
+            "status it cannot verify"
+        )
+    raise AgentEvaluationError(
+        f"{runtime_dir} is a D7 dry-week scratch runtime (marked {DRY_WEEK_SCRATCH_MARKER}): "
+        "its evenings measured only the model family's operational behaviour and filed no "
+        "prediction, so they are never part of C's forward sample and this evaluator refuses "
+        "to read them as one"
+    )
+
+
+ANCHOR_SEARCH_DAYS: Final[int] = 370
+"""How far past a registration commit `expected_forward_anchor` searches for the next session."""
+
+
+def expected_forward_anchor(calendar: TradingCalendar, *, committed_at: datetime) -> date:
+    """C's registered first forward session: the first trading session after the commit's time.
+
+    N2 (fix round 2): the window anchor is the first trading session whose 16:30 publication
+    instant is **strictly after** the registration commit's time. A commit on a trading day before
+    16:30 makes that same session the anchor (its data becomes knowable after the registration);
+    a commit after 16:30, on a weekend or on a holiday is followed to the next trading session.
+    The report checks the registered anchor against this rule at L6, and the registered evening
+    checks it again in step 1 so a mis-planned commit time fails on day 1, not on day 120.
+    """
+    point = committed_at.astimezone(SHANGHAI)
+    day = point.date()
+    try:
+        for _ in range(ANCHOR_SEARCH_DAYS):
+            if calendar.is_trading_day(day) and session_publication_instant(day) > point:
+                return day
+            day += timedelta(days=1)
+    except CalendarHorizonError as error:
+        raise AgentEvaluationError(
+            f"the anchor cannot be derived: the calendar does not cover the commit's year ({error})"
+        ) from error
+    raise AgentEvaluationError(
+        f"the trading calendar names no session in the {ANCHOR_SEARCH_DAYS} days after the "
+        f"registration commit {point.isoformat()}, so it cannot state C's first forward session; "
+        "the anchor cannot be derived: the calendar does not cover the commit's year"
+    )
+
+
+# --- the registration's companion blocks (D1/D7, read by the writer, the report and the tests) --
+
+AGENT_FORWARD_POWER_KEY: Final = "agent_forward_power"
+"""The settings key of the D1 power decision the registration freezes."""
+AGENT_FORWARD_POWER_SCHEMA: Final = "agent-forward-power/v1"
+"""The power block's schema: the chosen sample, its verdict, and the report it came from."""
+AGENT_FORWARD_STEP0_KEY: Final = "agent_forward_step0"
+"""The settings key naming the Step 0 registration C reads (its book, identity and seed)."""
+AGENT_FORWARD_STEP0_SCHEMA: Final = "agent-step0-registration/v1"
+AGENT_FORWARD_ANCHOR_KEY: Final = "agent_forward_anchor"
+"""The settings key of C's registered first forward session (the evaluator's window anchor)."""
+AGENT_FORWARD_ANCHOR_SCHEMA: Final = "agent-forward-anchor/v1"
+AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY: Final = "agent_forward_protocol_document"
+"""The settings key of the protocol document C's registration freezes (fix round 1, F7)."""
+AGENT_FORWARD_PROTOCOL_DOCUMENT_SCHEMA: Final = "agent-forward-protocol-document/v1"
+
+_HEX_SHA256: Final = r"[0-9a-f]{64}"
+
+
+class _PowerBlock(BaseModel):
+    """The `agent-forward-power/v1` block: the D1 decision the registration freezes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agent-forward-power/v1"]
+    sample: Literal["n300", "census"]
+    verdict: Literal["testable", "not_testable"]
+    register_untestable: bool
+    report_sha256: Annotated[str, Field(pattern=_HEX_SHA256)]
+    measurable_sessions: Annotated[int, Field(strict=True, ge=0)]
+    detectable_mean: Annotated[float, Field(strict=True, ge=0)] | None
+
+    @model_validator(mode="after")
+    def _an_untestable_set_is_recorded_and_nothing_else_is(self) -> _PowerBlock:
+        if self.verdict == "not_testable" and not self.register_untestable:
+            raise ValueError(
+                "the power block says not_testable but does not record the --register-untestable "
+                "decision; D1 registers an untestable set only as the user's explicit choice"
+            )
+        if self.verdict == "testable" and self.register_untestable:
+            raise ValueError(
+                "the power block records --register-untestable but the chosen set is testable; "
+                "the flag exists for the not_testable branch only"
+            )
+        return self
+
+
+class _Step0Block(BaseModel):
+    """The `agent-step0-registration/v1` block: which Step 0 registration C reads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agent-step0-registration/v1"]
+    path: Annotated[str, Field(min_length=1)]
+    registration_sha256: Annotated[str, Field(pattern=_HEX_SHA256)]
+    config_id: Annotated[str, Field(min_length=1)]
+    seed: Annotated[int, Field(strict=True)]
+
+
+class _AnchorBlock(BaseModel):
+    """The `agent-forward-anchor/v1` block: C's registered first forward session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agent-forward-anchor/v1"]
+    session: date
+
+
+class _ProtocolDocumentBlock(BaseModel):
+    """The `agent-forward-protocol-document/v1` block: the frozen protocol text's address."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agent-forward-protocol-document/v1"]
+    path: Annotated[str, Field(min_length=1)]
+    sha256: Annotated[str, Field(pattern=_HEX_SHA256)]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentForwardPower:
+    """The D1 power decision: the registered sample, its verdict and the report it came from."""
+
+    sample: Literal["n300", "census"]
+    verdict: Literal["testable", "not_testable"]
+    register_untestable: bool
+    report_sha256: str
+    measurable_sessions: int
+    detectable_mean: float | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentForwardStep0:
+    """The Step 0 registration C reads: its committed path, identity and book seed."""
+
+    path: str
+    registration_sha256: str
+    config_id: str
+    seed: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentForwardAnchor:
+    """C's registered first forward session: the evaluator's window anchor."""
+
+    session: date
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentForwardProtocolDocument:
+    """The protocol document C's registration freezes: its path and committed sha256."""
+
+    path: str
+    sha256: str
+
+
+def _block_of(settings: Mapping[str, object], key: str, schema: str) -> Mapping[str, object]:
+    """The named block of a registration's settings, or a refusal naming why there is none."""
+    if not isinstance(settings, Mapping):
+        raise AgentEvaluationError(
+            f"the registration's settings are {type(settings).__name__}, not an object, so they "
+            f"carry no {key} block"
+        )
+    if key not in settings:
+        raise AgentEvaluationError(
+            f"the registration's settings carry no {key} block; C's registration records the "
+            f"{schema} decision the evaluator and the report read, and is not produced without one"
+        )
+    block = settings[key]
+    if not isinstance(block, Mapping):
+        raise AgentEvaluationError(
+            f"the registration's {key} is {type(block).__name__}, not a {schema} object"
+        )
+    return block
+
+
+def read_agent_forward_power(settings: Mapping[str, object]) -> AgentForwardPower:
+    """The `agent_forward_power` block of C's registered settings (D1)."""
+    block = _block_of(settings, AGENT_FORWARD_POWER_KEY, AGENT_FORWARD_POWER_SCHEMA)
+    try:
+        parsed = _PowerBlock.model_validate(dict(block))
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or 'the block'}: {item['msg']}"
+            for item in error.errors()
+        )
+        raise AgentEvaluationError(
+            f"the registration's {AGENT_FORWARD_POWER_KEY} is not a valid "
+            f"{AGENT_FORWARD_POWER_SCHEMA} block: {problems}"
+        ) from error
+    return AgentForwardPower(
+        sample=parsed.sample,
+        verdict=parsed.verdict,
+        register_untestable=parsed.register_untestable,
+        report_sha256=parsed.report_sha256,
+        measurable_sessions=parsed.measurable_sessions,
+        detectable_mean=parsed.detectable_mean,
+    )
+
+
+def read_agent_forward_step0(settings: Mapping[str, object]) -> AgentForwardStep0:
+    """The `agent_forward_step0` block: the committed Step 0 registration C reads."""
+    block = _block_of(settings, AGENT_FORWARD_STEP0_KEY, AGENT_FORWARD_STEP0_SCHEMA)
+    try:
+        parsed = _Step0Block.model_validate(dict(block))
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or 'the block'}: {item['msg']}"
+            for item in error.errors()
+        )
+        raise AgentEvaluationError(
+            f"the registration's {AGENT_FORWARD_STEP0_KEY} is not a valid "
+            f"{AGENT_FORWARD_STEP0_SCHEMA} block: {problems}"
+        ) from error
+    return AgentForwardStep0(
+        path=parsed.path,
+        registration_sha256=parsed.registration_sha256,
+        config_id=parsed.config_id,
+        seed=parsed.seed,
+    )
+
+
+def read_agent_forward_anchor(settings: Mapping[str, object]) -> AgentForwardAnchor:
+    """The `agent_forward_anchor` block: C's registered first forward session."""
+    block = _block_of(settings, AGENT_FORWARD_ANCHOR_KEY, AGENT_FORWARD_ANCHOR_SCHEMA)
+    try:
+        parsed = _AnchorBlock.model_validate(dict(block))
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or 'the block'}: {item['msg']}"
+            for item in error.errors()
+        )
+        raise AgentEvaluationError(
+            f"the registration's {AGENT_FORWARD_ANCHOR_KEY} is not a valid "
+            f"{AGENT_FORWARD_ANCHOR_SCHEMA} block: {problems}"
+        ) from error
+    return AgentForwardAnchor(session=parsed.session)
+
+
+def read_agent_forward_protocol_document(
+    settings: Mapping[str, object],
+) -> AgentForwardProtocolDocument:
+    """The `agent_forward_protocol_document` block: the committed protocol text C freezes (F7)."""
+    block = _block_of(
+        settings, AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY, AGENT_FORWARD_PROTOCOL_DOCUMENT_SCHEMA
+    )
+    try:
+        parsed = _ProtocolDocumentBlock.model_validate(dict(block))
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc']) or 'the block'}: {item['msg']}"
+            for item in error.errors()
+        )
+        raise AgentEvaluationError(
+            f"the registration's {AGENT_FORWARD_PROTOCOL_DOCUMENT_KEY} is not a valid "
+            f"{AGENT_FORWARD_PROTOCOL_DOCUMENT_SCHEMA} block: {problems}"
+        ) from error
+    return AgentForwardProtocolDocument(path=parsed.path, sha256=parsed.sha256)
+
 
 AgentOutcome = Literal[
     "not_yet",
@@ -516,9 +839,9 @@ class AgentEvaluation:
     measurable: int
     missing: tuple[SessionIC, ...]
     power: DetectableIC
-    provisional: tuple[str, ...]
-    """The PROVISIONAL labels (`PROVISIONAL_WORDINGS`): the futility form and the one-sided
-    reading are D5 content the user has not ruled on. Always populated, never empty."""
+    adopted: tuple[str, ...]
+    """The adopted D5 rules (`D5_WORDINGS`): the futility form and the one-sided reading the user
+    adopted on 2026-11-12. Always populated, never empty."""
 
 
 # --- the evaluator -----------------------------------------------------------------------------
@@ -654,6 +977,7 @@ def evaluate(
     anchor_session: date,
     through: date,
     as_of: datetime,
+    agent_runtime_dir: Path | None = None,
 ) -> AgentEvaluation:
     """The registered evaluation over stored records; see the module docstring for every rule.
 
@@ -662,7 +986,11 @@ def evaluate(
     Step 0's `RegisteredConfiguration`: every Step 0 record the window reads must be bound to it
     and registered before its cutoff. `anchor_session` is C's registration's first forward
     session; the window starts there and is never derived from a store's earliest session.
+    `agent_runtime_dir`, when given, is C's runtime directory: a runtime marked as a D7 dry-week
+    scratch is refused by name (its evening was never a filed prediction).
     """
+    if agent_runtime_dir is not None:
+        refuse_a_dry_week_runtime(agent_runtime_dir)
     step0_index: dict[date, PredictionRecord] = {}
     for record_id in step0_store.list_ids():
         record = step0_store.get(record_id)
@@ -863,7 +1191,7 @@ def evaluate(
         measurable=primary.measurable,
         missing=tuple(item for item in primary_sessions if item.reason == GAP_NO_AGENT_RECORD),
         power=_power_of(primary_sessions, protocol),
-        provisional=PROVISIONAL_WORDINGS,
+        adopted=D5_WORDINGS,
     )
 
 

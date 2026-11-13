@@ -5,12 +5,12 @@
     "batch": 4,
     "boundary": 7,
     "decision": 9,
-    "evaluation": 1,
+    "evaluation": 2,
     "evidence": 10,
     "factor": 28,
     "interface": 9,
     "model": 6,
-    "operations": 54,
+    "operations": 57,
     "panel": 42,
     "product": 3,
     "provider": 8,
@@ -32,13 +32,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 214
+    "NATIVE_COMPLETE": 218
   },
   "totals": {
-    "all_features": 240,
+    "all_features": 244,
     "legacy_acceptance_rows": 26,
-    "true_completed_features": 235,
-    "true_completion_rate_pct": 97.92,
+    "true_completed_features": 239,
+    "true_completion_rate_pct": 97.95,
     "unknown": 0,
     "unreviewed": 0
   }

@@ -100,6 +100,21 @@ PROMPT_HYPERPARAMETER: Final[str] = "prompt"
 AGENT_FEATURE_IDS: Final[tuple[str, ...]] = ("agent_evidence/v1",)
 """The one declared input column: the evidence plane, not a panel feature (see the docstring)."""
 
+AGENT_SCRIPTS: Final[tuple[str, ...]] = (
+    "scripts/agent_evening.py",
+    "scripts/agent_report.py",
+)
+"""C's two shipped scripts, as repository-relative paths: the code C's registration binds
+(`V2-P7-013` task 3.3).
+
+One spelling for three readers: the evening command's step-1 admission
+(`registry.admit_registered_code(also_bound=...)`), the registration writer's bound-tree check,
+and the report's admission. The report is in the list because it is the measured command of the
+same registration (`V2-P7-014`, D8): if it could change after C's registration commit, the record
+the registration binds would no longer be the code that produced the reading. The writer's own
+file and the power calculator are deliberately absent -- they run before the registration (or
+once, at L5) and a registration cannot bind code that is not yet frozen."""
+
 _AGENT_FAMILIES: Final[frozenset[str]] = frozenset({AGENT_LLM_FAMILY, AGENT_RULE_FAMILY})
 _SCORING_SETS: Final[frozenset[str]] = frozenset({"primary", "coverage"})
 
