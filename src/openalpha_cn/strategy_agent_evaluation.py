@@ -286,8 +286,7 @@ def expected_forward_anchor(calendar: TradingCalendar, *, committed_at: datetime
             day += timedelta(days=1)
     except CalendarHorizonError as error:
         raise AgentEvaluationError(
-            f"the anchor cannot be derived: the calendar does not cover the commit's year "
-            f"({error})"
+            f"the anchor cannot be derived: the calendar does not cover the commit's year ({error})"
         ) from error
     raise AgentEvaluationError(
         f"the trading calendar names no session in the {ANCHOR_SEARCH_DAYS} days after the "
