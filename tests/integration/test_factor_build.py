@@ -1182,11 +1182,16 @@ def test_a_factor_reading_a_dataset_with_no_requirement_builder_is_refused_by_na
     asks. The equality is what makes "closed" checkable; the refusal is what makes it useful. A
     factor declaring a dataset outside the table is *declarable* (`FactorField`'s check is
     syntactic and says so), so this really is reachable, and the probe registry is how it is
-    reached without adding a twentieth shipped factor.
+    reached without adding a shipped factor of its own.
 
-    `V2-P3-016` added the seventh row and it is the third that takes a `TradingCalendar` rather
-    than a `dataset=` keyword, which is why `_CALENDAR_SCOPED_REQUIREMENTS` is a named set beside
-    the table instead of a tuple literal inside the loop that dispatches on it.
+    `V2-P3-016` added the first calendar-scoped row and `V2-P7-028` the second (`stk_limit`), which
+    is why `_CALENDAR_SCOPED_REQUIREMENTS` is a named set beside the table instead of a tuple
+    literal inside the loop that dispatches on it.
+
+    The probe reads `adj_factor`, which no shipped factor declares and no row here covers. It used
+    to read `stk_limit` until `V2-P7-028`'s limit-event factors gained that builder, and the move
+    is the point of the `declared <=` assertion above: a dataset that acquires a reader and a
+    builder must stop being the example of one that has neither.
     """
     declared = {dataset for item in FACTOR_DEFINITIONS.definitions for dataset in item.datasets}
 
@@ -1195,6 +1200,7 @@ def test_a_factor_reading_a_dataset_with_no_requirement_builder_is_refused_by_na
         "daily",
         "daily_basic",
         "index_daily",
+        "stk_limit",
         "income",
         "balancesheet",
         "cashflow",
@@ -1202,21 +1208,21 @@ def test_a_factor_reading_a_dataset_with_no_requirement_builder_is_refused_by_na
     }
 
     probe = FactorDefinition(
-        key="probe_band",
+        key="probe_unbuilt",
         version=1,
         family="momentum_reversal",
         direction="higher_is_better",
-        required_fields=(FactorField(dataset="stk_limit", column="up_limit"),),
+        required_fields=(FactorField(dataset="adj_factor", column="adj_factor"),),
         lookback_sessions=1,
         max_window_sessions=1,
         lookback_periods=None,
         max_window_periods=None,
     )
     request = factor_build_request(
-        **_build_parameters(factor="probe_band/v1", tier="raw", transform=""),
+        **_build_parameters(factor="probe_unbuilt/v1", tier="raw", transform=""),
         factors=FactorRegistry((probe,)),
     )
-    with pytest.raises(FactorRequestError, match=r"reads \['stk_limit'\], which this command has"):
+    with pytest.raises(FactorRequestError, match=r"reads \['adj_factor'\], which this command has"):
         build_factor_panels(PanelStore(panel_only / "panel"), request, built_at=RUN_AS_OF)
 
 

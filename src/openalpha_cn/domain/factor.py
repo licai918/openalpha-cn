@@ -235,16 +235,21 @@ FactorFamily = Literal[
     "growth",
     "momentum_reversal",
     "volatility_liquidity",
+    "limit_events",
 ]
-"""The five families `V2-P3-009`..`013` populate, as a closed set rather than free text.
+"""The six families the shipped factors populate, as a closed set rather than free text.
 
 One issue per member, in roadmap order: `009` value (EP / BP / SP / EPcut), `010` quality
 (ROE / ROIC / gross-margin stability / accruals), `011` growth (revenue and net-income
 year-on-year, plus acceleration), `012` momentum and reversal (20/60/120-session, industry
 relative, 5-session reversal), `013` volatility and liquidity (residual and idiosyncratic
-volatility, turnover, Amihud). Closed because `V2-P3-008`'s redundancy analysis groups by
-family and `V2-P3-014`'s three-tier report is produced per family: a sixth spelling of
-"momentum" would silently become a group of one.
+volatility, turnover, Amihud), and `V2-P7-028` limit events (closed-at-up and broken-board
+counts over twenty sessions, read from `daily` against the published `stk_limit` bands).
+Closed because `V2-P3-008`'s redundancy analysis groups by family and `V2-P3-014`'s
+three-tier report is produced per family: a seventh spelling of "momentum" would silently
+become a group of one. The sixth is a family of its own rather than a member of momentum
+because its input is the exchange's published band and its claim is about event frequency,
+not a return path -- and `V2-P3-008` must be able to tell the two groups apart.
 """
 
 FACTOR_FAMILIES: Final[frozenset[str]] = frozenset(get_args(FactorFamily))
