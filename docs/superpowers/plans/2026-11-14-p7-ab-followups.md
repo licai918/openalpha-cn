@@ -40,6 +40,11 @@ and real money vs paper is the user's decision.
   predecessors, newest first; each session is read at `session_publication_instant(s)`, never at the run's
   `as_of`. This is what makes a rerun at a later instant reproduce the same set, which `run_evening`'s
   `unchanged` path requires.
+- **R-N3a -- a restatement inside the window refuses, it does not reproduce (review of Task 1).** The panel store
+  keeps no old versions of a restated row, so reading a session at its own 16:30 after that session was restated
+  refuses (`PanelStorageError`). A v2 book's evening -- first run or rerun -- whose five-session window (or a
+  board streak walk) holds a restated session refuses by name rather than silently changing the vetoed set. The
+  guarantee is "never a different set", not "always the same set". The base book reads no veto (R-N4).
 - **R-N4 -- the base book's bytes do not move.** With `entry_veto == "none"` nothing new is read, filed,
   printed or labelled: no veto read, no new journal key, the same launchd label, the same `EveningResult`
   fields' values. Tests pin it.
@@ -77,8 +82,10 @@ and real money vs paper is the user's decision.
 
 ## Review Focus
 
-1. A rerun of a vetoed evening at a later `as_of`, after a restatement of an older session -> the same vetoed
-   set and the `unchanged` path accepted (Task 3 test `test_a_rerun_after_a_restatement_reproduces_the_vetoed_evening`).
+1. A rerun of a vetoed evening at a later `as_of` (R-N3a): with no restatement -> the `unchanged` path and the
+   same vetoed set (Task 3 test `test_a_rerun_without_a_restatement_reproduces_the_vetoed_evening`); after a
+   restatement of a session inside the window -> refused by name, naming that session, nothing written
+   (Task 3 test `test_a_rerun_after_a_restatement_refuses_rather_than_changing_the_vetoed_evening`).
 2. A veto window that crosses a holiday or New Year -> five *sessions*, not five days; the calendar's start ->
    refused by name (Task 1 tests).
 3. The annotation run against a runtime dir with no B build for the session -> exit 1 with the exact
@@ -186,7 +193,8 @@ and real money vs paper is the user's decision.
   `entry veto market_bearish_5/v1 blocked: <codes or none>` under the same condition.
 
 - [ ] Tests first: a v2 book whose top-ranked survivor is vetoed buys the next one and journals the veto block;
-  a held vetoed name stays held (R-A1); `test_a_rerun_after_a_restatement_reproduces_the_vetoed_evening`;
+  a held vetoed name stays held (R-A1); `test_a_rerun_without_a_restatement_reproduces_the_vetoed_evening`;
+  `test_a_rerun_after_a_restatement_refuses_rather_than_changing_the_vetoed_evening` (R-N3a);
   `test_the_base_book_evening_and_journal_are_unchanged` (a v1/none book: no veto read -- the panel reader is a
   spy that fails if `limit_events_on` is called -- and journal bytes equal a literal captured on the base commit);
   every existing test in the three files green unchanged.
