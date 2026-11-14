@@ -14,6 +14,7 @@ import hashlib
 import importlib
 import json
 import sys
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any, Final
@@ -42,6 +43,7 @@ from openalpha_cn import (  # noqa: E402
     strategy_survivor_continuation,
     strategy_survivor_forward,
 )
+from openalpha_cn.domain.survivor_book import SurvivorBookConfig  # noqa: E402
 
 EPOCH: Final[date] = date(2026, 12, 18)
 REGISTRATION: Final[str] = "docs/research/p7-registration.json"
@@ -293,12 +295,18 @@ def _arguments(
     path: str = REGISTRATION,
     dry_run: bool = False,
     supersedes: str | None = None,
+    entry_veto: str | None = None,
+    parallel_of: str | None = None,
 ) -> list[str]:
     arguments = ["--epoch", epoch.isoformat(), "--smoke-commit", smoke, "--path", path]
     if dry_run:
         arguments.append("--dry-run")
     if supersedes is not None:
         arguments.extend(["--supersedes", supersedes])
+    if entry_veto is not None:
+        arguments.extend(["--entry-veto", entry_veto])
+    if parallel_of is not None:
+        arguments.extend(["--parallel-of", parallel_of])
     return arguments
 
 
@@ -786,3 +794,347 @@ def test_superseding_a_smoke_registration_is_refused(
     assert smoke in err
     assert "committed survivor registration" in err
     assert not (repo / REGISTRATION).exists()
+
+
+# --- Task 5: A's parallel registration, outside the 006b chain -----------------------------------
+
+VETO: Final[str] = "market_bearish_5/v1"
+"""Plan A's rule, the only entry veto a parallel registration may carry (`V2-P7-027`)."""
+PARALLEL_KEY: Final[str] = "survivor_parallel_of"
+"""The settings key the plan names for the base registration a parallel book runs beside (R-N5)."""
+
+
+def test_the_parallel_key_is_the_plans_spelling() -> None:
+    assert register.SURVIVOR_PARALLEL_OF_KEY == PARALLEL_KEY
+
+
+def test_the_parallel_body_is_a_v2_book_beside_its_base() -> None:
+    """`registration_body(epoch, book=..., parallel_of=...)`: a v2 configuration carrying plan A's
+    veto and the block naming its base, round-tripped by the reader the daily command uses."""
+    base_config, base_criteria, base_settings = register.registration_body(VALID_EPOCH)
+    book = SurvivorBookConfig(
+        **{**base_config["survivor_book"], "schema_version": "survivor-book-config/v2"},
+        entry_veto=VETO,
+    )
+    block = {"path": FIRST, "sha256": "ab" * 32}
+
+    config, criteria, settings = register.registration_body(
+        VALID_EPOCH, book=book, parallel_of=block
+    )
+
+    assert config["survivor_book"]["schema_version"] == "survivor-book-config/v2"
+    assert config["survivor_book"]["entry_veto"] == VETO
+    assert config["survivor_book"]["seed"] == base_config["survivor_book"]["seed"]
+    assert criteria == base_criteria
+    assert settings[PARALLEL_KEY] == block
+    assert "survivor_continuation" not in settings
+    assert {key: value for key, value in settings.items() if key != PARALLEL_KEY} == base_settings
+    survivor = strategy_survivor.read_survivor_registration(config, seed=settings["random_seed"])
+    assert survivor.book.entry_veto == VETO
+    assert grid.config_id(config) != grid.config_id(base_config)
+
+
+def _commit_a_parallel_registration(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> dict[str, Any]:
+    """The base's parallel registration, written by the writer and committed (a second run needs
+    a committed one to be refused)."""
+    code, _, err = _run(
+        capsys,
+        *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=FIRST),
+    )
+    assert code == 0, err
+    research_repo.commit_file(
+        repo, repo / REGISTRATION, "the parallel registration", at=tds.COMMITTED
+    )
+    written: dict[str, Any] = json.loads((repo / REGISTRATION).read_text(encoding="utf-8"))
+    return written
+
+
+def test_the_writer_writes_a_parallel_registration_outside_the_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The base is committed and the parallel body is a v2 book with the veto, naming that base
+    by path and by the sha256 its committed bytes hold; the base's configuration is untouched and
+    the parallel `config_id` is not the base's (two books, two identities)."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    base_bytes = (repo / FIRST).read_bytes()
+    base = json.loads(base_bytes)
+
+    code, _out, err = _run(
+        capsys, *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=FIRST)
+    )
+
+    assert code == 0, err
+    written = json.loads((repo / REGISTRATION).read_text(encoding="utf-8"))
+    assert written["config"]["survivor_book"]["schema_version"] == "survivor-book-config/v2"
+    assert written["config"]["survivor_book"]["entry_veto"] == VETO
+    assert written["settings"][PARALLEL_KEY] == {
+        "path": FIRST,
+        "sha256": hashlib.sha256(base_bytes).hexdigest(),
+    }
+    assert "survivor_continuation" not in written["settings"]
+    assert written["config_id"] != base["config_id"]
+    surviving = strategy_survivor.read_survivor_registration(
+        written["config"], seed=written["settings"]["random_seed"]
+    )
+    assert surviving.book.entry_veto == VETO
+    assert (repo / FIRST).read_bytes() == base_bytes
+    assert _status(repo).strip() == f"?? {REGISTRATION}"
+
+
+def test_the_writer_refuses_one_half_of_the_parallel_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--entry-veto` and `--parallel-of` are one registration's pair: a rule with no base, or a
+    base with no rule, is refused by name and nothing is written."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    smoke = research_repo.head(repo)
+
+    veto_only = _run(capsys, *_arguments(smoke=smoke, entry_veto=VETO))
+    base_only = _run(capsys, *_arguments(smoke=smoke, parallel_of=FIRST))
+
+    assert veto_only[0] == 2
+    assert "--entry-veto" in veto_only[2] and "--parallel-of" in veto_only[2]
+    assert base_only[0] == 2
+    assert "--entry-veto" in base_only[2] and "--parallel-of" in base_only[2]
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_refuses_a_parallel_registration_that_names_a_continuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R-N5: a parallel registration is never a continuation. Naming a base to run beside and a
+    predecessor to continue is refused by name, and nothing is written."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+
+    code, _, err = _run(
+        capsys,
+        *_arguments(
+            smoke=research_repo.head(repo),
+            supersedes=FIRST,
+            entry_veto=VETO,
+            parallel_of=FIRST,
+        ),
+    )
+
+    assert code == 2
+    assert "--parallel-of" in err and "--supersedes" in err
+    assert "continuation" in err
+    assert "R-N5" in err
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_refuses_a_base_registration_that_is_not_committed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A base registration is a committed file: an untracked one has no sha256 a registration
+    could record, so the run is refused naming the path and the committed history."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    uncommitted = "docs/research/p7-uncommitted-registration.json"
+    (repo / uncommitted).parent.mkdir(parents=True, exist_ok=True)
+    (repo / uncommitted).write_text("{}\n", encoding="utf-8")
+
+    code, _, err = _run(
+        capsys,
+        *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=uncommitted),
+    )
+
+    assert code == 2
+    assert uncommitted in err
+    assert "committed history" in err
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_refuses_a_base_registration_edited_after_its_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An edit after the commit is bytes HEAD does not hold: the recorded sha256 would name a file
+    that no longer exists in that form, so it is refused rather than registered."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    (repo / FIRST).write_text("{}\n", encoding="utf-8")
+
+    code, _, err = _run(
+        capsys, *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=FIRST)
+    )
+
+    assert code == 2
+    assert FIRST in err
+    assert "HEAD holds" in err
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_refuses_a_parallel_block_whose_sha256_the_base_does_not_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The block's sha256 is read back against the committed base before anything is written: a
+    block naming another digest is refused by name, not registered with a dead pointer."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    real = register._parallel_base
+
+    def corrupted(*arguments: Any, **keywords: Any) -> Any:
+        return replace(real(*arguments, **keywords), sha256="0" * 64)
+
+    monkeypatch.setattr(register, "_parallel_base", corrupted)
+
+    code, _, err = _run(
+        capsys, *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=FIRST)
+    )
+
+    assert code == 2
+    assert "sha256" in err
+    assert FIRST in err
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_refuses_entry_veto_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The base book is the no-veto book (R-N4); a parallel book registered with `none` would be
+    the base configuration over again, so it is refused by name."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+
+    code, _, err = _run(
+        capsys,
+        *_arguments(smoke=research_repo.head(repo), entry_veto="none", parallel_of=FIRST),
+    )
+
+    assert code == 2
+    assert "none" in err
+    assert VETO in err
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_refuses_a_parallel_registration_that_would_copy_its_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A base whose book is already the same v2 veto configuration (same epoch) gives the same
+    `config_id`; registering it again as a parallel book would be a second copy of one book."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    book = SurvivorBookConfig(
+        **{**BOOK, "schema_version": "survivor-book-config/v2"}, entry_veto=VETO
+    )
+    config, criteria, settings = register.registration_body(VALID_EPOCH, book=book)
+    registry.register(
+        config, criteria, repo / FIRST, code_commit=research_repo.head(repo), settings=settings
+    )
+    research_repo.commit_file(repo, repo / FIRST, "a v2 veto base", at=tds.COMMITTED)
+
+    code, _, err = _run(
+        capsys, *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=FIRST)
+    )
+
+    assert code == 2
+    assert FIRST in err
+    assert "same configuration" in err
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_refuses_a_second_parallel_registration_of_the_same_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A base book has one parallel book: the second registration of the same configuration is
+    refused by name, and the first file stays exactly as it was."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    _commit_a_parallel_registration(repo, capsys)
+    first = (repo / REGISTRATION).read_bytes()
+
+    code, _, err = _run(
+        capsys, *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=FIRST)
+    )
+
+    assert code == 2
+    assert REGISTRATION in err
+    assert "parallel" in err
+    assert (repo / REGISTRATION).read_bytes() == first
+    assert _status(repo) == ""
+
+
+def test_a_parallel_registration_is_not_a_chain_root() -> None:
+    """R-N5's chain half, structurally: a registration carrying `survivor_parallel_of` is not a
+    root and not a link, so a base beside its parallel registration is still one rooted chain
+    (without the exclusion it would count as a second root)."""
+    base = _survivor_body()
+    parallel = _survivor_body(
+        survivor_parallel_of={"path": "docs/research/a.json", "sha256": "0" * 64}
+    )
+    continuation = _survivor_body(survivor_continuation=_continuation("docs/research/a.json"))
+
+    assert (
+        register.chain_problems(
+            {
+                "docs/research/a.json": base,
+                "docs/research/b.json": continuation,
+                "docs/research/p.json": parallel,
+            }
+        )
+        == []
+    )
+
+
+def test_a_parallel_registration_that_also_names_a_continuation_is_refused() -> None:
+    """R-N5: a parallel registration is never a continuation; both blocks in one body is refused
+    by name."""
+    both = _survivor_body(
+        survivor_parallel_of={"path": "docs/research/a.json", "sha256": "0" * 64},
+        survivor_continuation=_continuation("docs/research/a.json"),
+    )
+
+    problems = register.chain_problems(
+        {"docs/research/a.json": _survivor_body(), "docs/research/b.json": both}
+    )
+
+    assert problems
+    assert any("b.json" in problem and "survivor_parallel_of" in problem for problem in problems)
+
+
+def test_a_parallel_registration_naming_no_committed_base_is_refused() -> None:
+    """The base a parallel registration names is a member of the committed set: a path outside it
+    (a missing file, a smoke registration, itself) is refused by name."""
+    problems = register.chain_problems(
+        {
+            "docs/research/p.json": _survivor_body(
+                survivor_parallel_of={"path": "docs/research/missing.json", "sha256": "0" * 64}
+            )
+        }
+    )
+
+    assert problems
+    assert any("p.json" in problem and "missing.json" in problem for problem in problems)
+
+
+def test_a_parallel_registration_naming_itself_is_refused() -> None:
+    problems = register.chain_problems(
+        {
+            "docs/research/p.json": _survivor_body(
+                survivor_parallel_of={"path": "docs/research/p.json", "sha256": "0" * 64}
+            )
+        }
+    )
+
+    assert problems
+    assert any("p.json" in problem and "itself" in problem for problem in problems)

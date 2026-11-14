@@ -28,12 +28,14 @@ for _directory in (_SCRIPTS, _SCRIPTS / "research"):
 
 import grid  # noqa: E402
 from p7_register import (  # noqa: E402
+    SURVIVOR_PARALLEL_OF_KEY,
     chain_problems,
     committed_survivor_registrations,
     registration_body,
 )
 
 from openalpha_cn.domain.agent_forward import AGENT_LLM_FAMILY  # noqa: E402
+from openalpha_cn.domain.survivor_veto import VETO_RULE_ID  # noqa: E402
 from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
     ADOPTED_INTERIM_SESSION,
     ADOPTED_LEVEL,
@@ -55,23 +57,43 @@ def test_every_committed_survivor_registration_is_frozen_and_chained() -> None:
     registrations = committed_survivor_registrations(ROOT)
 
     assert chain_problems(registrations) == []
-    roots = [
-        path
+    chain = {
+        path: body
         for path, body in registrations.items()
-        if "survivor_continuation" not in body["settings"]
+        if SURVIVOR_PARALLEL_OF_KEY not in body["settings"]
+    }
+    roots = [
+        path for path, body in chain.items() if "survivor_continuation" not in body["settings"]
     ]
     assert len(roots) <= 1
     for path, body in registrations.items():
         assert _FULL_COMMIT.fullmatch(body["code_commit"]), path
         assert len(body["config_id"]) == 64, path
-        if path not in roots:
-            continue
+    for path in roots:
+        body = registrations[path]
         epoch = date.fromisoformat(body["config"]["adapter"]["epoch_session"])
         config, criteria, settings = registration_body(epoch)
         assert body["config"] == config, path
         assert body["criteria"] == criteria, path
         assert body["settings"] == settings, path
         assert body["config_id"] == grid.config_id(config), path
+    # R-N5: a parallel registration is outside the chain; it names a committed base registration
+    # whose committed bytes are the sha256 it records, and the two books have two identities.
+    for path, body in registrations.items():
+        block = body["settings"].get(SURVIVOR_PARALLEL_OF_KEY)
+        if block is None:
+            continue
+        base = block["path"]
+        assert base in registrations, (
+            f"{path} names {base}, which is not a committed survivor registration"
+        )
+        assert "survivor_continuation" not in body["settings"], path
+        committed = _git_bytes(ROOT, "show", f"HEAD:{base}")
+        assert block["sha256"] == hashlib.sha256(committed).hexdigest(), path
+        book = body["config"]["survivor_book"]
+        assert book["schema_version"] == "survivor-book-config/v2", path
+        assert book["entry_veto"] == VETO_RULE_ID, path
+        assert body["config_id"] != registrations[base]["config_id"], path
 
 
 PROTOCOL: Final[Path] = ROOT / "docs/research/p7-protocol.md"

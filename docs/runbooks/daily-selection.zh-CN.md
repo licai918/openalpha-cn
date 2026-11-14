@@ -713,6 +713,78 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 **接受的已知局限**（D-6，见协议文档 §3.6）：它们只影响中断与补救路径的退出码/分类，不改分数或
 订单；登记之后再修就是换登记。
 
+### 并列账簿（A 的否决）
+
+> **状态：工具已交付，登记没有发生。** 这一节写的是做 A 的并列账簿那一天**要做什么**；在 006b
+> 登记完成、并且用户对**每一步**明确说"可以"之前，不要跑下面的任何一条。写入器自己从不
+> `git add`、从不 commit；launchd 只打印、不安装。
+
+并列账簿是 006b 之外的**另一本独立的纸面账**：它把 006b 基础账簿的参数写成
+`survivor-book-config/v2`，并带上 `entry_veto: "market_bearish_5/v1"`（A 的否决；
+`V2-P7-027`），`settings.survivor_parallel_of` 记录它并排跑的基础登记（仓库内路径 + 那份登记
+**已提交字节**的 sha256）。它**不在 006b 的链里**（R-N5）：不是链根、不是延续，也不进入
+`admit_predecessors` 与周报的合并样本。运行目录、钉住 worktree、launchd 标签都是它自己的。
+
+**操作顺序（每一步都要用户同意）：**
+
+1. **前提。** 006b 的正式登记已完成并提交（上一节）；包含本批次代码的分支已并入 `main`；用户
+   明确说"做并列账簿"。
+2. **基础账簿先跑完一晚。** 基础账簿的晚间流程（18:30 那次）正常跑完并写出它的面板；并列账簿
+   的第 2 步要读的面板必须是那一刻的面板。
+3. **克隆面板（`cp -c`）到并列账簿的运行目录。** 新运行目录（新目录、新纪元；不要用 006b 的
+   运行目录）：
+
+   ```bash
+   mkdir -p <并列运行目录>
+   cp -c -R <基础运行目录>/panel <并列运行目录>/panel
+   ```
+
+   `cp -c` 是 APFS 的 clonefile：不复制数据块。这样并列账簿第 2 步（面板更新）看到的是最新的
+   面板，**发出 0 次请求**；不要用 `cp -R`、也不要在基础账簿不存在的面板上让第 2 步自己抓。
+4. **在新提交上做它自己的冒烟。** 用冒烟工具在**这个提交**上准备一个**新的冒烟根**（自己的
+   caps、自己的纪元），照「真实数据冒烟」一节的 `scripts/p7_smoke.py prepare` 与 `smoke
+   evening` 跑，等阶段 1 的 go。冒烟工具写的是它自己的 v1 设计账簿（标了 `smoke_run`），它核对
+   的是这份登记要绑定的**代码字节**；A 的否决本身由并列账簿第一晚的日志（`entry_veto` 块）与
+   「清单附注（候选参考）」核对。
+5. **空跑一次，给用户看：**
+
+   ```bash
+   uv run --no-sync python scripts/p7_register.py --epoch <并列纪元> \
+     --smoke-commit <第 4 步冒烟的提交> \
+     --entry-veto market_bearish_5/v1 \
+     --parallel-of docs/research/p7-registration.json \
+     --path docs/research/p7-parallel-registration.json --dry-run
+   ```
+
+   它打印规范 JSON、`config_id`、将得的 sha256 与一行"未写入"，**什么都不写**。`--path` 必须
+   是**另一个** `.json`（默认值是 006b 的路径，会按"已经是一份不同的登记"拒绝）。
+6. **写入。** 去掉 `--dry-run`、同一组参数。写入器会自己拒绝（每条都是退出码 2、什么都不写）：
+   `--entry-veto` 与 `--parallel-of` 只给一个；同时给了 `--supersedes`（并列登记永远不是延续，
+   R-N5）；`--parallel-of` 指向的文件没有提交、或提交后又被改过（字节与 `HEAD` 不符）；基础
+   登记的 sha256 与块里记的不符；`--entry-veto none`（基础账簿本来就是无否决的那本，R-N4）；
+   同一基础登记/同一 `config_id` 的第二份并列登记。然后只提交这一个文件：
+
+   ```bash
+   git add docs/research/p7-parallel-registration.json
+   git commit -m "docs(V2-P7-027): the parallel veto book's registration"
+   ```
+
+7. **跑登记测试。** `uv run pytest tests/unit/test_p7_registration_chain.py`：006b 链最多一个
+   链根；每一份并列登记都指向一份已提交、且 sha256 相符的基础登记，`config` 是 v2 + A 的否决，
+   `config_id` 与基础登记不同。
+8. **它自己的钉住 worktree，绝不用 006b 那个：**
+
+   ```bash
+   uv run --no-sync python scripts/daily_selection.py --pin-worktree <并列钉住目录> \
+     --registration docs/research/p7-parallel-registration.json
+   ```
+
+   两个账簿各有自己的钉住 checkout、自己的运行目录：换用 006b 的会让并列账簿绑定另一份代码。
+9. **launchd 只打印、不安装。** 并列登记的 `--launchd-plist` 与 `--launchd-morning-plist` 打印的
+   `Label` 带 `.<config_id 前 16 位>` 后缀，与 006b 的作业分开；仍然只输出文本，不安装。
+10. **第一晚由用户手动跑。** 第 1 步对纪元做 0 次请求的精确核对；晚间会按 `entry_veto` 拦买入
+    并记日志（R-A1：被否决的持仓不卖）。真钱闸门仍关着；纸面权益不是证据。
+
 ### 已知局限（幸存者形态）
 
 1. **新年第一个交易日之前没有更名公告：名称语料一侧已经处理（`V2-P7-021`，取值暂定），登记簿一侧也已处理（`V2-P7-025`）。** 当年第一条更名公告之前，Tushare 对当年的 `namechange` 一行也不给（2012 年第一条公告是 1 月 5 日，晚于第一个交易日 1 月 4 日）。以前面板拒写空分区，第 2 步在这个目标上失败，日志钉住了这一天的 `as_of`，每次重跑问的都是同一个空窗口，这一天丢了，不是推迟了。现在 `panel build` 把当年记成零行分区（输出里有一行 `EMPTY namechange year=…`），读名称语料的读者（事实、第 3 步 doctor、第 4 步因子构建、清晨复核的通知、迟到记录核查）只在到该年 1 月 31 日（含，上海日历日）为止把它读作「尚无更名」，当年第一条真实更名到来时零行分区被整份替换；失败或截断的抓取、过了窗口的空回答、已有更名行的年、不是当年的空回答仍按名拒绝；P6 的 `--full-update` 在一月初也不再因 `namechange` 失败，而是写空分区并继续。**「两种 `no_data` 都算经核实为空」与「到 1 月 31 日」是暂定取值，用户还没有确认**（常量 `NAME_YEAR_EMPTY_THROUGH`）。**登记簿的同一缺口已由 `V2-P7-025` 在本分支上关闭（未推送、未真实运行）**：整份登记簿抓取成功、观测年没有上市/退市时，`panel build` 把该生命周期年记成零行分区（输出里有一行 `EMPTY stock_basic year=…`），所有读者（`panel doctor` 检查 `stock_basic` 时、第 4 步因子构建、周报的标签读取、事实适配器，以及一切经 `load_stock_universe` 的读取）**只在到当年 12 月 31 日（含，上海日历日）为止**把它读作「今年还没有上市或退市」，当年第一条真实事件到来时零行分区被整份替换；失败或截断的抓取、`no_data` 的整份回答、过了窗口的空回答、已有行的年在相同或更晚的观测时刻仍按名拒绝；更早的重放什么都不写。此前这一年会丢：日志钉住了这天的 `as_of`，重跑会得到同一个 `partition_missing`（重跑是推断，未实测），前向周报的标签读取也被拒（P6 已知局限第 6 条记录了同一缺口，现由同一修法关闭）。
