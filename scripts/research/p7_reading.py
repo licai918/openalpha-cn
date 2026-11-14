@@ -96,9 +96,13 @@ a failure after the claim spends the window:
    datasets, which are read for signal days only. The same preflight checks the primary
    reading's stop rule `minimum_periods`, and the exact `expected_periods` it records, against
    the calendar's count (one arithmetic, `_exact_most_periods`; a count other than the prior is
-   a named problem here, before the claim). Other datasets are still only listed: a
-   partition that is listed but incomplete, or a signal day without a factor build, is met by
-   the measurement, after the claim.
+   a named problem here, before the claim). The same preflight places the read's `as_of` against
+   the panel: a read is refused, naming the last session the panel's `daily` dataset holds, when
+   a later Shanghai session had published at `as_of` (`_as_of_gap_problem`, R-F5) -- the
+   `date_gap` that cost the second_use read 9 of its 33 signal days, met before any claim
+   instead of after it. Other datasets are still only listed: a partition that is listed but
+   incomplete, or a signal day without a factor build, is met by the measurement, after the
+   claim.
 
 It then writes the window's claim and then the reading's, `<reading>.claim.json`, each with
 `O_CREAT | O_EXCL` -- a second read racing this one loses there (`ReadingAlreadyClaimedError`) --
@@ -338,7 +342,11 @@ from openalpha_cn.panel_factors import (
     load_factor_observations,
     processed_factor_dataset,
 )
-from openalpha_cn.panel_ingest import load_trading_calendar, session_publication_instant
+from openalpha_cn.panel_ingest import (
+    load_trading_calendar,
+    newest_published_session,
+    session_publication_instant,
+)
 from openalpha_cn.panel_limit_events import limit_events_on
 from openalpha_cn.panel_view import PANEL_SUBDIRECTORY
 from openalpha_cn.strategy_survivor_forward import (
@@ -573,7 +581,8 @@ class ExpectedPeriodsMismatch(ReadingError):
 class ReadingPreflightError(registry.HoldoutRefusedError):
     """The check before the claim found a year of the window missing, a calendar the stop
     rule's bound needs unreadable, a `minimum_periods` the calendar cannot reach, or a calendar
-    that does not make the `expected_periods` the registration records."""
+    that does not make the `expected_periods` the registration records, or an `as_of` later
+    than the last session the panel's `daily` dataset holds (`_as_of_gap_problem`, R-F5)."""
 
 
 class ForeignP7ScriptsError(registry.HoldoutRefusedError):
@@ -1619,6 +1628,78 @@ def preflight_problems(
     return tuple(problems)
 
 
+def _last_daily_session(store: PanelStore) -> date | None:
+    """The last session the panel's `daily` dataset holds, from the catalog's date census.
+
+    No partition is opened: `read_coverage` answers off the catalog only, and the newest year
+    with a non-empty census is the one whose last date can be the panel's last session (a year
+    that was written empty, `V2-P7-025`, is skipped). `None` when the panel holds no daily rows.
+    """
+    for year in reversed(store.registered_years(DAILY_DATASET)):
+        coverage = store.read_coverage(DAILY_DATASET, year)
+        last = None if coverage is None else coverage.last_event_date
+        if last is not None:
+            return last
+    return None
+
+
+def _calendar_at(store: PanelStore, *, as_of: datetime) -> TradingCalendar:
+    """The stored calendar around `as_of`'s Shanghai date: that year and, when held, the year
+    before, so a New Year or a public holiday can walk back across the boundary."""
+    day = as_of.astimezone(_EXCHANGE_ZONE).date()
+    held = set(store.registered_years(TRADING_CALENDAR_DATASET))
+    if day.year not in held:
+        raise TradingCalendarError(
+            f"the panel holds no {TRADING_CALENDAR_DATASET} {day.year}, the year of the read's "
+            f"as_of {as_of.isoformat()}"
+        )
+    years = tuple(year for year in (day.year - 1, day.year) if year in held)
+    return load_trading_calendar(store, exchange=EXCHANGE, years=years, as_of=as_of)
+
+
+def _as_of_gap_problem(store: PanelStore, *, as_of: datetime) -> str | None:
+    """The read's `as_of` against the panel's last `daily` session (`V2-P7-024`, R-F5).
+
+    The read is taken under the knowledge at its registered `as_of`; a panel whose `daily` stops
+    before the session that had published by then is missing sessions the read is dated after,
+    and the measurement records `date_gap`s instead of readings (the second_use read cost 9 of
+    its 33 signal days that way). Before any claim, then, the newest session that had published
+    at `as_of` is compared with the panel's last stored one: a later published session is a
+    problem naming the last stored session. `as_of` at that session's evening passes -- nothing
+    has published after it -- and so does an `as_of` before the next publication.
+    """
+    try:
+        last = _last_daily_session(store)
+    except PanelStorageError as error:
+        return (
+            "the panel's daily dataset cannot be read from the catalogue to place the read's "
+            f"as_of against it ({error}); nothing was claimed"
+        )
+    if last is None:
+        return None
+    day = as_of.astimezone(_EXCHANGE_ZONE).date()
+    if day <= last:
+        return None
+    try:
+        published = newest_published_session(_calendar_at(store, as_of=as_of), as_of=as_of)
+    except (TradingCalendarError, CalendarHorizonError, PanelStorageError) as error:
+        return (
+            f"the read's as_of {as_of.isoformat()} is dated after the last session the panel's "
+            f"daily dataset holds, {last.isoformat()}, and which session had published by then "
+            f"cannot be shown ({error}): the as_of must be at or before that session's last "
+            "write, or the panel must be built through the as_of; nothing was claimed"
+        )
+    if published <= last:
+        return None
+    return (
+        f"the read's as_of {as_of.isoformat()} is at or after the publication of the Shanghai "
+        f"session {published.isoformat()}, later than the last session the panel's daily dataset "
+        f"holds, {last.isoformat()}: the as_of must be at or before that session's last write, "
+        "or the panel must be built through the as_of -- a read at this clock would leave daily "
+        f"(and every dataset that follows it) with a date_gap after {last.isoformat()}"
+    )
+
+
 def _preflight_datasets(
     book: SurvivorBookConfig, ab_tests: AbTests | None = None
 ) -> tuple[str, ...]:
@@ -1672,6 +1753,14 @@ def _panel_preflight(
         )
         if problems:
             return problems
+        if isinstance(store, PanelStore):
+            # The last session `daily` holds is the whole panel's, not the window-capped view's:
+            # a validation read is dated at the panel's newest snapshot, which is years past its
+            # window, and the cap would answer 2023 instead. The catalogue is asked, no partition
+            # is opened. (A stand-in store in a test has no catalogue and is not asked.)
+            gap = _as_of_gap_problem(PanelStore(store.root), as_of=settings.explore.as_of)
+            if gap is not None:
+                return (gap,)
         form = body.get("stop_rule")
         if form is None:
             return ()

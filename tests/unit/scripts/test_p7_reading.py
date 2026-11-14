@@ -6,6 +6,7 @@ panel is read here."""
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import importlib
 import json
@@ -21,6 +22,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from panel_fixtures import _batch as batch
 from panel_fixtures import _midnight_shanghai as midnight_shanghai
+from panel_fixtures import generate_panel, write_generated_panel
 from research_repo import commit_file, git, head
 
 from openalpha_cn import strategy_survivor_forward as forward_module
@@ -2158,3 +2160,123 @@ def test_the_spent_check_refuses_a_grafts_file_by_itself(repo: Path) -> None:
         p7_reading._require_the_validation_window_spent(repo)
 
     assert ", so whether" not in str(raised.value)
+
+
+# --- the read's as_of must not outrun the panel's daily (V2-P7-024, R-F5) ------------------------
+
+GAP_LAST_SESSION: Final[date] = date(2026, 10, 8)
+"""The last session the generated panel's `daily` holds. The real second_use read was dated
+2026-11-14 (a Saturday; the newest published session then was 2026-11-13), after the clone
+panel's last daily session 2026-10-08, and the gap cost it 9 of its 33 signal days."""
+
+
+def _on_sse(panel: Any) -> Any:
+    """The generated panel on the SSE calendar `p7_reading` reads: `test_agent_report._on_sse`
+    makes the same adaptation, because `panel_fixtures` builds its calendar under `SZSE`."""
+    calendar = panel.batch(TRADING_CALENDAR_DATASET)
+    return dataclasses.replace(
+        panel,
+        exchange="SSE",
+        batches={
+            **panel.batches,
+            TRADING_CALENDAR_DATASET: dataclasses.replace(
+                calendar, subjects=("SSE",) * len(calendar.subjects)
+            ),
+        },
+    )
+
+
+@pytest.fixture(scope="module")
+def gap_panel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A panel generated at test time (hard rule 6) whose `daily` ends on GAP_LAST_SESSION and
+    whose `trade_cal` is the whole of 2026, so a read dated after that session must be refused."""
+    root = tmp_path_factory.mktemp("as-of-gap")
+    panel = _on_sse(generate_panel(window=(date(2026, 1, 5), GAP_LAST_SESSION)))
+    write_generated_panel(
+        PanelStore(root / "panel"),
+        panel,
+        datasets=(
+            TRADING_CALENDAR_DATASET,
+            "stock_basic",
+            "adj_factor",
+            "daily",
+            "daily_basic",
+            "suspend_d",
+        ),
+    )
+    return root
+
+
+def _registered_gap_reading(repo: Path, *, as_of: str, reading: str) -> Path:
+    """A committed secondary `second_use` registration with `as_of` under test; a secondary
+    reading has no stop rule, so the gap check is the only calendar read in the preflight."""
+    path = repo / "docs" / "research" / "p7-readings" / f"{reading}.registration.json"
+    register(
+        path,
+        reading=reading,
+        role="secondary",
+        window="second_use",
+        request=SECOND_USE_REQUEST,
+        config={**CONFIG, "as_of": as_of},
+        stop_rule=None,
+        expected_periods=None,
+        code_commit=head(repo),
+    )
+    commit_file(repo, path, "register the secondary reading", at=COMMITTED)
+    write_validation_window_claim(repo, commit=True)
+    return path
+
+
+def test_a_read_dated_after_the_panels_last_daily_session_is_refused_before_any_claim(
+    repo: Path, gap_panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second_use read's failure, closed before a claim: an as_of whose newest published
+    session is later than the last session `daily` holds is a preflight problem, and nothing --
+    window claim, claim or result -- is written for it."""
+    registration = _registered_gap_reading(
+        repo, as_of="2026-10-09T19:00:00+08:00", reading="v2-p7-gap-second-use"
+    )
+    # The catalogue-completeness check is another check's; only this one is exercised here.
+    monkeypatch.setattr(p7_reading, "preflight_problems", lambda *args, **kwargs: ())
+    measure = Measure()
+
+    with pytest.raises(p7_reading.ReadingPreflightError, match="2026-10-08") as refused:
+        p7_reading.read_once(
+            registration,
+            repo=repo,
+            runtime_dir=gap_panel,
+            clock=lambda: COMMITTED + timedelta(hours=1),
+            measure=measure,
+        )
+
+    said = str(refused.value)
+    assert "2026-10-09" in said and "daily" in said and "last session" in said
+    assert "as_of" in said and "at or before" in said
+    assert measure.calls == []
+    assert not claim_of(registration).exists()
+    assert not window_claim_of(repo, "second_use").exists()
+    assert not registration.with_name("v2-p7-gap-second-use.result.json").exists()
+    assert not registration.with_name("v2-p7-gap-second-use.result.txt").exists()
+
+
+def test_a_read_dated_at_the_panels_last_daily_session_1900_is_not_refused_by_the_gap_check(
+    repo: Path, gap_panel: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real validation registration's as_of (2026-10-08T19:48+08:00) is that session's
+    evening: nothing had published after the panel's last session, so this check passes it and
+    the read proceeds to its measure."""
+    registration = _registered_gap_reading(
+        repo, as_of=f"{GAP_LAST_SESSION.isoformat()}T19:00:00+08:00", reading="v2-p7-gap-at-d"
+    )
+    monkeypatch.setattr(p7_reading, "preflight_problems", lambda *args, **kwargs: ())
+
+    result = p7_reading.read_once(
+        registration,
+        repo=repo,
+        runtime_dir=gap_panel,
+        clock=lambda: COMMITTED + timedelta(hours=1),
+        measure=Measure(),
+    )
+
+    assert "stop_rule" not in result
+    assert claim_of(registration).exists() and window_claim_of(repo, "second_use").exists()
