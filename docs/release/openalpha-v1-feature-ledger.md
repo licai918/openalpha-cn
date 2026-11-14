@@ -4,8 +4,8 @@
 
 ## 对账结论
 
-- 功能总数: 245
-- 当前真实完成: 240 (97.96%)
+- 功能总数: 246
+- 当前真实完成: 241 (97.97%)
 - `UNREVIEWED=0`
 - `UNKNOWN=0`
 - `legacy_acceptance_rows=26` (历史散文验收、尚未绑定为可执行 pytest/CI 断言)
@@ -18,7 +18,7 @@
 | `DEFERRED` | 1 |
 | `ENHANCED_REPLACEMENT` | 20 |
 | `EXCLUDED` | 4 |
-| `NATIVE_COMPLETE` | 219 |
+| `NATIVE_COMPLETE` | 220 |
 
 ## 功能明细
 
@@ -269,6 +269,7 @@
 | `OA-EVAL-002` | evaluation | The C report: records, abstentions, model-alias changes and the one adopted D5 statistic over stored sessions | `NATIVE_COMPLETE` | `scripts/agent_report.py#_report;scripts/agent_report.py#_view;scripts/agent_report.py#OUTCOME_WORDINGS;scripts/agent_report.py#main;src/openalpha_cn/strategy_agent_evaluation.py#ADOPTED_WINDOW_SESSIONS` | `tests/unit/scripts/test_agent_report.py;tests/integration/test_agent_incremental_ic.py` | `pytest` | `tests/unit/scripts/test_agent_report.py::test_the_json_report_repeats_the_printed_facts_and_print_only_writes_nothing` |
 | `OA-OPS-055` | operations | The D7 dry week: scratch-runtime-only model evenings that measure operations and never file a prediction | `NATIVE_COMPLETE` | `scripts/agent_evening.py#_dry_week;scripts/agent_evening.py#_dry_week_family;scripts/agent_evening.py#DRY_WEEK_MAX_REQUESTS;src/openalpha_cn/strategy_agent_evaluation.py#refuse_a_dry_week_runtime;src/openalpha_cn/strategy_agent_forward.py#AGENT_SCRIPTS` | `tests/unit/scripts/test_agent_evening.py;tests/integration/test_agent_incremental_ic.py` | `pytest` | `tests/unit/scripts/test_agent_evening.py::test_a_dry_week_evening_files_no_prediction_journal_or_evidence_and_leaves_step0_untouched` |
 | `OA-FACTOR-032` | factor | The limit-event factor family: closed-at-limit and broken-board counts over twenty sessions | `NATIVE_COMPLETE` | `src/openalpha_cn/domain/factor.py#FactorFamily;src/openalpha_cn/panel_factors.py#LIMIT_UP_COUNT_20;src/openalpha_cn/panel_factors.py#BROKEN_BOARD_COUNT_20;src/openalpha_cn/panel_factors.py#_limit_up_count_20;src/openalpha_cn/panel_factors.py#_broken_board_count_20;src/openalpha_cn/panel_factors.py#_limit_event_count;src/openalpha_cn/panel_factors.py#LIMIT_EVENT_LOOKBACK_SESSIONS;src/openalpha_cn/panel_factors.py#LIMIT_EVENT_MAX_WINDOW_SESSIONS;src/openalpha_cn/panel_factors.py#LIMIT_EVENT_REQUIRED_FIELDS;src/openalpha_cn/panel_factors.py#PUBLISHED_ABSENCE_DATASETS;src/openalpha_cn/panel_factors.py#_points_held;src/openalpha_cn/panel_factors.py#_intersection_of;src/openalpha_cn/panel_factors.py#session_return_links;src/openalpha_cn/domain/price_limits.py#limit_touch;src/openalpha_cn/factor_view.py#REQUIREMENT_BUILDERS` | `tests/unit/test_factor_limit_events_rules.py;tests/integration/panel/test_limit_event_factors.py` | `pytest` | `tests/integration/panel/test_limit_event_factors.py::test_the_counts_are_the_events_session_limit_events_produces_on_the_same_panel` |
+| `OA-EVAL-003` | evaluation | The daily-list annotation: A's veto and B's two limit-event factors printed beside the plan | `NATIVE_COMPLETE` | `scripts/survivor_annotate.py#main;scripts/survivor_annotate.py#annotate;scripts/survivor_annotate.py#raw_cross_section;scripts/survivor_annotate.py#percentile;scripts/survivor_annotate.py#annotation_lines;scripts/survivor_annotate.py#MissingFactorBuild;scripts/survivor_annotate.py#HEADER` | `tests/unit/scripts/test_survivor_annotate.py` | `pytest` | `tests/unit/scripts/test_survivor_annotate.py::test_the_annotation_prints_the_header_every_role_and_the_journal_wording` |
 
 ## 边界
 
