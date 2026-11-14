@@ -6664,6 +6664,16 @@ def _points_held(
     the other side: its band exists but its bar does not, so it is not in the daily points and
     the union-with-intersection drops it too.
 
+    **A security no ordinary dataset holds has no classifiable session, and `()` is the answer.**
+    `required` is the non-absence datasets that hold the subject; when it is empty there is
+    nothing to classify against, and the window must not fall back to the absence dataset's own
+    points. Falling back is what a first draft did, and it coded a security halted over the whole
+    read `input_missing` -- the code the notes above say is reserved for a short read -- because
+    the band-only window then had no bar on any of its sessions. `()` is `insufficient_history`,
+    which is the honest answer: this security has no history *near `as_of`* this factor can use.
+    The same rule covers a factor that declares only a published-absence dataset, which has
+    nothing to classify a touch against at all.
+
     The result is still ascending, because both inputs are and the merge walks them in step. A
     dataset outside that table keeps the union, which is what `daily`+`daily_basic` (coverage
     equal by the daily writer's own cross-check) and the period axis's two-statement windows
@@ -6690,11 +6700,11 @@ def _points_held(
             return required[0][1]
         held = set().union(*(set(points) for _, points in required))
         return tuple(sorted(held))
-    base = (
-        _union_of(sorted_points for _, sorted_points in required)
-        if required
-        else _union_of(sorted_points for _, sorted_points in present)
-    )
+    if not required:
+        # No ordinary dataset holds this subject: nothing here can be classified against a band,
+        # and the absence dataset's own points must not become the window (see the docstring).
+        return ()
+    base = _union_of(sorted_points for _, sorted_points in required)
     for _dataset, points in published:
         base = _intersection_of(base, points)
         if not base:

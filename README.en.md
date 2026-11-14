@@ -223,8 +223,8 @@ command added without updating that table is red and names itself; prose about a
 
 ## The selection workflow (P6)
 
-P6 joins the whole chain: a multi-year whole-market panel, 23 factors in three tiers, a
-pre-registered three-stage study, one holdout, a daily command that prints a candidate list and
+P6 joins the whole chain: a multi-year whole-market panel, 21 pre-registered factors in three
+tiers, a three-stage study, one holdout, a daily command that prints a candidate list and
 registers its scores, and a weekly forward report. **The wording is always "candidate"**: nothing
 here places an order or forecasts a return.
 
