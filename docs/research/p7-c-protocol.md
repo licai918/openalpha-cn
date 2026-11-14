@@ -26,7 +26,7 @@
 | 评估器 | `src/openalpha_cn/strategy_agent_evaluation.py`（`agent-forward-protocol/v1`） | 方案 C 批次 2 任务 2.7 |
 | 报告命令 | `scripts/agent_report.py`（与 Step 0 的周报分开，D8） | 方案 C 批次 3 任务 3.5 |
 | 前向记录 | `agent_llm_structured/v1`、`agent_rule_baseline/v1` 两个家族，`standing=forward`，不交易 | `src/openalpha_cn/domain/agent_forward.py` |
-| 状态 | 协议写出、登记未写出、前向窗口未开始；L2 已完成（2026-11-13，值来自 2026-11-12 的官方文档阅读），L1、L3–L6 未运行 | 第 12 节；`docs/runbooks/agent-evening.zh-CN.md` |
+| 状态 | 协议写出、登记未写出、前向窗口未开始；L1 已完成（2026-11-13）、L2 已完成（2026-11-13，值来自 2026-11-12 的官方文档阅读）、L3 已完成（2026-11-14），L4–L6 未运行 | 第 12 节；`docs/runbooks/agent-evening.zh-CN.md` |
 
 本文件写于登记提交之前。登记提交、它的 sha256、`config_id`、登记里冻结的 `--anchor` 会话、钉住的 commit 与
 C 时钟的起点，在 L5 之后追加到第 14 节；正文的其他文字不因此改动。
@@ -480,7 +480,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src" "$PWD/.venv/bin/python" scripts/
   （`extra_payload = {"thinking": {"type": "disabled"}}`，因为 thinking 默认开启且会让 temperature 失效）、
   `temperature = 0`、价格按每百万 token 输入/输出记（错峰口径 USD 0.15 / 0.60，peak 是 2 倍；来源页列在
   `models/deepseek.py` 的模块注释里）。`verified_on = 2026-11-12`；每次交换的 `response.model` 与
-  `system_fingerprint` 是别名背后实际答话模型的记录。**L3（≤5 次模型请求的 live 探针）还没有做。**
+  `system_fingerprint` 是别名背后实际答话模型的记录。**L3（≤5 次模型请求的 live 探针）已于 2026-11-14 完成，用了 3 次**：JSON 全部有效、无空白内容、thinking 确实关闭；`response.model` 只回显别名 `deepseek-flash`，所以别名背后的模型变化只能从 `system_fingerprint` 看出（报告 `docs/research/p7-deepseek-probe-report.md`）。
 - 用量账：每次真实请求进 `state.sqlite3` 的用量账（tokens 与价格），运行日志打印本次的 tokens；
   回放不花请求、也不新增用量。
 
@@ -550,9 +550,9 @@ C 的报告是**单独的命令** `scripts/agent_report.py`，不是 Step 0 的 
 
 | 步骤 | 请求 | 前置 | 产出 | 状态 |
 |---|---|---|---|---|
-| L1 `V2-P7-010` 探针 live | ≤ 300 次 Tushare（硬上限） | 探针工具已合入 | 只含元数据的报告；不落盘数据 | **未运行**（2026-11-12 的 20 次被拒尝试计入上限，见运行手册） |
+| L1 `V2-P7-010` 探针 live | ≤ 300 次 Tushare（硬上限） | 探针工具已合入 | 只含元数据的报告；不落盘数据 | **已完成 2026-11-13**（累计 58/300；四个接口有权限，`anns_d` 无权限；报告 `docs/research/p7-event-probe-report.md`） |
 | L2 DeepSeek 端点核实 | 0 | 用户确认事实文件 | `DEEPSEEK_V4_1_FLASH` 填值、`verified_on = 2026-11-12`；四份面向用户文档的模型/用量措辞与两个散文守卫同一提交序列改写/反转 | **已完成 2026-11-13**（值来自 2026-11-12 的官方文档阅读；0 请求） |
-| L3 DeepSeek live 探针 | ≤ 5 次模型请求 | L2；`DEEPSEEK_API_KEY` | scratch 运行目录里的模型/指纹/用量/空白/JSON 有效性报告 | **未运行** |
+| L3 DeepSeek live 探针 | ≤ 5 次模型请求 | L2；`DEEPSEEK_API_KEY` | scratch 运行目录里的模型/指纹/用量/空白/JSON 有效性报告 | **已完成 2026-11-14**（UTC 00:23；3 次请求，JSON 全部有效、无空白、thinking 关闭；`response.model` 只回显别名，`system_fingerprint` 才是能看出别名变化的字段；报告 `docs/research/p7-deepseek-probe-report.md`） |
 | L4 LLM 干跑周（D7） | ≤ 5 × 600 模型请求；0 Tushare | `006b` 已登记、Step 0 晚间在跑；批次 2–3 已合入；L3 | 只含运维指标的报告 | **未运行** |
 | L5 C 登记 + 钉住 | 0 | 功效有裁定（冻结参数下预期为「两行都不可测」，用户以 `--register-untestable` 登记为探索性候选，或不登记）；本协议已提交且写入器绑定了它的 sha256；L4 通过 | `p7-c-registration.json`（**用户提交**）；`--pin-worktree`；打印 launchd；C 时钟开始 | **未运行**；本文件是它的前置之一 |
 | L6 G-C 读数 | 0 | C 记录满 120 个前向会话 | `agent_report.py` 跑一次；候选 / 不可测 | **未运行**（窗口未开始） |

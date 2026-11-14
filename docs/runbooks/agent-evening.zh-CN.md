@@ -4,7 +4,7 @@
 > C 的登记 `docs/research/p7-c-registration.json` 是 L5 时**由用户提交**的一个文件；在那之前命令的第 1 步
 > 会按名拒绝。它还要等 Step 0 自己的登记（`V2-P7-006b`）与 Step 0 的晚间在跑——Step 0 的每日命令自
 > 2026-10-08 起暂停，今天没有任何一个会话有 Step 0 已 file 的记录，第 2 步对任何一天都会拒绝。
-> 受闸步骤 **L2 已完成（2026-11-13；值来自 2026-11-12 的官方文档阅读）**，L1、L3、L4、L5、L6 仍未运行
+> 受闸步骤 **L1 已完成（2026-11-13）、L2 已完成（2026-11-13；值来自 2026-11-12 的官方文档阅读）、L3 已完成（2026-11-14）**，L4、L5、L6 仍未运行
 > （见「登记之前必须按顺序做的事」）；`DEEPSEEK_V4_1_FLASH` 已核实（`verified_on = 2026-11-12`），
 > **真钱闸门仍关着**。
 >
@@ -155,9 +155,9 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 | 步骤 | 请求 | 前置 | 产出 | 状态 |
 |---|---|---|---|---|
-| L1 `V2-P7-010` 探针 live | ≤ 300 次 Tushare（硬上限） | 探针工具已合入；预算文件已按下面的**完整字面量**就位 | 只含元数据的报告；不落盘数据 | **未运行** |
+| L1 `V2-P7-010` 探针 live | ≤ 300 次 Tushare（硬上限） | 探针工具已合入；预算文件已按下面的**完整字面量**就位 | 只含元数据的报告；不落盘数据 | **已完成 2026-11-13**（累计 58/300；四个接口有权限，`anns_d` 无权限；报告 `docs/research/p7-event-probe-report.md`） |
 | L2 DeepSeek 端点核实 | 0 | 用户确认事实文件 | `DEEPSEEK_V4_1_FLASH` 填值、`verified_on = 2026-11-12`；四份面向用户文档的模型/用量措辞与两个散文守卫同一提交序列改写/反转 | **已完成 2026-11-13**（值来自 2026-11-12 的官方文档阅读；0 请求） |
-| L3 DeepSeek live 探针 | ≤ 5 次模型请求 | L2；`.env` 里的 `DEEPSEEK_API_KEY` | scratch 运行目录里的模型/指纹/用量/空白/JSON 有效性报告 | **未运行** |
+| L3 DeepSeek live 探针 | ≤ 5 次模型请求 | L2；`.env` 里的 `DEEPSEEK_API_KEY` | scratch 运行目录里的模型/指纹/用量/空白/JSON 有效性报告 | **已完成 2026-11-14**（UTC 00:23；3 次请求，JSON 全部有效、无空白、thinking 关闭；`response.model` 只回显别名，`system_fingerprint` 才是能看出别名变化的字段；报告 `docs/research/p7-deepseek-probe-report.md`） |
 | L4 LLM 干跑周（D7） | ≤ 5 × 600 模型请求；0 Tushare | `006b` 已登记、Step 0 晚间在跑；批次 2–3 已合入；L3 ok | 只含运维指标的报告；记录只留在 scratch 目录 | **未运行** |
 | L5 C 登记 + 钉住 | 0 | 功效可测（或 D1 有裁定）；`docs/research/p7-c-protocol.md` 已提交；L4 通过 | `p7-c-registration.json`（**用户提交**）；`--pin-worktree`；打印 launchd；C 时钟开始 | **未运行** |
 | L6 G-C 读数 | 0 | C 记录满 120 个前向会话 | `scripts/agent_report.py` 跑一次；候选 / 不可测 | **未运行**（窗口未开始） |
@@ -344,7 +344,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
 ## 已知局限与开放项
 
-1. **C 的登记还不存在，前向窗口没开始**；L2 已完成，L1、L3、L4、L5、L6 未运行。今天跑晚间会在第 1 步拒绝，
+1. **C 的登记还不存在，前向窗口没开始**；L1、L2、L3 已完成，L4、L5、L6 未运行。今天跑晚间会在第 1 步拒绝，
    Step 0 今天也没有任何已 file 的会话（Step 0 的每日命令仍暂停）。
 2. **`DEEPSEEK_V4_1_FLASH` 已核实（L2，2026-11-13；值来自 2026-11-12 的官方文档阅读）**：model
    `deepseek-flash`（移动别名，阅读时为 DeepSeek-V4.1-Flash-1017）、base_url `https://api.deepseek.com`、
@@ -353,7 +353,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
    （方案 C 研究候选：默认不运行，只有用户启动或安装它打印的 launchd 任务才运行，按名字读
    `DEEPSEEK_API_KEY`，每晚请求不超过登记上限），其余出厂路径仍不调用模型；账本也只由该命令在请求
    上限内写入。别名移动时按每次交换的 `response.model` 与 `system_fingerprint` 如实记录；L3 的 live
-   探针仍未运行。
+   探针（2026-11-14，3 次请求）显示 `response.model` 只回显别名，只有 `system_fingerprint` 能看出别名变化。
 3. **别名移动的重复记录**（批次 2 收尾记录 §6 第 2 条，未修复）：模型 id 是声明的一部分，别名一变声明就变，
    同一天可能多出一条声明不同的记录。评估器对同一会话同一 (family, scoring_set) 的重复记录按名拒绝；
    加固方向（已 file 则跳过模型步骤并回放日志）只记录、未实现。

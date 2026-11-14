@@ -392,8 +392,8 @@ CRITERIA: Final[dict[str, str]] = {
         "模型身份（L2 已完成，2026-11-13 记录，值来自 2026-11-12 的官方文档阅读）："
         "deepseek-flash 是移动别名（阅读时为 DeepSeek-V4.1-Flash-1017）。每次模型交换记录 "
         "response.model 与 system_fingerprint，别名变化只报告、不重登记。thinking 关闭、"
-        "temperature 0、错峰运行。DEEPSEEK_V4_1_FLASH.verified_on = 2026-11-12，L3 live 探针"
-        "仍未运行。"
+        "temperature 0、错峰运行。DEEPSEEK_V4_1_FLASH.verified_on = 2026-11-12。L3 live 探针已完成"
+        "（2026-11-14，3 次请求）：response.model 只回显别名，system_fingerprint 才能看出别名变化。"
     ),
     "forward_only": (
         "只前向（V2-P7-015）：只有本登记提交之后的 C 前向记录进入样本。不重放历史、"
