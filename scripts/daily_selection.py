@@ -766,10 +766,33 @@ def admit_predecessors(
     `StepFailedError("registration", ..., exit_code=DailyExit.no_registration,
     steps=SURVIVOR_STEPS)`, naming the predecessor's path and what is wrong -- before any
     request or write.
+
+    A parallel registration (`settings.survivor_parallel_of`, `V2-P7-027`, R-N5) is outside the
+    chain: its own settings name no predecessor, so it has none (`()`), and a committed body
+    carrying both blocks is refused by name. A chain that names a parallel registration as its
+    predecessor is refused too: the parallel book's records never enter the confirmatory sample.
     """
     from openalpha_cn import strategy_survivor
     from openalpha_cn import strategy_survivor_continuation as continuation
 
+    if SURVIVOR_PARALLEL_OF_KEY in registration.settings:
+        # R-N5: a parallel registration is outside the chain. Its own settings name no
+        # predecessor (the writer refuses both blocks in one body); a committed body carrying
+        # both is refused by name rather than read as a link whose sample a later continuation
+        # would merge.
+        try:
+            parallel_block = continuation.read_survivor_continuation(registration.settings)
+        except continuation.SurvivorContinuationError as error:
+            raise _predecessor_refused(
+                f"{registration.path}'s survivor_continuation cannot be read: {error}"
+            ) from error
+        if parallel_block is not None:
+            raise _predecessor_refused(
+                f"{registration.path} is a parallel registration and also names a predecessor in "
+                f"settings.{SURVIVOR_PARALLEL_OF_KEY} and settings.{SURVIVOR_CONTINUATION_KEY}: a "
+                "parallel book runs beside the base book, and it is never a continuation (R-N5)"
+            )
+        return ()
     root, _ = registry.committed_registration(registration.path, repo)
     current = chain_link(registration, survivor)
     current_path = registration.path
@@ -813,6 +836,13 @@ def admit_predecessors(
             )
         seen.add(sha)
         body = admitted.registered
+        inherited = body.get("settings")
+        if isinstance(inherited, Mapping) and SURVIVOR_PARALLEL_OF_KEY in inherited:
+            raise _predecessor_refused(
+                f"the predecessor {block.supersedes_path} is a parallel registration: a "
+                "parallel book runs beside the base book and its records never enter a chain's "
+                "sample (R-N5)"
+            )
         config = body.get("config")
         if not isinstance(config, dict):
             raise _predecessor_refused(

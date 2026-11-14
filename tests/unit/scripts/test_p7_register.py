@@ -1138,3 +1138,50 @@ def test_a_parallel_registration_naming_itself_is_refused() -> None:
 
     assert problems
     assert any("p.json" in problem and "itself" in problem for problem in problems)
+
+
+def test_a_continuation_naming_a_parallel_registration_is_refused() -> None:
+    """R-N5's sample half: a parallel book's records never enter the chain's confirmatory sample,
+    so a registration whose `survivor_continuation` names a parallel registration is refused by
+    name -- the chain is one line of base registrations, and a parallel book is outside it."""
+    parallel = _survivor_body(
+        survivor_parallel_of={"path": "docs/research/a.json", "sha256": "0" * 64}
+    )
+    successor = _survivor_body(survivor_continuation=_continuation("docs/research/p.json"))
+
+    problems = register.chain_problems(
+        {
+            "docs/research/a.json": _survivor_body(),
+            "docs/research/p.json": parallel,
+            "docs/research/s.json": successor,
+        }
+    )
+
+    assert problems
+    assert any(
+        "s.json" in problem and "parallel" in problem and "p.json" in problem
+        for problem in problems
+    )
+
+
+def test_the_writer_refuses_superseding_a_parallel_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The writer's own end of the same rule (R-N5): `--supersedes` naming the parallel book is
+    refused by name before anything is written, so a successor can never continue it."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    _commit_a_parallel_registration(repo, capsys)
+    successor = "docs/research/p7-successor-registration.json"
+
+    code, _, err = _run(
+        capsys,
+        *_arguments(smoke=research_repo.head(repo), supersedes=REGISTRATION, path=successor),
+    )
+
+    assert code == 2
+    assert REGISTRATION in err
+    assert "parallel" in err
+    assert not (repo / successor).exists()

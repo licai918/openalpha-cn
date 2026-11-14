@@ -367,7 +367,9 @@ def chain_problems(registrations: Mapping[str, Mapping[str, Any]]) -> list[str]:
 
     A registration with `survivor_parallel_of` is outside the chain by R-N5 (`V2-P7-027`): it is
     neither a root nor a link, its block must be one of `_parallel_problems`, and naming a
-    `survivor_continuation` in the same body is refused -- a parallel book is never both."""
+    `survivor_continuation` in the same body is refused -- a parallel book is never both. A
+    continuation that names a parallel registration as its predecessor is refused as well: the
+    parallel book's records never enter the chain's confirmatory sample."""
     problems: list[str] = []
     roots: list[str] = []
     successors: dict[str, list[str]] = {}
@@ -399,6 +401,13 @@ def chain_problems(registrations: Mapping[str, Mapping[str, Any]]) -> list[str]:
         if successor not in registrations:
             problems.append(
                 f"{path}: it names {successor}, which is not a committed survivor registration"
+            )
+            continue
+        named_settings = registrations[successor].get("settings")
+        if isinstance(named_settings, Mapping) and _PARALLEL_KEY in named_settings:
+            problems.append(
+                f"{path}: it names {successor}, a parallel registration; a parallel book runs "
+                "beside the chain and is never a predecessor its sample is continued from (R-N5)"
             )
     if len(roots) > 1:
         problems.append(f"more than one chain root: {roots}")
@@ -433,6 +442,13 @@ def _with_predecessor(repo: Path, settings: Mapping[str, Any], value: str) -> di
     config_id = admitted.registered.get("config_id")
     if not isinstance(config_id, str) or not config_id:
         raise SupersedesRefusedError(f"{value}: the predecessor names no config_id")
+    inherited = admitted.registered.get("settings")
+    if isinstance(inherited, Mapping) and _PARALLEL_KEY in inherited:
+        raise SupersedesRefusedError(
+            f"{relative} is a parallel registration: a parallel book runs beside the base book "
+            "and its records never enter a chain's sample, so it is never a predecessor a "
+            "registration continues (R-N5)"
+        )
     block = strategy_survivor_continuation.continuation_block(
         path=relative,
         sha256=hashlib.sha256(admitted.content).hexdigest(),
