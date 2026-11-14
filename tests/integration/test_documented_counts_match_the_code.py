@@ -223,8 +223,8 @@ def _factor_families() -> dict[str, int]:
         "value": counted["value"],
         "quality": counted["quality"],
         "growth": counted["growth"],
-        # `V2-P7-028`'s family, optional in the patterns so a document that names only the five
-        # `V2-P3-009`..013 families still states them correctly.
+        # `V2-P7-028`'s family; the patterns require it, so a document that names only the five
+        # `V2-P3-009`..013 families no longer states the split at all.
         "limit_events": counted["limit_events"],
     }
 
@@ -242,6 +242,37 @@ def _datasets_whose_probe_needs_a_subject() -> int:
 def _coverage_gate() -> int:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return int(config["tool"]["coverage"]["report"]["fail_under"])
+
+
+def _p6_protocol_factor_count() -> int:
+    """The P6 pre-registered grid's factor count, from `scripts/research/p6.py`'s frozen tuple.
+
+    **P6's grid is not the factor library.** It was registered over the twenty-one factors that
+    existed when the protocol was frozen, and `V2-P7-028` deliberately kept the two new
+    limit-event factors out of it (`PROTOCOL_FACTOR_KEYS`; registration is not pre-registration).
+    A README sentence that says the P6 chain ran the library's current count would claim the new
+    factors were part of a multiple-testing-controlled study that never included them -- the
+    research-honesty failure `B-1` of the B1 review found. So this count is derived from the
+    driver's own tuple rather than from the registry, and the two are allowed to differ.
+
+    Read through the AST rather than by importing the driver: `scripts/research/p6.py` imports its
+    sibling `grid` module by bare name, so importing it here would mutate `sys.path` for every test
+    in the session and couple a documentation test to the research driver's module graph. The
+    frozen tuple is a module-level literal, which is exactly what an AST read can answer.
+    """
+    tree = ast.parse(
+        (ROOT / "scripts" / "research" / "p6.py").read_text(encoding="utf-8"),
+        filename="scripts/research/p6.py",
+    )
+    for node in tree.body:
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "PROTOCOL_FACTOR_KEYS"
+        ):
+            assert isinstance(node.value, ast.Tuple)
+            return len(node.value.elts)
+    raise AssertionError("scripts/research/p6.py declares no PROTOCOL_FACTOR_KEYS tuple")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -275,6 +306,17 @@ DOCUMENTED_COUNTS: Final[tuple[DocumentedCount, ...]] = (
         stated={README: 2, README_EN: 1},
     ),
     DocumentedCount(
+        name="the P6 pre-registered factors",
+        derive=lambda: {"n": _p6_protocol_factor_count()},
+        source="len(scripts/research/p6.py PROTOCOL_FACTOR_KEYS)",
+        statements=(
+            re.compile(rf"(?P<n>{NUMBER})\s*个预登记因子"),
+            re.compile(rf"(?P<n>{NUMBER})\s+pre-registered\s+factors?", re.IGNORECASE),
+        ),
+        example="{n} 个预登记因子",
+        stated={README: 1, README_EN: 1},
+    ),
+    DocumentedCount(
         name="declared factors by family",
         derive=_factor_families,
         source="the families of panel_factors.FACTOR_DEFINITIONS",
@@ -283,13 +325,16 @@ DOCUMENTED_COUNTS: Final[tuple[DocumentedCount, ...]] = (
                 rf"动量反转\s*(?P<momentum>{DIGITS})\s*/\s*波动流动性\s*(?P<volatility>{DIGITS})"
                 rf"\s*/\s*价值\s*(?P<value>{DIGITS})\s*/\s*质量\s*(?P<quality>{DIGITS})"
                 rf"\s*/\s*成长\s*(?P<growth>{DIGITS})"
-                rf"(?:\s*/\s*涨停事件\s*(?P<limit_events>{DIGITS}))?"
+                # `V2-P7-028`'s family is required rather than optional: both READMEs state it,
+                # and an optional group let a document say "23 declared factors" beside a
+                # five-family split that summed to 21 (`m-3` of the B1 review).
+                rf"\s*/\s*涨停事件\s*(?P<limit_events>{DIGITS})"
             ),
             re.compile(
                 rf"(?P<momentum>{DIGITS})\s+momentum/reversal,\s*"
                 rf"(?P<volatility>{DIGITS})\s+volatility/liquidity,\s*(?P<value>{DIGITS})\s+value,"
                 rf"\s*(?P<quality>{DIGITS})\s+quality,\s*(?P<growth>{DIGITS})\s+growth"
-                rf"(?:,\s*(?P<limit_events>{DIGITS})\s+limit\s+events?)?"
+                rf",\s*(?P<limit_events>{DIGITS})\s+limit\s+events?"
             ),
         ),
         example=(

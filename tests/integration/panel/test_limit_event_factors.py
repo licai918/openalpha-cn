@@ -13,6 +13,18 @@ What is under test here is the three behaviours that need a panel:
 3. **A window stretched past the declared span is refused.** Five bandless sessions inside the last
    twenty-five leave a security twenty classifiable sessions spanning twenty-five panel sessions:
    `insufficient_history` with the window recorded, while the rest of the cross section computes.
+4. **Nothing classifiable is `insufficient_history`, not `input_missing`.** A security halted over
+   the whole read (bands published, no bar) and one with bars but no published band both have no
+   session this factor can classify; the window is empty rather than band-only, which is the honest
+   code and not the one reserved for a short read.
+5. **A recorded `V2-P6-020` return-path decision does not touch these factors.** Their close is a
+   level compared against a published band, not a link in a return chain, so a recorded
+   unknowable-return session inside the window leaves the observation `computed` on the
+   band-derived count instead of abstaining.
+6. **The family builds through `factor build`'s own path, carried and fresh alike.** Both factors,
+   raw and processed tiers, two instants: one carried build's stored identities and coverage are
+   the two single-instant builds' -- the path the controller's real build runs
+   (`REQUIREMENT_BUILDERS`, `_CALENDAR_SCOPED_REQUIREMENTS`, `FactorReadCarry`).
 
 The fixture is generated at test time and written through the real writers; no `.parquet` is
 committed and no network is used (hard rule 6).
@@ -20,6 +32,8 @@ committed and no network is used (hard rule 6).
 
 from __future__ import annotations
 
+import shutil
+from collections import Counter
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -33,13 +47,24 @@ from panel_fixtures import (
     SENTINEL_UP_LIMIT,
     GeneratedPanel,
     _arrayed_rows,
+    _close_time,
+    _published_time,
+    _with_a_halt,
     generate_limit_streak_panel,
     write_generated_panel,
 )
 
-from openalpha_cn.domain.daily_prices import DAILY_DATASET
+from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
 from openalpha_cn.domain.limit_events import SessionLimitState, session_limit_events, session_state
+from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
+from openalpha_cn.domain.upstream_defects import UPSTREAM_DEFECT_DATA_COLUMNS
+from openalpha_cn.factor_view import (
+    FactorBuildReport,
+    FactorBuildRequest,
+    build_factor_panels,
+    factor_build_request,
+)
 from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     BROKEN_BOARD_COUNT_20,
@@ -49,11 +74,14 @@ from openalpha_cn.panel_factors import (
     compute_factor,
 )
 from openalpha_cn.panel_ingest import (
+    SUSPENSION_DATASET,
+    UPSTREAM_DEFECTS_DATASET,
     daily_requirement,
     load_daily_bars,
     load_price_limits,
     price_limit_requirement,
     session_publication_instant,
+    write_upstream_defects,
 )
 
 YEAR: Final[int] = 2026
@@ -179,6 +207,114 @@ def _bands_restated(
         overrides=overrides or {},
     )
     return replace(panel, batches=batches)
+
+
+def _close_of(panel: GeneratedPanel, code: str, day: date) -> float:
+    """One stored `daily.close`, looked up by `(subject, date)` rather than by row position."""
+    batch = panel.batch(DAILY_DATASET)
+    dates = panel.column(DAILY_DATASET, "trade_date")
+    closes = panel.column(DAILY_DATASET, "close")
+    for subject, day_text, close in zip(batch.subjects, dates, closes, strict=True):
+        if subject == code and day_text == day.isoformat():
+            return float(close)
+    raise AssertionError(f"no stored bar for {code} on {day.isoformat()}")
+
+
+def _halted_over_the_whole_read(panel: GeneratedPanel, code: str) -> GeneratedPanel:
+    """`panel` with **every** bar and valuation of `code` dropped and a halt row put in each place.
+
+    The shape the real panel has for a security suspended for months: `stk_limit` still publishes
+    its band every session (`domain/price_limits.py` measures 26 halted A shares on 2024-06-28),
+    `daily` has no bar, and `suspend_d` explains every absent bar -- the price writer's own
+    explained-thin-session guard refuses the fixture otherwise.
+    """
+    batches = dict(panel.batches)
+    dropped = frozenset((code, day.isoformat()) for day in panel.sessions)
+    for dataset in (DAILY_DATASET, DAILY_BASIC_DATASET):
+        batches[dataset] = _arrayed_rows(
+            panel.batch(dataset), date_column="trade_date", drops=dropped
+        )
+    suspensions = panel.batch(SUSPENSION_DATASET)
+    for day in panel.sessions:
+        suspensions = _with_a_halt(suspensions, code=code, day=day)
+    batches[SUSPENSION_DATASET] = suspensions
+    return replace(panel, batches=batches)
+
+
+def _copy_store(store: PanelStore, target: Path) -> PanelStore:
+    """A byte copy of a written store, so two builds can run from identical inputs."""
+    shutil.copytree(store.root, target)
+    return PanelStore(target)
+
+
+def _decision_batch(
+    panel: GeneratedPanel, code: str, *, session: date, previous: date
+) -> ColumnarPanelBatch:
+    """One `V2-P6-020` record saying `session`'s return is unknowable, on this panel's own rows.
+
+    Kind `pre_close_contradicts_adj_factor` -- neither the published `pre_close` nor the factor
+    path is corroborated, so `recorded_return_paths` gives `path=None` and a window that reads a
+    session return abstains. The two closes are the stored ones, which is what makes the record
+    match the rows a reader holds (`_decided_series`' rule).
+    """
+    values: dict[str, object] = {
+        "trade_date": session.isoformat(),
+        "source_dataset": "stk_limit",
+        "defect_kind": "pre_close_contradicts_adj_factor",
+        "bar_close": _close_of(panel, code, session),
+        "valuation_close": _close_of(panel, code, previous) * 0.8,
+        "previous_bar_close": _close_of(panel, code, previous),
+        "up_limit": None,
+        "down_limit": None,
+        "valuation_repeats_previous_close": None,
+        "list_date": None,
+    }
+    kinds = {
+        "trade_date": "string",
+        "source_dataset": "string",
+        "defect_kind": "string",
+        "valuation_repeats_previous_close": "boolean",
+        "list_date": "string",
+    }
+    return ColumnarPanelBatch(
+        provider_id="openalpha-cn/tests",
+        dataset=UPSTREAM_DEFECTS_DATASET,
+        kind=UPSTREAM_DEFECTS_DATASET,
+        as_of=panel.as_of,
+        fetched_at=panel.as_of,
+        status="success",
+        subjects=(code,),
+        timeline=TimelineColumns(
+            event_time=(_close_time(session),),
+            available_time=(_published_time(session),),
+            ingested_time=(_published_time(session),),
+            revision_time=(_published_time(session),),
+        ),
+        columns=tuple(
+            PanelColumn(name, kinds.get(name, "float"), (values[name],))  # type: ignore[arg-type]
+            for name in UPSTREAM_DEFECT_DATA_COLUMNS
+        ),
+    )
+
+
+def _request(panel: GeneratedPanel, key: str, as_ofs: tuple[datetime, ...]) -> FactorBuildRequest:
+    """A `factor build` request for one factor at `as_ofs`, raw and processed tiers."""
+    return factor_build_request(
+        factor=key,
+        tier="processed",
+        transform="cross_section_standard/v1",
+        neutralization="",
+        as_ofs=list(as_ofs),
+        years=[YEAR],
+        exchange=panel.exchange,
+        max_staleness_days=30,
+        waive_max_staleness=False,
+        subjects=[],
+        supersedes_raw=[],
+        supersedes_processed=[],
+        supersedes_neutralized=[],
+        code_commit="a1b2c3d",
+    )
 
 
 # --- 1. the counts are V2-P7-011's counts ---------------------------------------------------------
@@ -377,3 +513,150 @@ def test_a_window_stretched_past_the_declared_span_is_insufficient_history(tmp_p
     assert refused.input_session_last == panel.sessions[SPAN_END_INDEX]
     assert dict(result.coverage_census())["insufficient_history"] == 1
     assert observations[panel.securities[LIMIT_STREAK_SECURITY_INDEX]].coverage == "computed"
+
+
+# --- 4. nothing classifiable is insufficient_history, not input_missing -------------------------
+
+
+def test_a_security_halted_over_the_whole_read_is_insufficient_history(tmp_path: Path) -> None:
+    """Bands for every session and no bar in any of them: no session is classifiable.
+
+    This is the real shape of a long suspension -- the exchange keeps publishing the band -- and
+    the first draft's fallback turned it into `input_missing` by forming a band-only window that
+    `_complete_series` could not fill. `input_missing` is the code reserved for a short read, so
+    the census could not tell a fetch hole from a halt; the honest answer is
+    `insufficient_history`, which is what a daily-only factor answers for the same security. It
+    also has no window to record, unlike the span overrun above.
+    """
+    panel = _panel()
+    victim = panel.securities[0]
+    panel = _halted_over_the_whole_read(panel, victim)
+    store = _store(tmp_path, panel)
+    as_of = _published(panel, WINDOW_END_INDEX)
+
+    result = _build(store, panel, LIMIT_UP_COUNT_20, as_of)
+    observation = _by_subject(result)[victim]
+
+    assert observation.coverage == "insufficient_history"
+    assert observation.value is None
+    assert observation.input_session_first is None
+    assert observation.input_session_last is None
+    assert dict(result.coverage_census())["input_missing"] == 0
+
+
+def test_a_security_with_bars_but_no_band_rows_at_all_is_insufficient_history(
+    tmp_path: Path,
+) -> None:
+    """Every bar present, every `stk_limit` row for the security gone: nothing to classify against.
+
+    The other half of the empty-window rule, and the one a "union the datasets' points" reading
+    gets wrong in the quiet direction: the bars alone would form a window that then has no band on
+    any session, and the observation would be `input_missing`. The factor needs the *pair* on a
+    session, so the intersection is empty and the answer is `insufficient_history`.
+    """
+    panel = _panel()
+    victim = panel.securities[0]
+    dropped = frozenset((victim, day.isoformat()) for day in panel.sessions)
+    panel = _bands_restated(panel, dropped=dropped)
+    store = _store(tmp_path, panel)
+    as_of = _published(panel, WINDOW_END_INDEX)
+
+    observation = _by_subject(_build(store, panel, LIMIT_UP_COUNT_20, as_of))[victim]
+
+    assert observation.coverage == "insufficient_history"
+    assert observation.value is None
+    assert observation.input_session_first is None
+    assert observation.input_session_last is None
+
+
+# --- 5. a return-path decision is not this family's --------------------------------------------
+
+
+def test_a_recorded_unknowable_return_session_leaves_the_count_computed(tmp_path: Path) -> None:
+    """`session_return_links` excludes a band-reading close, and this is what that buys.
+
+    The record says one session inside the window has an unknowable *return*. A factor that read
+    session returns would abstain (`undefined_value`) on it; this family compares the session's own
+    close to its own published band, which the disagreement does not change -- and `V2-P7-011`'s
+    events still answer the session. So the observation stays `computed` with the band-derived
+    count, and no abstention is reported. Without the `session_return_links` branch this is
+    `undefined_value`, which is why the test is behavioural rather than a declaration check.
+    """
+    panel = _panel()
+    store = _store(tmp_path, panel)
+    code = panel.securities[LIMIT_STREAK_SECURITY_INDEX]
+    defect_day = panel.sessions[WINDOW_END_INDEX - 5]
+    previous_day = panel.sessions[WINDOW_END_INDEX - 6]
+    as_of = _published(panel, WINDOW_END_INDEX)
+
+    # The defect is on a session the scripted security has a bar on, so it is a window point.
+    write_upstream_defects(
+        store,
+        _decision_batch(panel, code, session=defect_day, previous=previous_day),
+        year=YEAR,
+        source_datasets=frozenset({"stk_limit"}),
+    )
+
+    result = _build(store, panel, LIMIT_UP_COUNT_20, as_of)
+    observation = _by_subject(result)[code]
+
+    assert observation.coverage == "computed"
+    assert observation.value == pytest.approx(5.0)
+    assert result.unknowable_return_sessions == ()
+    assert observation.input_session_first is not None
+    assert observation.input_session_last is not None
+    assert observation.input_session_first < defect_day < observation.input_session_last
+
+
+# --- 6. the family through `factor build`'s own path ------------------------------------------
+
+
+def _census_sum(reports: tuple[FactorBuildReport, ...], tier: str) -> Counter[str]:
+    total: Counter[str] = Counter()
+    for report in reports:
+        total.update(report.coverage[tier])
+    return total
+
+
+def test_the_family_builds_through_the_factor_build_face_carried_and_fresh(
+    tmp_path: Path,
+) -> None:
+    """Both factors, raw and processed, two instants: carried build == two fresh single builds.
+
+    This is the path the controller's real factor build runs -- `REQUIREMENT_BUILDERS`'
+    `stk_limit` row, `_CALENDAR_SCOPED_REQUIREMENTS`, the build's one `FactorReadCarry` across
+    instants -- and the read-path pin suites exclude these two factors because their corpora carry
+    no band partition. The identities are `manifest_id`s, so the equality is about what was
+    stored rather than about what a report printed.
+    """
+    panel = _panel()
+    base = PanelStore(tmp_path / "panel")
+    write_generated_panel(base, panel)
+    first = _published(panel, WINDOW_END_INDEX)
+    second = _published(panel, SPAN_END_INDEX)
+    built_at = second + timedelta(days=1)
+
+    for position, key in enumerate(
+        (LIMIT_UP_COUNT_20.qualified_key, BROKEN_BOARD_COUNT_20.qualified_key)
+    ):
+        carried_store = _copy_store(base, tmp_path / f"carried_{position}")
+        carried = build_factor_panels(
+            carried_store, _request(panel, key, (first, second)), built_at=built_at
+        )
+
+        fresh: list[FactorBuildReport] = []
+        for instant_position, instant in enumerate((first, second)):
+            fresh_store = _copy_store(base, tmp_path / f"fresh_{position}_{instant_position}")
+            fresh.append(
+                build_factor_panels(
+                    fresh_store, _request(panel, key, (instant,)), built_at=built_at
+                )
+            )
+
+        for tier in ("raw", "processed"):
+            assert len(carried.manifest_ids[tier]) == 2, (key, tier)
+            assert set(carried.manifest_ids[tier]) == {
+                report.manifest_ids[tier][0] for report in fresh
+            }, (key, tier)
+            assert Counter(carried.coverage[tier]) == _census_sum(tuple(fresh), tier), (key, tier)
+        assert carried.partitions

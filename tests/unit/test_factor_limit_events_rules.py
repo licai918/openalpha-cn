@@ -57,7 +57,9 @@ from openalpha_cn.panel_factors import (
     PUBLISHED_ABSENCE_DATASETS,
     FactorWindow,
     _broken_board_count_20,
+    _DatasetReading,
     _limit_up_count_20,
+    _points_held,
     session_return_links,
 )
 
@@ -331,17 +333,69 @@ def test_the_declared_columns_are_the_contracts_own_names() -> None:
     assert CLOSE_COLUMN in DAILY_DATA_COLUMNS
 
 
-def test_the_engine_forms_the_window_from_classifiable_sessions_only() -> None:
-    """The declaration the family's notes depend on: `stk_limit` contributes by intersection.
+def test_the_engine_declares_the_one_dataset_whose_absence_is_a_published_fact() -> None:
+    """The *declaration* only; the window's behaviour is driven in the integration file.
 
-    Without this table a bandless session would be a window point and `_complete_series` would
-    code the whole observation `input_missing`; with it the window is the sessions the domain's own
-    join can classify, which is what `session_limit_events` reads. The set is pinned in one place
-    so a second dataset cannot acquire the meaning silently.
+    This pins which dataset carries the meaning, so a second one cannot acquire it silently. What
+    the rule does to a halt, a bandless session and a whole-history halt is
+    `tests/integration/panel/test_limit_event_factors.py`'s subject -- a declaration test cannot
+    show that a window formed by the rule is the one the domain can classify.
     """
     assert frozenset({PRICE_LIMIT_DATASET}) == PUBLISHED_ABSENCE_DATASETS
     for definition in FAMILY:
         assert PRICE_LIMIT_DATASET in definition.datasets
+
+
+def _reading(
+    axis: str,
+    points_by_subject: dict[str, tuple[date, ...]],
+    *,
+    columns: tuple[str, ...] = ("close",),
+) -> _DatasetReading:
+    """One `_DatasetReading` with only what `_points_held` reads populated."""
+    return _DatasetReading(
+        points_by_subject=MappingProxyType(points_by_subject),
+        values=MappingProxyType({}),
+        columns=columns,
+        axis=axis,  # type: ignore[arg-type]
+        ambiguous_points_by_subject=MappingProxyType({}),
+    )
+
+
+def test_with_no_published_absence_dataset_the_window_is_the_old_union() -> None:
+    """`PUBLISHED_ABSENCE_DATASETS` is inert for every factor that reads none of its datasets.
+
+    The window rule changed, so "no shipped answer moves" needs a direct test of the function
+    rather than only the per-definition read-path pins: with no absence dataset in `readings` the
+    answer is the previous code's answer exactly -- one reading's own tuple, or the sorted union
+    of the readings that hold the subject -- on both axes, and a dataset outside the table never
+    intersects. The period-axis pair is `V2-P3-010`'s two-statement union; the second session
+    reading is `daily`+`daily_basic`, whose coverage is equal by the daily writer's cross-check.
+    """
+    subject = "000001.SZ"
+    first, second, third, fourth = (date(2026, 1, day) for day in (5, 6, 7, 8))
+    assert _points_held(
+        subject, readings={"daily": _reading("session", {subject: (first, second)})}, axis="session"
+    ) == (first, second)
+
+    sessions = {
+        "daily": _reading("session", {subject: (first, second, third)}),
+        "daily_basic": _reading("session", {subject: (second, third, fourth)}),
+    }
+    # The union and not the intersection: the points only one reading holds are window points.
+    assert _points_held(subject, readings=sessions, axis="session") == (
+        first,
+        second,
+        third,
+        fourth,
+    )
+    assert _points_held("000002.SZ", readings=sessions, axis="session") == ()
+
+    filings = {
+        "income": _reading("period", {subject: (first, second)}, columns=("revenue",)),
+        "balancesheet": _reading("period", {subject: (second, third)}, columns=("total_assets",)),
+    }
+    assert _points_held(subject, readings=filings, axis="period") == (first, second, third)
 
 
 # --- the count, against the domain's own events --------------------------------------------------
