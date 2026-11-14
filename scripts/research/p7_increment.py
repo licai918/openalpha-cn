@@ -12,9 +12,10 @@ The statistic is the **partial rank IC**, the repository's own
     partial_rank_ic = Pearson(residual(rank(extra) ~ rank(composite)),
                               residual(rank(label) ~ rank(composite)))
 
-`domain.incremental_ic.non_overlapping` picks the summary's sample -- one reading per h20 label
-window -- exactly as `p7_diagnostics.sampled_sessions` picks the engine's, so the mean, sd and t
-below are over periods whose labels do not overlap.
+The sample is the plan's: `p7_diagnostics.sampled_sessions` gives the engine's signal days, and
+because the command's stride is the h20 horizon (`STRIDE == HORIZON`), those days are already one
+per label window. The summary is taken over them directly; a plan with any other stride is
+refused by name rather than thinned a second time.
 
 **Exploratory by construction (R-N6).** The research window (`p7_windows.RESEARCH`, 2015-01-05..
 2021-12-31) was P6's discovery and composition data, and 2021 was already rehearsed: nothing here
@@ -38,6 +39,9 @@ What is reused rather than re-implemented:
 
 The command line is `explore --runtime-dir --as-of --first --last [--out]`. It opens only the
 research window, by name, and refuses by name any day outside it; without `--out` it only prints.
+It also refuses by name an `--as-of` before the last sampled session's h20 label has published
+(the exit session's 16:30): a knowledge clock that early would turn every label of the sample into
+a gap, which is a refusal rather than a measurement.
 """
 
 from __future__ import annotations
@@ -78,6 +82,7 @@ from p7_windows import (
     WindowCappedStore,
     capped_panel_store,
     checked_runtime_directory,
+    label_exit_day,
     plan_signal_days,
 )
 
@@ -85,11 +90,7 @@ from openalpha_cn.backtest.decile_readout import summarize_series
 from openalpha_cn.backtest.factor_ic import TIER_ADMITTED_CODES
 from openalpha_cn.domain.factor import FactorDefinition
 from openalpha_cn.domain.horizon import HorizonUnit, ResearchHorizon
-from openalpha_cn.domain.incremental_ic import (
-    SessionIC,
-    non_overlapping,
-    partial_rank_ic_with_reason,
-)
+from openalpha_cn.domain.incremental_ic import partial_rank_ic_with_reason
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
 from openalpha_cn.model_view import OutcomeLabels
@@ -134,10 +135,12 @@ FACTOR_ORIENTATION: Final[Mapping[str, float]] = MappingProxyType(
 """The declared direction as a sign on values: `lower_is_better` is negated before the IC."""
 
 REASON_NO_ELIGIBLE_NAMES: Final = "no_eligible_names"
+REASON_NO_FACTOR_BUILD: Final = "no_factor_build_for_session"
+REASON_NO_LABELS: Final = "no_labels_for_session"
 REASON_NO_COMPLETE_NAMES: Final = "no_names_with_all_three_values"
-"""This reading's own reasons, for the two cases the arithmetic would otherwise fold into
-`too_few_names`: a session where the book admitted nobody, and one where nobody carried all
-three values."""
+"""This reading's own reasons, for the cases the arithmetic would otherwise fold into
+`too_few_names`: a session where the book admitted nobody, one where the factor read no build at
+all, one where no eligible name carried a label, and one where the values never all met."""
 
 _EXCHANGE_ZONE: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 _ROOT: Final[Path] = Path(__file__).resolve().parent
@@ -218,7 +221,6 @@ def increment_readings(
             )
             continue
         eligible = sorted(eligible_values)
-        complete = [code for code in eligible if code in extra_values and code in labelled]
         if not eligible:
             readings.append(
                 SessionIncrement(
@@ -231,6 +233,31 @@ def increment_readings(
                 )
             )
             continue
+        if not extra_values:
+            readings.append(
+                SessionIncrement(
+                    session=session,
+                    eligible=len(eligible),
+                    n_scored=0,
+                    gaps=len(eligible),
+                    value=None,
+                    reason=REASON_NO_FACTOR_BUILD,
+                )
+            )
+            continue
+        if not labelled:
+            readings.append(
+                SessionIncrement(
+                    session=session,
+                    eligible=len(eligible),
+                    n_scored=0,
+                    gaps=len(eligible),
+                    value=None,
+                    reason=REASON_NO_LABELS,
+                )
+            )
+            continue
+        complete = [code for code in eligible if code in extra_values and code in labelled]
         if not complete:
             readings.append(
                 SessionIncrement(
@@ -281,27 +308,16 @@ def _window_form(window: DiagnosticWindow) -> dict[str, Any]:
     }
 
 
-def _summary_of(plan: SignalPlan, readings: Sequence[SessionIncrement]) -> dict[str, Any]:
-    """The non-overlapping sample's descriptive summary: n, mean, sd, and t only.
+def _summary_of(readings: Sequence[SessionIncrement]) -> dict[str, Any]:
+    """The descriptive summary over the plan's own sampled days: n, mean, sd, and t only.
 
-    `non_overlapping` is given one reading per `ceil(horizon / stride)` plan sessions -- the same
-    every-nth rule `sampled_sessions` applies to the plan -- so the summary's periods never share
-    a label window. `t` is descriptive: this document has no p-value and no gate.
+    The plan's stride is the label horizon (`increment_document` refuses any other), so its
+    sampled days are already one per non-overlapping h20 window; a second thinning would drop
+    periods rather than protect them. `t` is descriptive: this document has no p-value and no
+    gate.
     """
-    every_nth = math.ceil(HORIZON / plan.stride) if plan.stride else 1
-    ics = tuple(
-        SessionIC(
-            session=item.session, n_scored=item.n_scored, value=item.value, reason=item.reason
-        )
-        for item in readings
-    )
-    selected = (
-        non_overlapping(ics, horizon=every_nth, anchor_ordinal=ics[0].session.toordinal())
-        if ics
-        else ()
-    )
     summary = summarize_series(
-        [(item.session, item.value) for item in selected if item.value is not None]
+        [(item.session, item.value) for item in readings if item.value is not None]
     )
     return {"n": summary.n, "mean": summary.mean, "sd": summary.sd, "t": summary.t}
 
@@ -324,7 +340,7 @@ def _factor_block(
             }
             for item in readings
         ],
-        "summary": _summary_of(plan, readings),
+        "summary": _summary_of(readings),
     }
 
 
@@ -344,6 +360,13 @@ def increment_document(
     document's own `config` and `request`, so it can be recomputed from the document. There is no
     p-value field, no q and no verdict: R-N6's reading is exploratory.
     """
+    if plan.stride != STRIDE:
+        raise IncrementError(
+            f"the plan's stride is {plan.stride} sessions, not the reading's {STRIDE}: with a "
+            f"stride equal to the {HORIZON}-session horizon the plan's sampled days are already "
+            "one per non-overlapping label window, and a finer stride would need a second "
+            "thinning this reading does not take"
+        )
     keys = tuple(definition.qualified_key for definition in FACTORS)
     if set(readings) != set(keys):
         raise IncrementError(
@@ -518,8 +541,8 @@ def _open_sources(
     )
     scores = PanelScoreSource(
         store=store,
-        book=DEFAULT_BOOK,
-        transform=FACTOR_TRANSFORMS.get(TRANSFORM),
+        book=settings.book,
+        transform=FACTOR_TRANSFORMS.get(settings.transform),
         exchange=EXCHANGE,
         as_of=settings.as_of,
         min_coverage=DEFAULT_MIN_COVERAGE,
@@ -538,8 +561,18 @@ def _open_sources(
         for definition in FACTORS
     }
     readers: dict[int, OutcomeLabels] = {}
+    labelled: dict[date, Mapping[str, float]] = {}
 
     def labels(day: date) -> Mapping[str, float]:
+        """The session's labelled eligible names, read once and shared by both factors.
+
+        The window is anchored at the session's own 16:30 (`session_publication_instant`), never
+        at the reading's `as_of`: what the label is must not move with when the reading ran. Only
+        the book's eligible names are asked about, so a factor value on a name the book did not
+        admit cannot leak into the reading.
+        """
+        if day in labelled:
+            return labelled[day]
         reader = readers.get(day.year)
         if reader is None:
             reader = panel_label_source(
@@ -554,18 +587,16 @@ def _open_sources(
             session_publication_instant(day),
             horizon=ResearchHorizon(count=HORIZON, unit=HorizonUnit.trading_days),
         )
-        codes = set(composite(day))
-        for definition in FACTORS:
-            codes.update(factor_reads.values_on(definition, day))
         found: dict[str, float] = {}
-        for code in sorted(codes):
+        for code in sorted(composite(day)):
             label = reader.label(code, label_window)
             if label is None or not label.is_labelled:
                 continue
             realized = label.realized_return
             if realized is not None:
                 found[code] = realized
-        return found
+        labelled[day] = MappingProxyType(found)
+        return labelled[day]
 
     return Sources(
         calendar=calendar,
@@ -581,11 +612,19 @@ def _open_sources(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ExploreSettings:
-    """The `explore` command's settings, checked before any store is opened."""
+    """The `explore` command's settings, checked before any store is opened.
+
+    `book` and `transform` default to the reading's own (`DEFAULT_BOOK`, `TRANSFORM`); the command
+    line takes no option for either, and they are fields so a test can drive `_open_sources` over
+    a generated panel whose composite factors are the fixture's rather than a fresh long-history
+    build of the default book's.
+    """
 
     as_of: datetime
     first: date
     last: date
+    book: SurvivorBookConfig = DEFAULT_BOOK
+    transform: str = TRANSFORM
 
     def config(self, window: DiagnosticWindow) -> dict[str, Any]:
         """What the document records as its configuration (and digests with the request)."""
@@ -597,8 +636,8 @@ class ExploreSettings:
             "last": self.last,
             "stride": STRIDE,
             "horizon": HORIZON,
-            "transform": TRANSFORM,
-            "book": DEFAULT_BOOK.model_dump(mode="json"),
+            "transform": self.transform,
+            "book": self.book.model_dump(mode="json"),
             "book_seed": SEED_NOTE,
             "factors": [definition.qualified_key for definition in FACTORS],
             "directions": {
@@ -664,6 +703,36 @@ def _settings(arguments: argparse.Namespace, window: DiagnosticWindow) -> Explor
     return ExploreSettings(as_of=as_of, first=first, last=last)
 
 
+def _require_matured_as_of(
+    calendar: TradingCalendar, sessions: Sequence[date], as_of: datetime
+) -> None:
+    """Refuse an `as_of` before the last sampled day's h20 label has published.
+
+    The label of a session enters at the next close and leaves `HORIZON` sessions later
+    (`p7_windows.label_exit_day`), and it is knowable at that exit session's own 16:30. A
+    knowledge clock earlier than that turns every label of the sample into a gap; this reading
+    refuses by name instead, after the store is open and before anything is measured.
+    """
+    if not sessions:
+        return
+    last = sessions[-1]
+    exit_day = label_exit_day(calendar, last, HORIZON)
+    if exit_day is None:
+        raise IncrementError(
+            f"the {HORIZON}-session label of the last sampled session {last.isoformat()} cannot "
+            f"be placed on the {calendar.exchange} calendar, so --as-of {as_of.isoformat()} "
+            "cannot be checked against it"
+        )
+    published = session_publication_instant(exit_day)
+    if as_of < published:
+        raise IncrementError(
+            f"--as-of {as_of.isoformat()} is before the {HORIZON}-session label of the last "
+            f"sampled session {last.isoformat()} is published at {published.isoformat()} "
+            f"({exit_day.isoformat()} 16:30 Asia/Shanghai): every label of the sample would be a "
+            "gap, so this reading refuses rather than measuring gaps"
+        )
+
+
 def _explore(arguments: argparse.Namespace) -> int:
     window = RESEARCH
     try:
@@ -681,6 +750,7 @@ def _explore(arguments: argparse.Namespace) -> int:
             horizons=(HORIZON,),
         )
         sessions = sampled_sessions(chosen, HORIZON)
+        _require_matured_as_of(sources.calendar, sessions, settings.as_of)
         readings = {
             definition.qualified_key: increment_readings(
                 sessions=sessions,
@@ -700,7 +770,7 @@ def _explore(arguments: argparse.Namespace) -> int:
         )
     except DiagnosticWindowError as error:
         return _refuse("explore", error, 2)
-    except DiagnosticRequestError as error:
+    except (DiagnosticRequestError, IncrementError) as error:
         return _refuse("explore", error, 2)
     except (FactorEngineError, TradingCalendarError) as error:
         return _refuse("explore", error, 1)

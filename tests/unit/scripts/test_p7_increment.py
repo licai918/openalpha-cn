@@ -37,10 +37,12 @@ from strategy_fixtures import (
 )
 
 from openalpha_cn.domain.daily_prices import DAILY_DATASET
+from openalpha_cn.domain.horizon import HorizonUnit, ResearchHorizon
 from openalpha_cn.domain.incremental_ic import (
     REASON_TOO_FEW_NAMES,
     REASON_ZERO_RESIDUAL_VARIANCE,
 )
+from openalpha_cn.domain.name_history import NAMECHANGE_DATASET
 from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.domain.trading_calendar import (
     CalendarDay,
@@ -48,8 +50,23 @@ from openalpha_cn.domain.trading_calendar import (
     build_trading_calendar,
 )
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_factors import compute_factor, write_factor_panels
-from openalpha_cn.panel_ingest import price_limit_requirement, session_publication_instant
+from openalpha_cn.panel_factors import (
+    FACTOR_DEFINITIONS,
+    apply_factor_transform,
+    compute_factor,
+    write_factor_panels,
+    write_processed_factor_panels,
+)
+from openalpha_cn.panel_ingest import (
+    price_limit_requirement,
+    session_publication_instant,
+    split_panel_batch_by_year,
+    write_name_history,
+)
+from openalpha_cn.strategy_survivor_facts import (
+    DEFAULT_MAX_CARRY_SESSIONS,
+    DEFAULT_MIN_COVERAGE,
+)
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 RESEARCH: Final[Path] = ROOT / "scripts" / "research"
@@ -65,6 +82,13 @@ grid = _research_module("grid")
 p7_diagnostics = _research_module("p7_diagnostics")
 p7_increment = _research_module("p7_increment")
 p7_windows = _research_module("p7_windows")
+
+UNIT: Final[Path] = Path(__file__).resolve().parents[1]
+if str(UNIT) not in sys.path:
+    sys.path.insert(0, str(UNIT))
+_facts_panel = importlib.import_module("test_survivor_facts_panel")
+FRAME_BOOK: Final = _facts_panel.CONFIG
+IDENTITY: Final = _facts_panel.IDENTITY
 
 SHANGHAI: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 FIXTURE_WINDOW: Final = p7_windows.DiagnosticWindow(
@@ -196,30 +220,29 @@ def test_a_copy_of_the_composite_has_no_partial_rank_information() -> None:
 def test_the_extra_is_oriented_by_the_declared_direction() -> None:
     """Both of B's factors are `lower_is_better`: the oriented value is the raw one negated, so a
     factor that rises with the return has a negative partial IC -- and the declared direction is
-    what flips it. (`FACTORS[0]` is checked against the shipped definition, not a copy.)"""
-    definition = p7_increment.FACTORS[0]
-    assert definition.direction == "lower_is_better"
-    assert p7_increment.orient(definition, {"600000.SH": 2.5}) == {"600000.SH": -2.5}
-
+    what flips it. Both shipped definitions are checked, not a copy of one."""
     session = date(2017, 1, 3)
     composite = table(11)
     raw = {code: float(index) for index, code in enumerate(CODES)}
     labels = dict(raw)
-    unoriented = p7_increment.increment_readings(
-        sessions=(session,),
-        composite=lambda day: composite,
-        extra=lambda day: raw,
-        labels=lambda day: labels,
-    )
-    oriented = p7_increment.increment_readings(
-        sessions=(session,),
-        composite=lambda day: composite,
-        extra=lambda day: p7_increment.orient(definition, raw),
-        labels=lambda day: labels,
-    )
 
-    assert unoriented[0].value == pytest.approx(1.0)
-    assert oriented[0].value == pytest.approx(-1.0)
+    for definition in p7_increment.FACTORS:
+        assert definition.direction == "lower_is_better"
+        assert p7_increment.orient(definition, {"600000.SH": 2.5}) == {"600000.SH": -2.5}
+        unoriented = p7_increment.increment_readings(
+            sessions=(session,),
+            composite=lambda day: composite,
+            extra=lambda day: raw,
+            labels=lambda day: labels,
+        )
+        oriented = p7_increment.increment_readings(
+            sessions=(session,),
+            composite=lambda day: composite,
+            extra=lambda day, definition=definition: p7_increment.orient(definition, raw),
+            labels=lambda day: labels,
+        )
+        assert unoriented[0].value == pytest.approx(1.0)
+        assert oriented[0].value == pytest.approx(-1.0)
 
 
 def test_a_name_missing_any_of_the_three_values_is_a_gap_not_a_zero() -> None:
@@ -264,6 +287,48 @@ def test_a_name_missing_any_of_the_three_values_is_a_gap_not_a_zero() -> None:
         labels=lambda day: {code: float(index) for index, code in enumerate(CODES[:3])},
     )
     assert too_few.reason == REASON_TOO_FEW_NAMES
+
+
+def test_a_session_without_a_factor_build_or_a_label_is_named_separately() -> None:
+    """A missing factor build is `no_factor_build_for_session`; a build present but no label is
+    `no_labels_for_session`; both present but no name carrying all three is
+    `no_names_with_all_three_values`. The first two are one cause per session and must not be
+    folded into the third."""
+    session = date(2017, 1, 3)
+    composite = {code: table(1)[code] for code in CODES[:6]}
+    extra = {code: table(2)[code] for code in CODES[:6]}
+    labels = {code: table(3)[code] for code in CODES[:6]}
+
+    (no_build,) = p7_increment.increment_readings(
+        sessions=(session,),
+        composite=lambda day: composite,
+        extra=lambda day: {},
+        labels=lambda day: labels,
+    )
+    assert no_build.reason == p7_increment.REASON_NO_FACTOR_BUILD
+    assert no_build.reason == "no_factor_build_for_session"
+    assert no_build.gaps == len(composite)
+    assert no_build.value is None
+
+    (no_labels,) = p7_increment.increment_readings(
+        sessions=(session,),
+        composite=lambda day: composite,
+        extra=lambda day: extra,
+        labels=lambda day: {},
+    )
+    assert no_labels.reason == p7_increment.REASON_NO_LABELS
+    assert no_labels.reason == "no_labels_for_session"
+    assert no_labels.gaps == len(composite)
+    assert no_labels.value is None
+
+    (partial,) = p7_increment.increment_readings(
+        sessions=(session,),
+        composite=lambda day: composite,
+        extra=lambda day: {code: 1.0 for code in CODES[10:13]},
+        labels=lambda day: labels,
+    )
+    assert partial.reason == p7_increment.REASON_NO_COMPLETE_NAMES
+    assert partial.gaps == len(composite)
 
 
 # --- the document -------------------------------------------------------------------------------
@@ -376,6 +441,26 @@ def test_the_config_digest_is_recomputable_from_the_document() -> None:
     )
 
 
+def test_the_document_refuses_a_plan_whose_stride_is_not_the_readings() -> None:
+    """The reading is one signal day every `STRIDE` (20) sessions, which is the label horizon: the
+    plan's own sampled days are the non-overlapping sample, and a finer stride would need a second
+    thinning this reading does not take. A different stride is refused by name, not thinned."""
+    chosen = plan(stride=5)
+    readings = {
+        definition.qualified_key: readings_of(chosen.sessions)
+        for definition in p7_increment.FACTORS
+    }
+
+    with pytest.raises(p7_increment.IncrementError, match="stride"):
+        p7_increment.increment_document(
+            window=FIXTURE_WINDOW,
+            plan=chosen,
+            readings=readings,
+            config={"stride": 5},
+            code_commit="0" * 40,
+        )
+
+
 # --- the command line ---------------------------------------------------------------------------
 
 
@@ -405,13 +490,17 @@ def stub_sources(monkeypatch: pytest.MonkeyPatch) -> StubSources:
     return sources
 
 
-def explore_2017(tmp_path: Path, *extra: str) -> list[str]:
+LATE_AS_OF: Final = "2017-09-01T00:00:00+08:00"
+"""After the h20 label of the last sampled 2017 day has published: the command refuses earlier."""
+
+
+def explore_2017(tmp_path: Path, *extra: str, as_of: str = LATE_AS_OF) -> list[str]:
     return [
         "explore",
         "--runtime-dir",
         str(tmp_path),
         "--as-of",
-        "2017-07-03T00:00:00+08:00",
+        as_of,
         "--first",
         "2017-01-03",
         "--last",
@@ -464,6 +553,28 @@ def test_explore_refuses_a_first_day_before_the_research_window(
         == 2
     )
     assert "research" in capsys.readouterr().err
+
+
+def test_explore_refuses_an_as_of_before_the_last_sampled_labels_mature(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every label of the sample would be a gap if the knowledge clock is before the last sampling
+    day's h20 exit publication. That is refused by name after the sources are opened and before
+    anything is measured, not silently turned into gaps at exit code 0."""
+    opened = stub_sources(monkeypatch)
+    monkeypatch.setattr(
+        p7_increment,
+        "increment_readings",
+        lambda **kwargs: pytest.fail("a reading was measured"),
+    )
+
+    assert p7_increment.main(explore_2017(tmp_path, as_of="2017-07-04T00:00:00+08:00")) == 2
+    error = capsys.readouterr().err
+    assert "--as-of" in error
+    assert "label" in error
+    assert "2017-07-04T00:00:00+08:00" in error
+    assert opened is not None
+    assert not (tmp_path / "out").exists()
 
 
 def test_explore_writes_once_and_a_rerun_is_a_no_op(
@@ -639,3 +750,154 @@ def test_the_panel_sources_read_each_raw_build_and_orient_it(
         oriented = dict(sources.extras[definition.qualified_key](session))
         assert oriented == {code: -value for code, value in raw.items()}
         assert oriented != raw
+
+
+class _Transforms:
+    """`FACTOR_TRANSFORMS` with the fixture's identity transform declared."""
+
+    def __init__(self, shipped: Any) -> None:
+        self.shipped = shipped
+
+    def get(self, key: str) -> Any:
+        return IDENTITY if key == IDENTITY.qualified_key else self.shipped.get(key)
+
+
+def _write_composite_builds(store: PanelStore, panel: Any, session: date) -> None:
+    """The fixture book's four composite factors' raw and processed builds on `session`."""
+    instant = session_publication_instant(session)
+    calendar = panel.calendar()
+    securities = tuple(panel.securities)
+    builds = []
+    for number, factor in enumerate(FRAME_BOOK.composite_factors):
+        definition = FACTOR_DEFINITIONS.get(factor)
+        expected = {
+            code: float(number + 1) * 1000.0 + float(index) for index, code in enumerate(securities)
+        }
+        builds.append(
+            compute_factor(
+                store,
+                definition,
+                as_of=instant,
+                subjects=securities,
+                universe=frozenset(securities),
+                requirements={
+                    DAILY_DATASET: daily_requirement(
+                        calendar,
+                        years=(session.year,),
+                        as_of=instant,
+                        max_staleness=timedelta(days=5),
+                    )
+                },
+                code_commit=COMMIT,
+                built_at=instant,
+                evaluators={
+                    definition.qualified_key: lambda window, values=expected: values[window.subject]
+                },
+            )
+        )
+    write_factor_panels(store, builds)
+    write_processed_factor_panels(
+        store,
+        [
+            apply_factor_transform(build, IDENTITY, code_commit=COMMIT, built_at=build.built_at)
+            for build in builds
+        ],
+    )
+
+
+class _CountingLabels:
+    """A label reader that records how many `label` questions it answered."""
+
+    def __init__(self, delegate: Any) -> None:
+        self.delegate = delegate
+        self.calls = 0
+
+    @property
+    def calendar(self) -> Any:
+        return self.delegate.calendar
+
+    def window(self, instant: datetime, *, horizon: Any) -> Any:
+        return self.delegate.window(instant, horizon=horizon)
+
+    def label(self, ts_code: str, window: Any) -> Any:
+        self.calls += 1
+        return self.delegate.label(ts_code, window)
+
+
+def test_the_panel_sources_wire_the_composite_and_the_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_open_sources`' composite is `PanelScoreSource`'s eligible composite and its labels are
+    the session's own 16:30-anchored h20 realised returns -- computed independently through
+    `p7_diagnostics`' reader. The label source is asked once per session and both factors share
+    the answer."""
+    panel = _two_year_panel()
+    store = PanelStore(tmp_path / "panel")
+    _write_by_year(store, panel)
+    for _year, part in split_panel_batch_by_year(panel.batch(NAMECHANGE_DATASET)):
+        write_name_history(store, part)
+    session = date(2026, 12, 15)
+    _write_composite_builds(store, panel, session)
+    monkeypatch.setattr(p7_increment, "EXCHANGE", "SZSE")
+    monkeypatch.setattr(
+        p7_increment, "FACTOR_TRANSFORMS", _Transforms(p7_increment.FACTOR_TRANSFORMS)
+    )
+    monkeypatch.setattr(p7_increment, "label_years", lambda year, *, ceiling_year: (2026, 2027))
+    window = p7_windows.DiagnosticWindow(
+        name="fixture", first=date(2027, 1, 4), last=TWO_YEAR_LAST, ceiling_year=2027
+    )
+    settings = p7_increment.ExploreSettings(
+        as_of=panel.as_of,
+        first=date(2027, 1, 4),
+        last=TWO_YEAR_LAST,
+        book=FRAME_BOOK,
+        transform=IDENTITY.qualified_key,
+    )
+    original = p7_increment.panel_label_source
+    made: list[_CountingLabels] = []
+
+    def counting_panel_label_source(*args: Any, **kwargs: Any) -> _CountingLabels:
+        reader = _CountingLabels(original(*args, **kwargs))
+        made.append(reader)
+        return reader
+
+    monkeypatch.setattr(p7_increment, "panel_label_source", counting_panel_label_source)
+
+    sources = p7_increment._open_sources(tmp_path, window=window, settings=settings)
+
+    expected_source = p7_diagnostics.PanelScoreSource(
+        store=sources.store,
+        book=FRAME_BOOK,
+        transform=IDENTITY,
+        exchange="SZSE",
+        as_of=settings.as_of,
+        min_coverage=DEFAULT_MIN_COVERAGE,
+        max_carry_sessions=DEFAULT_MAX_CARRY_SESSIONS,
+    )
+    expected_composite = dict(expected_source.scores_on(session)[p7_diagnostics.COMPOSITE])
+    assert expected_composite, "the fixture book admitted no name, so this test proves nothing"
+    assert dict(sources.composite(session)) == expected_composite
+
+    expected_reader = original(
+        sources.store,
+        years=(2026, 2027),
+        exchange="SZSE",
+        as_of=settings.as_of,
+        cached_sessions=p7_increment.HORIZON + 2,
+    )
+    label_window = expected_reader.window(
+        session_publication_instant(session),
+        horizon=ResearchHorizon(count=p7_increment.HORIZON, unit=HorizonUnit.trading_days),
+    )
+    expected_labels: dict[str, float] = {}
+    for code in expected_composite:
+        label = expected_reader.label(code, label_window)
+        if label is not None and label.is_labelled and label.realized_return is not None:
+            expected_labels[code] = label.realized_return
+    assert expected_labels, "the fixture has no matured h20 label, so this test proves nothing"
+    assert dict(sources.labels(session)) == expected_labels
+    (reader,) = made
+    first_calls = reader.calls
+    assert first_calls == len(expected_labels)
+    assert dict(sources.labels(session)) == expected_labels
+    assert reader.calls == first_calls
