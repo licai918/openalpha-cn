@@ -81,12 +81,12 @@ LEDGER_TEST_FILE_COUNTS = {
     "tests/unit/product": 1,
     "tests/unit/providers": 1,
     "tests/unit/runtime": 10,
-    "tests/unit/scripts": 15,
+    "tests/unit/scripts": 16,
     "tests/unit/tools": 1,
     "web/e2e": 1,
     "web/src": 1,
 }
-LEDGER_TEST_FILE_TOTAL = 258
+LEDGER_TEST_FILE_TOTAL = 259
 
 FIELDNAMES = [
     "feature_id",

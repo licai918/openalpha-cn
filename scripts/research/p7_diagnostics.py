@@ -576,6 +576,17 @@ def _gap_reason(error: Exception) -> str:
 # --- the summary ---------------------------------------------------------------------------------
 
 
+def sampled_sessions(plan: SignalPlan, horizon: int) -> tuple[date, ...]:
+    """The non-overlapping sample one horizon is summarised over.
+
+    One signal day in every `ceil(horizon / stride)` of the plan's sessions: with stride equal to
+    the horizon every signal day is sampled, and with a finer stride every `horizon`-th session
+    is. This is the sampling `summarize` reads and the A/B reading's p-values are taken over
+    (`p7_reading._measure_ab_tests`), so both use one arithmetic rather than two that could drift.
+    """
+    return plan.sessions[:: math.ceil(horizon / plan.stride)]
+
+
 def summarize(
     request: DiagnosticRequest,
     readings: Sequence[DayReading],
@@ -591,7 +602,7 @@ def summarize(
         blocks: dict[str, Any] = {}
         for horizon in plan.horizons:
             every = math.ceil(horizon / plan.stride)
-            sampled = plan.sessions[::every]
+            sampled = sampled_sessions(plan, horizon)
             chosen: list[DayReading] = []
             for day in sampled:
                 reading = found.get((day, score, horizon))
