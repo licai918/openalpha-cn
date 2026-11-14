@@ -298,3 +298,34 @@ git worktree add -b read/v2-p7-027-028-forward-ab-1 .claude/worktrees/read-forwa
 ```
 
 读完之后立刻按 §3 第 5 步提交 `forward_ab_1.window-claim.json`、`v2-p7-027-028-forward-ab-1.claim.json`、`.result.json`、`.result.txt`。结果文本在 G-0 诊断与 `ab tests` 一节之前多一行 **forward property**，写明登记提交、窗口第一个会话开盘时刻，以及「committer 时间是自报记录、不是证明」；三个检验的结论仍是**探索性候选（候选）**，不是确认性证据。这次读不改变 G-0、`006b`、前向时钟或实盘门；`forward_ab_1` 与 `second_use` 一样只读一次。
+
+## 8. B 的增量（探索性）
+
+`scripts/research/p7_increment.py`（`V2-P7-028`）回答一个比秩 IC 更窄的问题：在幸存者合成分之外，B 的两个因子 `limit_up_count_20/v1`、`broken_board_count_20/v1` 还能带来多少额外的 h20 排序信息。统计量是**偏秩 IC**：额外因子与标签各自对合成分的秩取 OLS 残差后的 Pearson（`src/openalpha_cn/domain/incremental_ic.py::partial_rank_ic_with_reason`）；两个因子都按登记的声明方向 `lower_is_better` 取负。样本是非重叠的 h20 抽样日（`non_overlapping`；stride 20、h20，所以每个信号日一个数），只用默认账簿合格、且合成分 / 因子值 / 标签三个值都齐全的股票，缺值计为缺口而不是 0。文档 kind 是 `p7-increment/v1`，每个抽样日一行，另有均值、标准差、n、t（只作描述）与 `config_digest`。
+
+- **怎么跑。** 在面板的 APFS 克隆上只读研究窗口（`--runtime-dir` 指向克隆根；P6 的研究根与任何 checkout 都会被按名拒绝）。`--out` 省略时只把文本打印到标准输出，不落盘：
+
+  ```bash
+  UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" \
+    scripts/research/p7_increment.py explore \
+    --runtime-dir <克隆根> \
+    --as-of 2022-01-28T22:00:00+08:00 \
+    --first 2015-01-05 --last 2021-12-31 \
+    --out <输出目录>   # 省略则只打印
+  ```
+
+  日期超出 `p7_windows.RESEARCH`（2015-01-05..2021-12-31）时退出码 2、按名拒绝；`--as-of` 是知识时钟，要晚于窗口末日及其 h20 标签。面板缺某一年的因子档时退出码 1，错误按因子与年份点名——先补齐构建再读。
+
+- **需要先有 2015–2021 两个因子的 raw 构建。** 读数只读 raw 档；两个因子都由面板已有的 `daily` + `stk_limit` 推算，所以构建**零 Tushare 请求**，但它写面板，必须在克隆上做。先确认 `stk_limit` 的 2014–2021 分区都在（2015 年初的 20 会话窗口会回看到 2014 年），再按每个会话自己的 16:30（上海）构建：
+
+  ```bash
+  openalpha factor build \
+    --factor limit_up_count_20/v1 --factor broken_board_count_20/v1 \
+    --tier raw --year 2015 --year 2016 --year 2017 --year 2018 --year 2019 --year 2020 --year 2021 \
+    --as-of <每个会话 16:30 +08:00 的 ISO 时点> \
+    --max-staleness-days 30 --runtime-dir <克隆根>
+  ```
+
+  上面 `--as-of` 要逐会话给出（可由库里的 `trade_cal` 生成），一次调用命令太长就按年份分批。
+
+- **结果只是探索性候选。** 研究窗口是 P6 的发现与合成分数据、2021 年也已排练过（R-N6），所以这次读数**不是样本外证据**：文档开头是 `EXPLORATORY, UNREGISTERED -- NOT EVIDENCE` 横幅，措辞是候选（candidate / 候选），**没有 p 值、没有闸门**，t 只作描述。它决定下一步测什么，不能把候选升级为证据；带 B 因子的 walk-forward 模型是之后另一次前向预登记，不在这次读数里，也不进 P6 的网格 / 台账。
