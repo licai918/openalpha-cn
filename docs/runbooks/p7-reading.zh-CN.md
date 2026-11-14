@@ -289,4 +289,12 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
   --registration "$PWD/docs/research/p7-readings/v2-p7-027-028-forward-ab-1.registration.json"
 ```
 
+- **读要在钉在 `4282533` 的工作树里做（R-N1，2026-11-14）。** `read_once` 要求 HEAD 与工作树中 `src/`、`scripts/research/`、`pyproject.toml`、`uv.lock`（`registry.REGISTERED_PATHS`）逐字节等于登记的 `code_commit`（`7c8b912`）。登记之后 main 会继续开发并改动这些字节，所以读**不在 main 上做**，而是：
+
+```bash
+git worktree add -b read/v2-p7-027-028-forward-ab-1 .claude/worktrees/read-forward-ab-1 4282533
+# 在该工作树里以 PYTHONPATH=<该工作树>/src 运行上面的 read（--repo 指向该工作树）；
+# claim 与结果提交在 read/v2-p7-027-028-forward-ab-1 上，再以 --no-ff 合回 main（永不 rebase/squash）
+```
+
 读完之后立刻按 §3 第 5 步提交 `forward_ab_1.window-claim.json`、`v2-p7-027-028-forward-ab-1.claim.json`、`.result.json`、`.result.txt`。结果文本在 G-0 诊断与 `ab tests` 一节之前多一行 **forward property**，写明登记提交、窗口第一个会话开盘时刻，以及「committer 时间是自报记录、不是证明」；三个检验的结论仍是**探索性候选（候选）**，不是确认性证据。这次读不改变 G-0、`006b`、前向时钟或实盘门；`forward_ab_1` 与 `second_use` 一样只读一次。
