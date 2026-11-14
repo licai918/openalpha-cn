@@ -336,3 +336,58 @@ def test_vetoed_on_is_the_rule_applied_to_the_window(tmp_path: Path) -> None:
 
     assert vetoed == frozenset({code})
     assert vetoed == vetoed_codes(window)
+
+
+# --- R-N3 on an *earlier* session: the window does not read the whole window at `t`'s 16:30 ---
+
+
+def test_an_earlier_sessions_restatement_is_not_visible_at_that_sessions_own_1630(
+    tmp_path: Path,
+) -> None:
+    """The window reads `t-2` at `t-2`'s own 16:30, not at `t`'s.
+
+    `t-2`'s bars are republished after `t-2`'s 16:30 and before `t`'s, so they are visible at
+    `t`'s instant -- and there they imply a *different* event. Read at `t-2`'s own evening, the
+    instant the window uses, they are not knowable, so `veto_window` refuses by name instead of
+    answering with the restated event. A window that read every session at `t`'s 16:30 would
+    report the restated broken board and raise nothing here.
+    """
+    panel = generate_limit_streak_panel()
+    store = _stored(tmp_path, panel)
+    target = panel.sessions[6]  # 2026-01-13; its window is 13, 12, 09, 08, 07
+    earlier = panel.sessions[4]  # 2026-01-09 = t-2, the scripted consecutive board
+    original = limit_events_on(
+        store, session=earlier, as_of=_published(earlier), exchange=panel.exchange
+    )
+    assert _only(original).kind == "consecutive_board"
+
+    restated_at = _published(earlier) + timedelta(hours=2)  # after t-2's 16:30 ...
+    assert restated_at < _published(target)  # ... and before t's
+    _restate(
+        store,
+        panel,
+        day=earlier,
+        revision_time=restated_at,
+        daily={
+            "open": 12.50,
+            "high": 13.35,  # >= the published up_limit 13.31
+            "low": 12.50,
+            "close": 12.90,  # and closes below it: a broken board
+            "pre_close": 12.10,
+            "pct_chg": (12.90 / 12.10 - 1.0) * 100.0,
+        },
+    )
+
+    # The window reads `t-2` at `t-2`'s own 16:30: the restatement is not knowable there, so
+    # the whole window is refused and names the session that cannot be answered.
+    with pytest.raises(PanelStorageError) as raised:
+        veto_window(store, session=target, calendar=panel.calendar(), exchange=panel.exchange)
+    assert earlier.isoformat() in str(raised.value)
+
+    # Read at `t`'s 16:30 the same session answers with the restated event, which is what a
+    # single-instant window would have put into the evening.
+    at_targets_instant = limit_events_on(
+        store, session=earlier, as_of=_published(target), exchange=panel.exchange
+    )
+    assert _only(at_targets_instant).kind == "broken_board"
+    assert at_targets_instant != original

@@ -190,6 +190,19 @@ def test_veto_details_refuses_more_than_the_lookback_sessions_like_vetoed_codes(
         veto_details(sessions)
 
 
+def test_the_shared_window_refusal_names_the_function_the_caller_used() -> None:
+    """The shared guard keeps each caller's own wording: `vetoed_codes` said "vetoed_codes ..."."""
+    sessions: list[list[LimitEvent]] = [[] for _ in range(VETO_LOOKBACK_SESSIONS + 1)]
+
+    with pytest.raises(ValueError) as codes:
+        vetoed_codes(sessions)
+    with pytest.raises(ValueError) as details:
+        veto_details(sessions)
+
+    assert str(codes.value).startswith("vetoed_codes reads at most 5 sessions")
+    assert str(details.value).startswith("veto_details reads at most 5 sessions")
+
+
 def test_veto_detail_is_frozen_so_a_printed_row_cannot_be_edited_after_the_reading() -> None:
     detail = veto_details([[event(A, "broken_board")]])[A]
 

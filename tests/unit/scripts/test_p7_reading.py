@@ -33,6 +33,7 @@ from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
     CalendarDay,
+    CalendarHorizonError,
     TradingCalendar,
     build_trading_calendar,
 )
@@ -2280,3 +2281,34 @@ def test_a_read_dated_at_the_panels_last_daily_session_1900_is_not_refused_by_th
 
     assert "stop_rule" not in result
     assert claim_of(registration).exists() and window_claim_of(repo, "second_use").exists()
+
+
+# --- the veto window's calendar edge, moved to `panel_limit_events` (`V2-P7-027`) ---------------
+#
+# The A/B block's refusals are carried in the reading's document, so the calendar-edge sentence
+# is part of the output: `_vetoed_on` must answer with the same `ReadingError` text it wrote
+# before the window assembly moved into the panel plane. The expected string below is that text
+# -- the window sentence with the calendar's own `CalendarHorizonError` interpolated once.
+
+
+def test_the_veto_windows_calendar_edge_raises_the_readings_original_sentence() -> None:
+    """The reading's refusal stays the pre-delegation sentence, not a nested one.
+
+    `panel_limit_events.veto_sessions` raises `LimitEventReadError` whose text already names the
+    window; interpolating that whole error here would repeat the window sentence, and the
+    document would carry different bytes. The cause -- the calendar's own error -- is what this
+    module interpolated before the move, so that is what it interpolates now.
+    """
+    calendar = weekday_calendar(date(2026, 1, 5), date(2026, 1, 9))
+    day = date(2026, 1, 8)
+    with pytest.raises(CalendarHorizonError) as horizon:
+        calendar.previous_trading_day(date(2026, 1, 5))
+
+    with pytest.raises(p7_reading.ReadingError) as raised:
+        p7_reading._vetoed_on(day, calendar=calendar, events_for=lambda session: (), lookback=5)
+
+    assert str(raised.value) == (
+        "the veto's 5-session window ending 2026-01-08 reaches the start of the calendar the "
+        f"reading loaded: {horizon.value}"
+    )
+    assert str(raised.value).count("window ending") == 1

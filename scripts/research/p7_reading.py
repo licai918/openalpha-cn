@@ -2629,9 +2629,12 @@ def _vetoed_on(
     try:
         sessions = veto_sessions(day, calendar=calendar, lookback=lookback)
     except LimitEventReadError as error:
+        # The window sentence was already written here before the assembly moved into the panel
+        # plane; `veto_sessions`'s own error repeats it, so interpolating the *cause* (the
+        # calendar's error, which is what this line always interpolated) keeps the bytes equal.
         raise ReadingError(
             f"the veto's {lookback}-session window ending {day.isoformat()} reaches the "
-            f"start of the calendar the reading loaded: {error}"
+            f"start of the calendar the reading loaded: {error.__cause__}"
         ) from error
     return vetoed_codes([events_for(session) for session in sessions])
 

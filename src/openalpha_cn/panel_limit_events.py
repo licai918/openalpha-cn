@@ -77,7 +77,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import date, datetime
-from typing import Final
+from typing import Final, Protocol
 
 from openalpha_cn.domain.limit_events import (
     MAX_BOARD_LOOKBACK_SESSIONS,
@@ -204,22 +204,44 @@ def veto_sessions(
     return tuple(sessions)
 
 
+class LimitEventProducer(Protocol):
+    """The per-session producer `veto_reader` reads through: `limit_events_on`'s own signature.
+
+    A Protocol rather than `Callable[..., ...]` so a caller handing in its own producer (the
+    research reading passes its `limit_events_on` binding, which its A/B spy replaces by name) is
+    checked against the call `veto_reader` actually makes instead of against any call at all.
+    """
+
+    def __call__(
+        self,
+        store: PanelStore,
+        *,
+        session: date,
+        as_of: datetime,
+        exchange: str,
+    ) -> tuple[LimitEvent, ...]: ...
+
+
 def veto_reader(
     store: PanelStore,
     *,
     exchange: str = DEFAULT_EXCHANGE,
-    read: Callable[..., tuple[LimitEvent, ...]] | None = None,
+    read: LimitEventProducer | None = None,
 ) -> Callable[[date], tuple[LimitEvent, ...]]:
     """Each session's limit events, read at **that session's own** 16:30 publication instant.
 
     The point-in-time rule of the window: a replay at session D's evening cannot see a row
     published after D's 16:30, and reading a whole window at one later `as_of` would let a
-    restatement change an earlier session's events. `read` is the per-session producer; it
-    defaults to this module's own `limit_events_on`, looked up when the reader is asked, so a
-    caller that monitors the producer (the research reading spies on `limit_events_on`)
-    delegates here without losing its seam.
+    restatement change an earlier session's events.
+
+    `read` is the per-session producer. Omitted, this module's own `limit_events_on` is used and
+    that default is resolved **when `veto_reader` is called**: the returned reader closes over
+    the producer, so rebinding the module name afterwards does not reach it. A caller that
+    monitors the producer -- the research reading's tests replace its own `limit_events_on`
+    binding with a spy -- therefore passes its binding explicitly, and its seam survives the
+    move into this module.
     """
-    producer = limit_events_on if read is None else read
+    producer: LimitEventProducer = limit_events_on if read is None else read
 
     def events_on(session: date) -> tuple[LimitEvent, ...]:
         return producer(

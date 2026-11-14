@@ -92,15 +92,18 @@ class VetoDetail:
     vetoed: bool
 
 
-def _event_weights(events_by_session: Sequence[Sequence[LimitEvent]]) -> dict[str, list[float]]:
+def _event_weights(
+    caller: str, events_by_session: Sequence[Sequence[LimitEvent]]
+) -> dict[str, list[float]]:
     """Every name's event weights over the window, after the window's own refusal.
 
     Shared by `vetoed_codes` and `veto_details` so the two cannot disagree about what a legal
-    window is -- the refusal is the rule's, not one function's.
+    window is. `caller` is the public name the refusal names itself by -- the guard is one rule,
+    but each function's sentence is the one that function has always written.
     """
     if len(events_by_session) > VETO_LOOKBACK_SESSIONS:
         raise SurvivorVetoError(
-            f"the veto reads at most {VETO_LOOKBACK_SESSIONS} sessions, newest first; got "
+            f"{caller} reads at most {VETO_LOOKBACK_SESSIONS} sessions, newest first; got "
             f"{len(events_by_session)} -- the caller's window is longer than the rule's, and "
             "cutting one end here would make the answer depend on which end was cut"
         )
@@ -121,7 +124,7 @@ def vetoed_codes(events_by_session: Sequence[Sequence[LimitEvent]]) -> frozenset
     """
     return frozenset(
         ts_code
-        for ts_code, values in _event_weights(events_by_session).items()
+        for ts_code, values in _event_weights("vetoed_codes", events_by_session).items()
         if math.fsum(values) / len(values) < MARKET_BEARISH_THRESHOLD
     )
 
@@ -138,7 +141,7 @@ def veto_details(events_by_session: Sequence[Sequence[LimitEvent]]) -> Mapping[s
     holds for every legal window.
     """
     details: dict[str, VetoDetail] = {}
-    for ts_code, values in _event_weights(events_by_session).items():
+    for ts_code, values in _event_weights("veto_details", events_by_session).items():
         mean_weight = math.fsum(values) / len(values)
         details[ts_code] = VetoDetail(
             ts_code=ts_code,
