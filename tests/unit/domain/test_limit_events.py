@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Final
+from typing import Final, get_args
 
 import grimp
 import pytest
@@ -38,6 +38,8 @@ import pytest
 from openalpha_cn.domain.daily_prices import DailyBar
 from openalpha_cn.domain.json_value import JsonValue
 from openalpha_cn.domain.limit_events import (
+    MARKET_BEARISH_THRESHOLD,
+    MARKET_EVENT_WEIGHTS,
     MAX_BOARD_LOOKBACK_SESSIONS,
     BoardStreak,
     LimitEvent,
@@ -351,6 +353,23 @@ def test_events_are_ordered_by_ts_code_and_only_securities_with_an_event_appear(
     assert [event.ts_code for event in events] == [A, Z]
     assert all(event.kind == "limit_up" for event in events)
     assert all(event.trade_date == day for event in events)
+
+
+def test_the_market_weights_are_the_three_events_the_agent_already_scores() -> None:
+    """`V2-P7-027` R-A2: one shared table, read by `MarketAgent` and by the entry veto.
+
+    The weights are the deterministic `MarketAgent`'s own (0.65 / 0.85 / -0.65), moved here so a
+    rule that is supposed to be *the same rule* cannot drift from the agent's scoring. The key set
+    is the closed `LimitEventKind` vocabulary, so a fourth event added to the rule without a
+    weight (or a weight for an event the rule cannot emit) is red rather than silently 0.0.
+    """
+    assert dict(MARKET_EVENT_WEIGHTS) == {
+        "limit_up": 0.65,
+        "consecutive_board": 0.85,
+        "broken_board": -0.65,
+    }
+    assert set(MARKET_EVENT_WEIGHTS) == set(get_args(LimitEventKind))
+    assert MARKET_BEARISH_THRESHOLD == -0.15
 
 
 def test_every_event_facts_validate_against_the_builder_normalizers() -> None:

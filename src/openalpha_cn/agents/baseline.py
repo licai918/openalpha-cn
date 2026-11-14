@@ -5,6 +5,7 @@ from typing import Literal, cast
 
 from openalpha_cn.agents.base import AgentContext, AgentProvenance, AgentResult
 from openalpha_cn.domain.evidence import EvidenceSnapshot
+from openalpha_cn.domain.limit_events import MARKET_BEARISH_THRESHOLD, MARKET_EVENT_WEIGHTS
 from openalpha_cn.domain.risk_flag import RiskFlag, UndeclaredRiskFlagError, parse_risk_flag
 from openalpha_cn.domain.signal import SignalFrame
 
@@ -124,14 +125,17 @@ class MarketAgent:
 
     def analyze(self, context: AgentContext) -> AgentResult:
         items = tuple(item for item in context.evidence if _family(item) == "market_event")
-        scores = {
-            "limit_up": 0.65,
-            "consecutive_board": 0.85,
-            "broken_board": -0.65,
-        }
-        strength = sum(scores.get(item.kind, 0.0) for item in items) / len(items)
+        # `V2-P7-027` R-A2: the weights and the bearish line are the shared domain constants, so
+        # the plan-A entry veto and this agent score the same events by the same rule. `.get`
+        # keeps the old total lookup: an evidence payload's `kind` is a free string, and an
+        # unknown one scores 0.0 rather than raising.
+        strength = sum(MARKET_EVENT_WEIGHTS.get(item.kind, 0.0) for item in items) / len(items)
         direction: Literal["bullish", "bearish", "neutral"] = (
-            "bullish" if strength > 0.15 else "bearish" if strength < -0.15 else "neutral"
+            "bullish"
+            if strength > -MARKET_BEARISH_THRESHOLD
+            else "bearish"
+            if strength < MARKET_BEARISH_THRESHOLD
+            else "neutral"
         )
         signal = SignalFrame(
             subject=context.subject,

@@ -66,6 +66,35 @@ MAX_BOARD_LOOKBACK_SESSIONS: Final[int] = 60
 
 _BROKEN_BOARD: Final[LimitEventKind] = "broken_board"
 
+MARKET_EVENT_WEIGHTS: Final[Mapping[str, float]] = MappingProxyType(
+    {
+        "limit_up": 0.65,
+        "consecutive_board": 0.85,
+        "broken_board": -0.65,
+    }
+)
+"""What one limit event scores a name, as the deterministic `MarketAgent` already weighs it.
+
+The table lives here, beside the three events it weights, because two readers now score the same
+events: `agents/baseline.py::MarketAgent` sums these for its signal strength, and the plan-A entry
+veto (`domain/survivor_veto.py`, `V2-P7-027`) means them by the same numbers. R-A2 of
+`docs/superpowers/plans/2026-11-14-p7-plans-a-b.md` is explicit that the veto **is the existing
+agent's rule** -- so the numbers are one shared constant and not a second copy that could drift.
+The key set is the closed `LimitEventKind` vocabulary, which the module's tests pin.
+
+An unknown kind reads as 0.0 through `.get` exactly as the agent's private table did before the
+move: `evidence` payloads carry a free-form `kind`, so the lookup must stay total.
+"""
+
+MARKET_BEARISH_THRESHOLD: Final[float] = -0.15
+"""The strength below which the market reading is *bearish*, and the veto's mean-weight line.
+
+`MarketAgent` calls a strength above `-MARKET_BEARISH_THRESHOLD` bullish, below this value
+bearish, and anything between neutral, so its signal is unchanged by the move; the entry veto
+(`V2-P7-027`) vetoes a name whose events' mean weight over five sessions is **below** this line.
+Shared for the same reason `MARKET_EVENT_WEIGHTS` is: the plan fixes one rule, not two.
+"""
+
 
 class LimitEventError(ValueError):
     """Raised when a state or an event would be assembled from two different sessions."""
