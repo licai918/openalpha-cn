@@ -34,7 +34,9 @@ prints.
   (`created`, or `unchanged` for a rerun that wrote nothing), the `open_session` the orders are
   for, the `open_orders` in the order they are printed (sales, then tonight's buys, then the buys
   carried from earlier sessions), the evening's `funding` report (what the plan freezes at 09:15
-  and every entry the cash sized short) and the `illiquid_exits`.
+  and every entry the cash sized short), the `illiquid_exits`, and -- only for a book whose
+  registration applies plan A's entry veto (`V2-P7-027`) -- `entry_veto`: the rule's id and the
+  survivors it blocked tonight, sorted. A book registered with `entry_veto: "none"` files no key.
 - **`paper: null`** is the session that ran no evening -- settled only, or refused before the paper
   step. The reason the caller gives, and the sessions it did settle, are `paper_skipped`.
 
@@ -80,7 +82,8 @@ the printing run's note on why this session is the day, `this_run`'s `session_no
 or a clock before the day's 16:30 publication -- M5); the ORDERS FOR THE OPEN OF D+1 (call auction
 09:15); the carried orders' count; what the draw left out (unfunded, unaffordable, deferred exits,
 near exit, frozen -- each of the last three saying in one clause what it means for the account,
-M6 -- watch list); illiquid exits; positions; book; settled; catch-up; then `diagnostics`: the
+M6 -- watch list); illiquid exits; positions; book; the entry veto when the book applies one
+(`V2-P7-027`; its blocked survivors, or `none`); settled; catch-up; then `diagnostics`: the
 ids (the session's ordinal, the trade list, the paper snapshot), facts, screen, prediction, the
 panel and factor catch-ups, Tushare requests, units; the wording last. A list with nothing in it
 prints as `none`, so a missing line never reads as "nothing to do". A day with no evening prints
@@ -161,6 +164,7 @@ from openalpha_cn.domain.survivor_book import (
     floor_share,
 )
 from openalpha_cn.domain.survivor_orders import TradeOrder
+from openalpha_cn.domain.survivor_veto import VETO_RULE_ID
 
 if TYPE_CHECKING:
     from openalpha_cn.backtest.paper_state import PaperBookSnapshot, PendingOrder
@@ -573,7 +577,7 @@ def _paper_section(
     tries = {item.order.order_id: item.attempts for item in settlement.live}
     plan = evening.trade_list
     opens = session_index + 1
-    return {
+    section: dict[str, Any] = {
         "trade_list": plan.model_dump(mode="json"),
         "decision": evening.decision.model_dump(mode="json"),
         "snapshot_id": evening.snapshot.snapshot_id,
@@ -593,8 +597,17 @@ def _paper_section(
         "reconciliation": None
         if evening.reconciliation is None
         else evening.reconciliation.document(),
-        "illiquid_exits": _illiquid_exits(facts, screen, evening, book),
     }
+    if book.entry_veto != "none":
+        # `V2-P7-027`: only a book whose registration applies the rule files it -- and it lists
+        # only the rule's codes that were tonight's survivors, sorted (the veto blocks entries,
+        # and a name the screen did not rank was no entry to block). A v1 book's bytes do not move.
+        section["entry_veto"] = {
+            "rule": VETO_RULE_ID,
+            "vetoed": sorted(evening.vetoed & {name.ts_code for name in screen.survivors}),
+        }
+    section["illiquid_exits"] = _illiquid_exits(facts, screen, evening, book)
+    return section
 
 
 def _tries_of(order: TradeOrder, tries: Mapping[str, int]) -> int:
@@ -927,6 +940,8 @@ def summary_lines(result: Mapping[str, Any]) -> list[str]:
         lines += _draw_lines(paper)
         lines += _position_lines(paper["book"]["holdings"])
     lines.append(_row("book", _book_text(paper, skipped)))
+    if paper is not None and "entry_veto" in paper:
+        lines.append(_entry_veto_line(paper["entry_veto"]))
     if paper is not None:
         lines += _settled_lines(paper["settled"])
     days = (paper["catch_ups"] if paper is not None else skipped.get("catch_ups")) or []
@@ -1003,6 +1018,16 @@ def _book_text(paper: Mapping[str, Any] | None, skipped: Mapping[str, Any]) -> s
         f"equity {book['equity']}, cash {book['cash']}, gross exposure "
         f"{book['gross_exposure']}, {_plural(len(book['holdings']), 'holding')}; "
         "ledger equity is not evidence"
+    )
+
+
+def _entry_veto_line(block: Mapping[str, Any]) -> str:
+    """The entry veto's line (`V2-P7-027`): the rule and the survivors it blocked tonight, `none`
+    when it blocked none of them -- a book that applies the rule says so every session, so a
+    missing line never reads as `nothing was blocked`."""
+    blocked = block["vetoed"]
+    return _row(
+        "entry veto", f"{block['rule']} blocked: {', '.join(blocked) if blocked else 'none'}"
     )
 
 
