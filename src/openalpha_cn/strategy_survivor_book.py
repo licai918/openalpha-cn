@@ -123,10 +123,12 @@ step 7 filed the prediction, whatever they were reading when they stopped. The p
 error classes are mapped by class, never by message: `PaperStateError` (`PaperLedgerConflictError`
 included), the store's `storage.paper_state.PaperStateStoreError` (which `backtest/` cannot
 import, so C3 cannot make it a `PaperStateError`), and `ValueError` -- the contract refusals of
-the facts adapter, the session market, the ordinals and the kernel. Anything else reaches the
-caller as itself: a `TypeError` or an `AssertionError` is a programming error, and the panel's
-own `RuntimeError`s (a busy or damaged catalog, a partition not yet knowable) are the panel's to
-name.
+the facts adapter, the session market, the ordinals and the kernel. The entry veto's window adds
+the panel's `PanelStorageError` (`V2-P7-027`, R-N3a): that read is at each session's own 16:30,
+and a session restated after it has no earlier version in the panel store, so the evening refuses
+by name instead of deciding on a different vetoed set. Anything else reaches the caller as
+itself: a `TypeError` or an `AssertionError` is a programming error, and the panel's other
+`RuntimeError`s (a busy catalog, a partition not yet knowable) are the panel's to name.
 """
 
 from __future__ import annotations
@@ -165,14 +167,16 @@ from openalpha_cn.backtest.paper_state import (
 from openalpha_cn.domain.factor_transform import FactorTransformSpec
 from openalpha_cn.domain.survivor_book import ScreenResult
 from openalpha_cn.domain.survivor_screen import screen as survivor_screen
-from openalpha_cn.domain.trading_calendar import TradingCalendar
+from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
 
 # `_try_lock` and `_unlock` are the panel catalog's two lock primitives, shared rather than
 # restated: an exclusive `flock(2)` (`msvcrt.locking` on Windows) through one open file
 # description, which two descriptors of one process meet exactly as two processes do, and which
 # the kernel drops with its holder.
-from openalpha_cn.panel.store import PanelStore, _try_lock, _unlock
+from openalpha_cn.panel.store import PanelStorageError, PanelStore, _try_lock, _unlock
 from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
+from openalpha_cn.panel_ingest import load_trading_calendar, session_publication_instant
+from openalpha_cn.panel_limit_events import vetoed_on
 from openalpha_cn.storage.paper_state import PaperStateStoreError
 from openalpha_cn.strategy_survivor import SurvivorRegistration
 from openalpha_cn.strategy_survivor_facts import FactsDay, build_facts_day
@@ -1126,7 +1130,11 @@ def evening(
     is read again with them, with no coverage floor, and screened again, and the second screen
     must agree with `screen` on the eligible set and the ranked survivors. Then: the held statuses
     (`delisted_or_refuse`), the session's market for the names of that book, every close of the
-    facts day as the entrants' prices, and `run_evening` observed on `as_of`'s Shanghai date.
+    facts day as the entrants' prices, and `run_evening` observed on `as_of`'s Shanghai date. A
+    book whose registration applies an entry veto (`V2-P7-027`) also reads the rule for the signal
+    day -- each session of its window at its own 16:30 -- and hands the set to `run_evening`; a
+    session inside the window restated after its publication refuses by name, before anything is
+    written (`_vetoed_for`). A book registered with `entry_veto: "none"` reads nothing (`R-N4`).
     `lock` is this run's writer-lock token; `transform` as `facts_day`'s. `account` is the day's
     own record of the orders actually placed and filled, compared with the evening's due orders
     before the book advances (`V2-P7-006a`); `None` when there is no record.
@@ -1194,6 +1202,7 @@ def evening(
             calendar=calendar,
             benchmark=registration.adapter.benchmark,
         )
+        vetoed = _vetoed_for(panel, registration, session=session, calendar=calendar)
         result = run_evening(
             store=state_store,
             ledger=ledger,
@@ -1207,6 +1216,7 @@ def evening(
             delisted=delisted,
             observed_on=observed_on,
             account=account,
+            vetoed=vetoed,
         )
     return SurvivorEvening(
         result=result, held_after=held_codes(result.snapshot), facts=facts, screen=screen
@@ -1312,15 +1322,106 @@ def _observed_on(as_of: datetime) -> date:
     return as_of.astimezone(_SHANGHAI).date()
 
 
+def _vetoed_for(
+    panel: PanelStore,
+    registration: SurvivorRegistration,
+    *,
+    session: date,
+    calendar: TradingCalendar,
+) -> frozenset[str]:
+    """The entry veto the signal day's decision is given (`V2-P7-027`): plan A's rule's answer for
+    `session`, or the empty set for a book whose registration applies none.
+
+    No read at all for `entry_veto == "none"`: the base book's reads and bytes do not move (R-N4).
+    The rule's window is read at each session's own 16:30 (`panel_limit_events.veto_window`), so a
+    session inside it restated after its publication has no earlier version to read and the panel
+    refuses by name; `_refusals` names that refusal `paper book`'s, naming the session, rather than
+    letting the evening decide on a different vetoed set (R-N3a).
+
+    **The window is counted on a calendar that holds the year before the session's**
+    (`_veto_calendar`). The evening's own calendar reaches back only to the registered epoch's
+    year, so on the first four sessions of a year -- where the window crosses New Year -- walking
+    it back would raise `CalendarHorizonError` and the evening would refuse. Only a v2 book pays
+    this read; the base book returns above without touching the panel (R-N4).
+    """
+    if registration.book.entry_veto == "none":
+        return frozenset()
+    veto_calendar = _veto_calendar(panel, registration, session=session, calendar=calendar)
+    with _refusals(
+        "paper book", f"the entry veto's window of {session.isoformat()}", restatement=True
+    ):
+        return vetoed_on(
+            panel,
+            session=session,
+            calendar=veto_calendar,
+            exchange=registration.adapter.exchange,
+        )
+
+
+def _veto_calendar(
+    panel: PanelStore,
+    registration: SurvivorRegistration,
+    *,
+    session: date,
+    calendar: TradingCalendar,
+) -> TradingCalendar:
+    """The calendar the entry veto's window is counted on: the session's year and the one before.
+
+    Read from the panel at the session's own publication instant -- the instant the target
+    session's events are read at -- so the calendar and the events it names are one reading. The
+    evening's calendar (`daily_selection._survivor_calendar`) covers `range(epoch.year,
+    session.year + 1)` and so cannot hold a January session's New Year predecessors; widening it
+    would move `SessionOrdinals` and the base book, so only this read widens.
+
+    A year before the session's the panel does not store is not an error in itself: the evening's
+    calendar is used and `veto_sessions` refuses by name if the window still runs past its start
+    -- never a shorter window and never a different vetoed set.
+    """
+    if session.year == date.min.year:  # pragma: no cover - no calendar reaches that year
+        return calendar
+    try:
+        return load_trading_calendar(
+            panel,
+            exchange=registration.adapter.exchange,
+            years=(session.year - 1, session.year),
+            as_of=session_publication_instant(session),
+        )
+    except (TradingCalendarError, PanelStorageError):
+        return calendar
+
+
 @contextmanager
-def _refusals(step: str, what: str) -> Iterator[None]:
+def _refusals(step: str, what: str, *, restatement: bool = False) -> Iterator[None]:
     """Name a refusal of the paper book or of a contract as `step`'s, by its class: the book's
-    state (`PaperStateError`), its store (`PaperStateStoreError`) and a contract (`ValueError`).
-    A `SurvivorDayError` passes through; nothing else is caught."""
+    state (`PaperStateError`), its store (`PaperStateStoreError`), a contract (`ValueError`) and,
+    with `restatement`, the panel's `PanelStorageError` (`V2-P7-027`, R-N3a). A
+    `SurvivorDayError` passes through; nothing else is caught.
+
+    `restatement` is for the entry veto's window: its block reads panel sessions at their own
+    publication instants, where a session restated after its instant has no earlier version to
+    read, so the block refuses by name instead of answering from another version. Every other
+    block leaves the panel's own `RuntimeError`s to the panel. The refusal names the restatement
+    as the *likely* cause rather than the established one -- a missing or damaged partition, or a
+    row not yet knowable there, refuses the same way -- and the panel's own error text follows;
+    `PartitionNotYetKnowableError` stays on the cause chain, so a caller's later-read rule sees
+    it and reads once more, and the veto's fixed per-session instants refuse again by name.
+    """
     try:
         yield
     except SurvivorDayError:
         raise
+    except PanelStorageError as error:
+        if not restatement:
+            raise
+        raise SurvivorDayError(
+            step,
+            f"{what} was refused (PanelStorageError): {error}. The most likely cause is a session "
+            "restated after its own 16:30: the panel keeps no earlier version of a restated row, "
+            "so the session cannot be read at its own publication instant and the vetoed set "
+            "cannot be reproduced. A missing or damaged partition, or a row not yet knowable "
+            "there, refuses the same way -- refusing is the guarantee, never a different set. "
+            "Nothing was written",
+        ) from error
     except PaperStateStoreError as error:
         raise SurvivorDayError(
             step,

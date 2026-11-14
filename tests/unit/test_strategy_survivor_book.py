@@ -32,25 +32,27 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import hashlib
 import importlib
 import json
 import os
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType, ModuleType
 from typing import Any, Final
 
 import pytest
-from panel_fixtures import EXCHANGE
+from panel_fixtures import DAILY_BASIC_EXTRA_COLUMNS, EXCHANGE
 from panel_fixtures import _batch as batch
 from panel_fixtures import _close_time as close_time
+from panel_fixtures import _midnight_shanghai as midnight_shanghai
 from panel_fixtures import _published_time as published_time
 from test_survivor_facts_panel import (
     CONFIG,
@@ -73,16 +75,18 @@ from test_survivor_facts_panel import (
     write_panel,
 )
 
-from openalpha_cn import strategy_survivor_book
+from openalpha_cn import panel_limit_events, strategy_survivor_book
 from openalpha_cn.backtest.multi_day import PortfolioLedger
 from openalpha_cn.backtest.paper import PaperPortfolio
 from openalpha_cn.backtest.paper_evening import CatchUpResult, PaperLedgerConflictError
 from openalpha_cn.backtest.paper_settlement import WRITE_OFF_REASON
-from openalpha_cn.backtest.paper_state import PaperStateError
+from openalpha_cn.backtest.paper_state import PaperStateError, load_snapshot
 from openalpha_cn.domain.adjustment import ADJ_FACTOR_DATASET
+from openalpha_cn.domain.daily_prices import DAILY_BASIC_DATASET, DAILY_DATASET
 from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET
 from openalpha_cn.domain.panel_batch import PanelColumn
 from openalpha_cn.domain.portfolio import PortfolioOrder, PortfolioState, PortfolioTransition
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.domain.survivor_book import (
     EligibilityVerdict,
     RankedName,
@@ -90,9 +94,24 @@ from openalpha_cn.domain.survivor_book import (
     SurvivorBookConfig,
 )
 from openalpha_cn.domain.survivor_screen import screen as survivor_screen
-from openalpha_cn.domain.trading_calendar import TradingCalendar
-from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_ingest import write_adjustment_factors, write_index_prices
+from openalpha_cn.domain.survivor_veto import VETO_RULE_ID, vetoed_codes
+from openalpha_cn.domain.trading_calendar import (
+    TRADING_CALENDAR_DATASET,
+    CalendarDay,
+    TradingCalendar,
+    build_trading_calendar,
+)
+from openalpha_cn.panel.store import PanelStorageError, PanelStore
+from openalpha_cn.panel_ingest import (
+    load_trading_calendar,
+    session_publication_instant,
+    write_adjustment_factors,
+    write_daily_panel,
+    write_index_prices,
+    write_price_limits,
+    write_trading_calendar,
+)
+from openalpha_cn.panel_limit_events import veto_window
 from openalpha_cn.storage.paper_state import FilePaperStateStore, PaperStateStoreError
 from openalpha_cn.storage.portfolio import SQLitePortfolioLedger, open_paper_ledger
 from openalpha_cn.strategy_survivor import (
@@ -110,6 +129,7 @@ from openalpha_cn.strategy_survivor_book import (
     PaperHead,
     SurvivorDayError,
     SurvivorEvening,
+    _vetoed_for,
     bind_paper_book,
     catch_up,
     delisted_or_refuse,
@@ -123,6 +143,7 @@ from openalpha_cn.strategy_survivor_book import (
 )
 from openalpha_cn.strategy_survivor_facts import FactsCoverageError, FactsDay, HeldStatus
 from openalpha_cn.strategy_survivor_market import SessionOrdinals
+from openalpha_cn.strategy_survivor_summary import evening_document, summary_lines
 
 D = Decimal
 ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -194,6 +215,14 @@ OTHER_BOOK: Final[SurvivorRegistration] = SurvivorRegistration(
     book=book_config(holding_count=9), adapter=adapter()
 )
 """Another book block under the same adapter: another paper book."""
+V2_BOOK: Final[SurvivorBookConfig] = book_config(
+    schema_version="survivor-book-config/v2", entry_veto=VETO_RULE_ID
+)
+"""The same parameters under the v2 contract: plan A's rule may veto its entries (`V2-P7-027`)."""
+V2_REGISTRATION: Final[SurvivorRegistration] = SurvivorRegistration(book=V2_BOOK, adapter=adapter())
+V2_CONFIG_ID: Final[str] = "rcf_6f1e2d3c4b5a69788796a5b4"
+"""The v2 book's own `config_id`: a parallel book binds a marker of its own, never the base's."""
+V2_REGISTRATION_SHA256: Final[str] = "8c" * 32
 
 
 def make_portfolio(ledger: PortfolioLedger) -> PaperPortfolio:
@@ -540,6 +569,60 @@ def run_day(
         screen=screen,
         held=head.held,
         registration=registration,
+    )
+    return Day(head=head, facts=facts, screen=screen, caught_up=caught, evening=tonight)
+
+
+def v2_day(
+    panel: PanelStore,
+    paper: Paper,
+    index: int,
+    *,
+    as_of: datetime = AS_OF,
+    screen_of: ScreenOf | None = None,
+) -> Day:
+    """Steps 5, 6 and 8 of the survivor day of session `index` on the v2 book (`V2-P7-027`), in
+    D5's order: the head (a marker of its own, its `held` pinned), the session's facts read with
+    that `held` and screened, the missed sessions caught up, then the evening with the pinned
+    `held`. A rerun at another `as_of` reads the same day at the later instant."""
+    head = head_of(
+        paper,
+        index,
+        V2_REGISTRATION,
+        config_id=V2_CONFIG_ID,
+        registration_sha256=V2_REGISTRATION_SHA256,
+    )
+    facts = facts_day(
+        panel=panel,
+        registration=V2_REGISTRATION,
+        session=SESSIONS[index],
+        as_of=as_of,
+        held=head.held,
+        transform=IDENTITY,
+    )
+    screen = real_screen(facts, V2_REGISTRATION) if screen_of is None else screen_of(facts)
+    caught = catch_up(
+        panel=panel,
+        state_store=paper.store,
+        ledger=paper.ledger,
+        registration=V2_REGISTRATION,
+        ordinals=ORDINALS,
+        calendar=CALENDAR,
+        through_index=ORDINALS.index_of(SESSIONS[index]) - 1,
+        as_of=as_of,
+        make_portfolio=make_portfolio,
+        lock=paper.lock,
+        transform=IDENTITY,
+    )
+    tonight = evening_of(
+        panel,
+        paper,
+        index,
+        facts=facts,
+        screen=screen,
+        held=head.held,
+        registration=V2_REGISTRATION,
+        as_of=as_of,
     )
     return Day(head=head, facts=facts, screen=screen, caught_up=caught, evening=tonight)
 
@@ -1971,3 +2054,413 @@ def test_the_lock_is_held_across_processes_and_released_with_its_holder(tmp_path
     assert holder.returncode == 0
     with paper_book_lock(directory):
         assert (directory / PAPER_BOOK_LOCK).exists()
+
+
+# --- the entry veto in the evening (`V2-P7-027`) -------------------------------------------------
+
+VETOED: Final[str] = "600002.SH"
+"""The best of the three survivors the veto tests hand the frame's book: 600002.SH."""
+
+
+def veto_screen(facts: FactsDay) -> ScreenResult:
+    """Three survivors best first, so a vetoed rank 1 leaves the next two to be drawn: the
+    frame's real screen with `VETOED` on top."""
+    return ranked(facts, (VETOED, "600003.SH", "600004.SH"))
+
+
+def journal_document(
+    day: Day, *, book: SurvivorBookConfig, as_of: datetime = AS_OF
+) -> dict[str, Any]:
+    """`day`'s evening as the daily journal files it: `evening_document`'s `result` for the book
+    the day ran under, read at `as_of`."""
+    return evening_document(
+        session=day.facts.session,
+        session_index=day.evening.result.snapshot.session_index,
+        as_of=as_of,
+        facts=day.facts,
+        screen=day.screen,
+        evening=day.evening.result,
+        catch_ups=day.caught_up,
+        ordinals=ORDINALS,
+        book=book,
+    )
+
+
+def journal_result_bytes(document: Mapping[str, Any]) -> bytes:
+    """The bytes `daily_selection.write_journal` writes for a `result`: sorted keys, a two-space
+    indent, a trailing newline, non-ASCII unescaped -- the journal's own serialisation, so equal
+    here is equal in the file."""
+    return (json.dumps(document, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode(
+        "utf-8"
+    )
+
+
+class VetoReads:
+    """`panel_limit_events.vetoed_on` as `strategy_survivor_book.evening` calls it: the codes a
+    session is answered with and -- for a session in `restated` -- the panel's own refusal naming
+    that session. Every call is recorded, with the calendar and exchange it was asked with.
+
+    The real rule's readings are the panel plane's (`tests/integration/panel/test_veto_window.py`
+    pins that a restated session makes the window read raise by name). What these tests pin is the
+    book's half: it asks the rule for the signal day once, hands the answer to `run_evening`, and
+    refuses rather than deciding when the read refuses.
+    """
+
+    def __init__(self, answers: Mapping[date, frozenset[str]]) -> None:
+        self.answers = dict(answers)
+        self.restated: frozenset[date] = frozenset()
+        self.calls: list[date] = []
+        self.arguments: list[tuple[TradingCalendar, str]] = []
+
+    def __call__(
+        self,
+        store: PanelStore,
+        *,
+        session: date,
+        calendar: TradingCalendar,
+        exchange: str,
+    ) -> frozenset[str]:
+        self.calls.append(session)
+        self.arguments.append((calendar, exchange))
+        if session in self.restated:
+            raise PanelStorageError(
+                f"{session.isoformat()} cannot be read at its own 16:30: the panel holds no row "
+                "this read can see and keeps no earlier version -- the session was restated "
+                "after it, so the evening's vetoed set cannot be reproduced"
+            )
+        return self.answers[session]
+
+
+def _must_not_read(name: str) -> Callable[..., frozenset[str]]:
+    def read(*_args: Any, **_keywords: Any) -> frozenset[str]:
+        raise AssertionError(
+            f"a book whose entry_veto is 'none' must not read the entry veto: {name} was called"
+        )
+
+    return read
+
+
+BASE_JOURNAL_SHA256: Final[str] = "46bda71966547c112d217d6bd1d826a7419e387a766698dc6ac504b9ee4f7763"
+"""The SHA-256 of the v1 book's journal `result` bytes, measured on the base commit `cc2b44b`."""
+BASE_SUMMARY_LINES: Final[tuple[str, ...]] = (
+    "session            2026-03-31 (as of 2026-04-18T02:00:00+08:00)",
+    "ORDERS FOR THE OPEN OF D+1 (call auction 09:15), 2026-04-01 -- evening created",
+    "  real closes are references, not limit prices; the paper book fills at the open",
+    "  at the 09:15 call auction an order carries a limit price: this system assumes that a buy placed at its limit-up price and a sell placed at its limit-down price take the single opening price -- confirm with your broker. Each limit below is computed from the real close (main board 10%; ST 5% before 2025-07-07, 10% from it); the exchange's published limit governs",  # noqa: E501
+    "  BUY 600002.SH 1200 shares, about 32,400 yuan -- reference: real close 27.0 INITIAL_BUILD, live through 2026-04-03; limit-up 29.70, 35,640.00 yuan at it",  # noqa: E501
+    "  BUY 600009.SH 1000 shares, about 34,000 yuan -- reference: real close 34.0 INITIAL_BUILD, live through 2026-04-03; limit-up 37.40, 37,400.00 yuan at it",  # noqa: E501
+    "  BUY 600005.SH 1100 shares, about 33,000 yuan -- reference: real close 30.0 INITIAL_BUILD, live through 2026-04-03; limit-up 33.00, 36,300.00 yuan at it",  # noqa: E501
+    "  BUY 600006.SH 1100 shares, about 34,100 yuan -- reference: real close 31.0 INITIAL_BUILD, live through 2026-04-03; limit-up 34.10, 37,510.00 yuan at it",  # noqa: E501
+    "  BUY 600012.SH 900 shares, about 33,300 yuan -- reference: real close 37.0 INITIAL_BUILD, live through 2026-04-03; limit-up 40.70, 36,630.00 yuan at it",  # noqa: E501
+    "  BUY 600007.SH 1000 shares, about 32,000 yuan -- reference: real close 32.0 INITIAL_BUILD, live through 2026-04-03; limit-up 35.20, 35,200.00 yuan at it",  # noqa: E501
+    "  BUY 000012.SZ 1600 shares, about 33,600 yuan -- reference: real close 21.0 INITIAL_BUILD, live through 2026-04-03; limit-up 23.10, 36,960.00 yuan at it",  # noqa: E501
+    "  BUY 600004.SH 1200 shares, about 34,800 yuan -- reference: real close 29.0 INITIAL_BUILD, live through 2026-04-03; limit-up 31.90, 38,280.00 yuan at it",  # noqa: E501
+    "  BUY 600003.SH 1200 shares, about 33,600 yuan -- reference: real close 28.0 INITIAL_BUILD, live through 2026-04-03; limit-up 30.80, 36,960.00 yuan at it",  # noqa: E501
+    "  BUY 600014.SH 400 shares, about 15,600 yuan -- reference: real close 39.0 INITIAL_BUILD, live through 2026-04-03; limit-up 42.90, 17,160.00 yuan at it",  # noqa: E501
+    "funding            cash at 09:15 350,000.00 yuan; buys freeze 348,040.00 yuan at their limit-up prices (1.10x the reference, the main board's band); sells tonight release about 0.00 yuan after the auction, not before it",  # noqa: E501
+    "  600014.SH: 400 of the 800 shares the equal share asks; 17,160.00 yuan short at the limit-up price",  # noqa: E501
+    "  the paper book assumes every order above is placed and fills at the open; your account follows the book only if you did exactly that",  # noqa: E501
+    "reconciliation     no account record for 2026-03-31: the paper book's assumption that every printed order was placed stands unverified",  # noqa: E501
+    "carried orders     none",
+    "unfunded           none",
+    "unaffordable       none",
+    "deferred exits     none",
+    "near exit          none",
+    "frozen             none",
+    "watch list         600008.SH, 600001.SH, 600013.SH, 600010.SH, 000013.SZ (today's draw, not a promise for tomorrow)",  # noqa: E501
+    "illiquid exits     none",
+    "positions          0 holdings (ledger qty is in the ledger's units and a ledger/real ratio is the adjustment since the buy, cash dividends included -- neither is a share count; every sale is SELL ENTIRE POSITION)",  # noqa: E501
+    "book               equity 350000.00, cash 350000.00, gross exposure 0.000000, 0 holdings; ledger equity is not evidence",  # noqa: E501
+    "settled            filled 0, expired 0, cancelled 0, rejected 0, not attempted 0, written off 0",  # noqa: E501
+    "catch-up           none",
+    "diagnostics        how the run read its data -- nothing below is an order",
+    "ids                session index 1; trade list trl_254b82d6f05195a394368b44; paper snapshot pbs_263d12d1382dfdd05d50e0fe",  # noqa: E501
+    "facts              rows 42, universe on main 39, scored 38 (coverage 0.974359); book holdings before tonight's fills 0",  # noqa: E501
+    "  no_bar_within_carry 1, not_listed_with_bar 1, unrecognised_board 0, no_listing_row 1, suspended_without_bar 0, delisting 1",  # noqa: E501
+    "  ST 2 (by name 1, pending 0, by band 1)",
+    "  name unknown -> ordinary 24 (never renamed 24, before first record 0)",
+    "screen             assessed 42, eligible 24, survivors 20",
+    "  reasons board_not_allowed 3, illiquid 10, listing_too_recent 2, missing_factor_value 1, special_treatment 3, suspended 0",  # noqa: E501
+    "prediction         not in this document",
+    "tushare requests   not recorded in this document",
+    "units              fees after an adjustment event are charged on the scaled notional; filled_price and marks are in ledger units (the real price times the adjustment ratio); transfer_fee is slippage",  # noqa: E501
+    "wording            candidates of a registered research configuration; no order was placed; ledger equity is not evidence; with N=10, single-year results are mostly luck",  # noqa: E501
+)
+"""The v1 book's printed summary, measured on the base commit `cc2b44b`, line for line."""
+
+
+def test_a_v2_books_evening_vetoes_its_top_survivor_and_buys_the_next_one(
+    panel: PanelStore, paper: Paper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan A in the evening: the v2 book's read of the rule names the frame's best survivor, so
+    the initial build buys the next two and the journal files the rule with the code it blocked."""
+    reads = VetoReads({SESSIONS[61]: frozenset({VETOED})})
+    monkeypatch.setattr(strategy_survivor_book, "vetoed_on", reads)
+
+    day = v2_day(panel, paper, 61, screen_of=veto_screen)
+    result = day.evening.result
+
+    assert result.vetoed == frozenset({VETOED})
+    assert {entry.ts_code for entry in result.decision.entries} == {"600003.SH", "600004.SH"}
+    assert {order.ts_code for order in result.trade_list.orders} == {"600003.SH", "600004.SH"}
+    # The rule is asked once, for the signal day, with the registered calendar and exchange.
+    assert reads.calls == [SESSIONS[61]]
+    assert reads.arguments == [(CALENDAR, V2_REGISTRATION.adapter.exchange)]
+    document = journal_document(day, book=V2_BOOK)
+    assert document["paper"]["entry_veto"] == {"rule": VETO_RULE_ID, "vetoed": [VETOED]}
+
+
+def test_a_rerun_without_a_restatement_reproduces_the_vetoed_evening(
+    panel: PanelStore, paper: Paper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-N3a's first half: the evening settled at one `as_of` is run again at a later one with the
+    window un-restated. It is the `unchanged` path -- nothing written -- and the set it derives is
+    the first run's, so a rerun can never change what the journal said was vetoed."""
+    reads = VetoReads({SESSIONS[61]: frozenset({VETOED})})
+    monkeypatch.setattr(strategy_survivor_book, "vetoed_on", reads)
+    first = v2_day(panel, paper, 61, screen_of=veto_screen)
+    before = files(paper)
+
+    again = v2_day(panel, paper, 61, as_of=LATER, screen_of=veto_screen)
+
+    assert again.evening.result.outcome == "unchanged"
+    assert again.evening.result.vetoed == first.evening.result.vetoed == frozenset({VETOED})
+    assert again.evening.result.snapshot == first.evening.result.snapshot
+    assert files(paper) == before
+    assert reads.calls == [SESSIONS[61], SESSIONS[61]]
+
+
+def test_a_rerun_after_a_restatement_refuses_rather_than_changing_the_vetoed_evening(
+    panel: PanelStore, paper: Paper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-N3a's second half: a session inside the window restated after its own 16:30 has no
+    earlier version to read, so the window read refuses by name. The book refuses under `paper
+    book`, naming the session, before anything is written: the first evening's snapshot and the
+    journal's `result` bytes are unchanged."""
+    reads = VetoReads({SESSIONS[61]: frozenset({VETOED})})
+    monkeypatch.setattr(strategy_survivor_book, "vetoed_on", reads)
+    first = v2_day(panel, paper, 61, screen_of=veto_screen)
+    first_journal = journal_result_bytes(journal_document(first, book=V2_BOOK))
+    before = files(paper)
+    reads.restated = frozenset({SESSIONS[61]})
+
+    with pytest.raises(SurvivorDayError) as refused:
+        v2_day(panel, paper, 61, as_of=LATER, screen_of=veto_screen)
+
+    message = str(refused.value)
+    assert refused.value.step == "paper book"
+    assert SESSIONS[61].isoformat() in message
+    assert "PanelStorageError" in message
+    # Finding 2, fix round 1: a `PanelStorageError` is not established to be a restatement --
+    # a missing or damaged partition refuses the same way -- so the refusal names the likely
+    # cause and the others rather than asserting the one.
+    assert "most likely cause is a session restated" in message
+    assert "missing or damaged partition" in message
+    assert files(paper) == before
+    assert paper.store.sessions()[-1] == SESSIONS[61]
+    assert load_snapshot(paper.store, SESSIONS[61]) == first.evening.result.snapshot
+    assert journal_result_bytes(journal_document(first, book=V2_BOOK)) == first_journal
+
+
+def test_the_base_book_evening_and_journal_are_unchanged(
+    panel: PanelStore, paper: Paper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-N4: with `entry_veto == "none"` nothing new is read, filed or printed. The panel reader
+    and the rule are spies that fail if asked, `EveningResult.vetoed` is empty, the paper section
+    carries no `entry_veto` key, and the journal's `result` bytes and the printed lines are the
+    literal measured on the base commit `cc2b44b`, before this task's code existed."""
+    monkeypatch.setattr(panel_limit_events, "limit_events_on", _must_not_read("limit_events_on"))
+    monkeypatch.setattr(panel_limit_events, "vetoed_on", _must_not_read("vetoed_on"))
+    monkeypatch.setattr(
+        strategy_survivor_book, "vetoed_on", _must_not_read("vetoed_on"), raising=False
+    )
+
+    day = run_day(panel, paper, 61)
+
+    assert day.evening.result.vetoed == frozenset()
+    document = journal_document(day, book=REGISTRATION.book)
+    assert "entry_veto" not in document["paper"]
+    assert hashlib.sha256(journal_result_bytes(document)).hexdigest() == BASE_JOURNAL_SHA256
+    assert summary_lines(document) == list(BASE_SUMMARY_LINES)
+
+
+# --- fix round 1: the veto window across New Year (review finding 1) -----------------------------
+
+LEGACY_EVENT: Final[str] = "600001.SH"
+"""One frame security: its 2025-12-31 bar is scripted as a broken board, the window's one event."""
+VETO_ACROSS_NEW_YEAR: Final[date] = SESSIONS[1]
+"""2026-01-06, the second session of the frame's year. Its five-session veto window reaches
+2025-12-29, which the evening's own calendar -- `range(epoch.year, session.year + 1)`, what
+`daily_selection._survivor_calendar` builds -- never holds. `_vetoed_for` reads the year before
+from the panel for a v2 book, and only for a v2 book."""
+
+
+def two_year_panel(root: Path) -> PanelStore:
+    """The frame's 2026 panel extended with 2025 through the real writers: a full calendar, and
+    every open session's `daily`, `daily_basic` and `stk_limit` cross sections.
+
+    The 2026 half is `write_panel`'s own (the frame's generated fixture). The 2025 half is built
+    here because no generator carries a second partition year (`tests/panel_fixtures.py` says
+    so): 1 January 2025 is closed, every other weekday is open, prices are quiet except
+    `LEGACY_EVENT`'s 2025-12-31 broken board -- high at the published up limit, close below it --
+    which is the window's one limit event.
+    """
+    store = write_panel(root / "two-year", BOOK)
+    days = tuple(
+        CalendarDay(
+            calendar_date=day,
+            is_trading=day.weekday() < 5 and day != date(2025, 1, 1),
+        )
+        for day in (date(2025, 1, 1) + timedelta(days=offset) for offset in range(365))
+    )
+    previous: list[str | None] = []
+    seen: date | None = None
+    for day in days:
+        previous.append(seen.isoformat() if seen is not None else None)
+        if day.is_trading:
+            seen = day.calendar_date
+    write_trading_calendar(
+        store,
+        batch(
+            TRADING_CALENDAR_DATASET,
+            subjects=[EXCHANGE] * len(days),
+            columns=[
+                PanelColumn(
+                    "cal_date", "string", tuple(day.calendar_date.isoformat() for day in days)
+                ),
+                PanelColumn("is_open", "boolean", tuple(day.is_trading for day in days)),
+                PanelColumn("pretrade_date", "string", tuple(previous)),
+            ],
+            event_time=[midnight_shanghai(day.calendar_date) for day in days],
+            available_time=[midnight_shanghai(date(2025, 1, 1))] * len(days),
+        ),
+    )
+    calendar = build_trading_calendar(EXCHANGE, days)
+    open_days = tuple(day.calendar_date for day in days if day.is_trading)
+    securities = stored_securities(BOOK)
+    pairs = [(day, code) for day in open_days for code in securities]
+    broken = (date(2025, 12, 31), LEGACY_EVENT)
+
+    def prices(day: date, code: str) -> tuple[float, float, float, float, float]:
+        if (day, code) == broken:
+            return (10.0, 11.0, 9.7, 9.8, 10.0)  # open, high, low, close, pre_close
+        return (10.0, 10.0, 10.0, 10.0, 10.0)
+
+    quoted = [prices(day, code) for day, code in pairs]
+    available = [published_time(day) for day, _ in pairs]
+    fetched = max(available)
+    write_daily_panel(
+        store,
+        bars=[
+            batch(
+                DAILY_DATASET,
+                subjects=[code for _, code in pairs],
+                columns=[
+                    PanelColumn("trade_date", "string", tuple(day.isoformat() for day, _ in pairs)),
+                    PanelColumn("open", "float", tuple(row[0] for row in quoted)),
+                    PanelColumn("high", "float", tuple(row[1] for row in quoted)),
+                    PanelColumn("low", "float", tuple(row[2] for row in quoted)),
+                    PanelColumn("close", "float", tuple(row[3] for row in quoted)),
+                    PanelColumn("pre_close", "float", tuple(row[4] for row in quoted)),
+                    PanelColumn(
+                        "pct_chg",
+                        "float",
+                        tuple((row[3] / row[4] - 1.0) * 100.0 for row in quoted),
+                    ),
+                    PanelColumn("vol", "float", tuple(100.0 for _ in quoted)),
+                    PanelColumn("amount", "float", tuple(10000.0 for _ in quoted)),
+                ],
+                event_time=[close_time(day) for day, _ in pairs],
+                available_time=available,
+                fetched_at=fetched,
+            )
+        ],
+        fundamentals=[
+            batch(
+                DAILY_BASIC_DATASET,
+                subjects=[code for _, code in pairs],
+                columns=[
+                    PanelColumn("trade_date", "string", tuple(day.isoformat() for day, _ in pairs)),
+                    PanelColumn("close", "float", tuple(row[3] for row in quoted)),
+                    *(
+                        PanelColumn(name, "float", tuple(1.0 for _ in quoted))
+                        for name in DAILY_BASIC_EXTRA_COLUMNS
+                    ),
+                ],
+                event_time=[close_time(day) for day, _ in pairs],
+                available_time=available,
+                fetched_at=fetched,
+            )
+        ],
+        calendar=calendar,
+        halts=None,
+    )
+    write_price_limits(
+        store,
+        [
+            batch(
+                PRICE_LIMIT_DATASET,
+                subjects=[code for _, code in pairs],
+                columns=[
+                    PanelColumn("trade_date", "string", tuple(day.isoformat() for day, _ in pairs)),
+                    PanelColumn(
+                        "up_limit", "float", tuple(round(row[4] * 1.1, 2) for row in quoted)
+                    ),
+                    PanelColumn(
+                        "down_limit", "float", tuple(round(row[4] * 0.9, 2) for row in quoted)
+                    ),
+                ],
+                event_time=[close_time(day) for day, _ in pairs],
+                available_time=available,
+                fetched_at=fetched,
+            )
+        ],
+        calendar=calendar,
+    )
+    return store
+
+
+def test_a_v2_evenings_veto_window_reaches_the_year_before_at_the_start_of_a_year(
+    tmp_path: Path,
+) -> None:
+    """Finding 1, fix round 1: an evening on the second session of the year reads its five
+    sessions across New Year.
+
+    The real `vetoed_on` and `veto_sessions` are driven against a real two-year panel, no
+    stand-in: the set is the window's rule and equals `vetoed_codes` over the same window read
+    independently. Before the fix the evening's 2026-only calendar refused the window, and a
+    parallel book registered near 1 January would have lost its first four evenings.
+    """
+    store = two_year_panel(tmp_path)
+
+    vetoed = _vetoed_for(store, V2_REGISTRATION, session=VETO_ACROSS_NEW_YEAR, calendar=CALENDAR)
+
+    two_year = load_trading_calendar(
+        store,
+        exchange=V2_REGISTRATION.adapter.exchange,
+        years=(2025, 2026),
+        as_of=session_publication_instant(VETO_ACROSS_NEW_YEAR),
+    )
+    window = veto_window(
+        store,
+        session=VETO_ACROSS_NEW_YEAR,
+        calendar=two_year,
+        exchange=V2_REGISTRATION.adapter.exchange,
+    )
+    assert vetoed == vetoed_codes(window) == frozenset({LEGACY_EVENT})
+    assert [events[0].trade_date for events in window if events] == [date(2025, 12, 31)]
+
+
+def test_a_v2_evenings_window_reaching_a_year_the_panel_does_not_hold_refuses_by_name(
+    panel: PanelStore,
+) -> None:
+    """Finding 1's other half: when the year before is really not stored, the evening's own
+    calendar is used and the window's walk past its start is refused by name, naming the session
+    -- not a different vetoed set and not a silent empty one."""
+    with pytest.raises(SurvivorDayError) as refused:
+        _vetoed_for(panel, V2_REGISTRATION, session=VETO_ACROSS_NEW_YEAR, calendar=CALENDAR)
+
+    message = str(refused.value)
+    assert refused.value.step == "paper book"
+    assert f"5-session window ending {VETO_ACROSS_NEW_YEAR.isoformat()}" in message
+    assert "start of the calendar" in message

@@ -292,6 +292,11 @@ class EveningResult:
     reconciliation: Reconciliation | None
     """Tonight's due orders compared with the user's account record, or `None` when there was no
     record: the book's assumption that every printed order was placed then stands unverified."""
+    vetoed: frozenset[str] = frozenset()
+    """The entry-veto set the decision was given (`V2-P7-027`): plan A's rule's answer for the
+    signal day, or the empty set for a book registered without a veto. Carried on both outcomes so
+    the journal can file it, and so a rerun's `unchanged` answer carries the set the first run
+    used rather than an empty one."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -439,6 +444,7 @@ def run_evening(
     delisted: Collection[str],
     observed_on: date,
     account: AccountRecord | None = None,
+    vetoed: frozenset[str] = frozenset(),
 ) -> EveningResult:
     """Settle, decide and commit the evening of `session` (ordinal `session_index`); see the
     module docstring for the transaction and why it is crash-safe.
@@ -455,7 +461,10 @@ def run_evening(
     compared with this evening's due orders before anything is written, and an irreconcilable
     record is refused by name (`AccountRecordConflict`) before the book advances. A divergence is
     recorded, never absorbed: the book is not rewritten from the account. `None` records nothing
-    to compare, and the result says the book's assumption stands unverified.
+    to compare, and the result says the book's assumption stands unverified. `vetoed` is plan A's
+    entry-veto set for the signal day (`V2-P7-027`), handed to `decide_book`; the empty set for a
+    book registered without a veto, which `decide_book` refuses a non-empty set for. It is carried
+    on the result, `unchanged` included, so the journal files the set the session was decided on.
 
     A session already settled is answered `unchanged`, writing nothing, with the settlement,
     decision and trade list derived again from the snapshot before it; a derivation that does
@@ -486,7 +495,7 @@ def run_evening(
         else reconcile(account, settlement, outcomes=attempt_outcomes(settlement))
     )
     state = book_state(settlement, config=config)
-    decision = decide_book(config=config, screen=screen, state=state)
+    decision = decide_book(config=config, screen=screen, state=state, vetoed=vetoed)
     reference_prices = {**entrant_prices, **ledger_reference_prices(settlement)}
     trade_list = build_trade_list(
         config=config,
@@ -516,6 +525,7 @@ def run_evening(
             settlement=settlement,
             funding=funding,
             reconciliation=reconciliation,
+            vetoed=vetoed,
         )
     return EveningResult(
         outcome=_commit(store=store, ledger=ledger, settlement=settlement, snapshot=snapshot),
@@ -525,6 +535,7 @@ def run_evening(
         settlement=settlement,
         funding=funding,
         reconciliation=reconciliation,
+        vetoed=vetoed,
     )
 
 

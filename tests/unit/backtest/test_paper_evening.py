@@ -216,6 +216,7 @@ def evening(
     store: object = None,
     ledger: object = None,
     factory: Callable[[PortfolioLedger], PaperPortfolio] = make_portfolio,
+    vetoed: frozenset[str] = frozenset(),
 ) -> EveningResult:
     return run_evening(
         store=book.store if store is None else store,  # type: ignore[arg-type]
@@ -229,6 +230,7 @@ def evening(
         entrant_prices={code: D(price) for code, price in prices.items()},
         delisted=delisted,
         observed_on=day if observed_on is None else observed_on,
+        vetoed=vetoed,
     )
 
 
@@ -2048,3 +2050,77 @@ def test_over_25_rough_evenings_the_ledger_replays_to_every_snapshot(tmp_path: P
     assert any(rough.events["halted"] in result.decision.frozen for result in results[14:16])
     (written,) = results[17].settlement.written_off
     assert written.ts_code == rough.events["delisted"]
+
+
+# ---- the entry veto (`V2-P7-027`) --------------------------------------------------------------
+
+VETO_CONFIG = SurvivorBookConfig(
+    seed=7, schema_version="survivor-book-config/v2", entry_veto="market_bearish_5/v1"
+)
+"""The S1/S2/S3 fixtures' book under the v2 contract: it names plan A's rule and may block entry."""
+VETO_DIGEST = survivor_config_digest(VETO_CONFIG)
+
+
+def veto_book(root: Path) -> Book:
+    """A book opened on E0 under the v2 configuration, nothing settled yet."""
+    store = FilePaperStateStore(root / "snapshots")
+    open_book(
+        store=store, session=E0, session_index=0, cash=D("100000.00"), config_digest=VETO_DIGEST
+    )
+    return Book(root=root, store=store, ledger=SQLitePortfolioLedger(root / "ledger.sqlite3"))
+
+
+def test_a_v2_books_initial_build_skips_the_vetoed_survivor_and_buys_the_next_one(
+    tmp_path: Path,
+) -> None:
+    """`run_evening` hands `vetoed` to the kernel: `decide_book` drops 600010.SH -- the best of the
+    three S1 survivors -- and the initial build buys the next two instead. The set used is on the
+    result, so the journal can file it; a book registered without a veto can never be handed one
+    (`decide_book`'s own refusal, pinned in `tests/unit/domain/test_survivor_policy.py`)."""
+    book = veto_book(tmp_path)
+
+    result = evening(
+        book, S1, NOTHING, SCREEN_S1, PRICES_S1, config=VETO_CONFIG, vetoed=frozenset({A})
+    )
+
+    assert result.outcome == "created"
+    assert result.vetoed == frozenset({A})
+    assert A not in {entry.ts_code for entry in result.decision.entries}
+    assert {entry.ts_code for entry in result.decision.entries} == {B, DL}
+    assert {order.ts_code for order in result.trade_list.orders if order.side == "buy"} == {B, DL}
+
+
+def test_a_held_name_the_veto_names_is_not_sold(tmp_path: Path) -> None:
+    """R-A1: the veto blocks entry only. 600020.SH is held through S2 and is one of S3's
+    survivors, so nothing sells it -- the veto it is handed changes that in no way: no exit, no
+    sale, and it is still a target holding."""
+    book = veto_book(tmp_path)
+    evening(book, S1, NOTHING, SCREEN_S1, PRICES_S1, config=VETO_CONFIG)
+    evening(book, S2, MARKET_S2, SCREEN_S2, PRICES_S2, config=VETO_CONFIG)
+
+    result = tonight(book, config=VETO_CONFIG, vetoed=frozenset({B}))
+
+    assert result.vetoed == frozenset({B})
+    assert B in {position.subject for position in result.settlement.book.positions}
+    assert B not in {decision.ts_code for decision in result.decision.exits}
+    assert not any(
+        order.side == "sell" and order.ts_code == B for order in result.trade_list.orders
+    )
+    assert B in result.decision.target_holdings
+
+
+def test_an_evening_run_again_gives_back_the_vetoed_set_it_used(tmp_path: Path) -> None:
+    """The unchanged path carries the set too: a session that is already settled is answered with
+    the evening derived again, whose vetoed set is the one the decision was given."""
+    book = veto_book(tmp_path)
+    first = evening(
+        book, S1, NOTHING, SCREEN_S1, PRICES_S1, config=VETO_CONFIG, vetoed=frozenset({A})
+    )
+
+    again = evening(
+        book, S1, NOTHING, SCREEN_S1, PRICES_S1, config=VETO_CONFIG, vetoed=frozenset({A})
+    )
+
+    assert again.outcome == "unchanged"
+    assert again.vetoed == first.vetoed == frozenset({A})
+    assert (again.decision, again.trade_list) == (first.decision, first.trade_list)

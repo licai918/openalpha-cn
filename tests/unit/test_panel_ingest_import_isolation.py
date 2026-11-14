@@ -603,10 +603,20 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # tonight's when the catch-up changed the holdings ...
             "strategy_survivor_facts.FactsDay",
             "strategy_survivor_facts.build_facts_day",
-            # ... and each session's market, counted in the book's ordinals. It reads nothing
-            # itself: every read is one of these two adapters'.
+            # ... and each session's market, counted in the book's ordinals ...
             "strategy_survivor_market.SessionOrdinals",
             "strategy_survivor_market.settlement_market",
+            # ... and (`V2-P7-027`) the one panel read the evening makes itself: plan A's entry
+            # veto's window, each session of it at its own 16:30, for a book registered with the
+            # rule. It reaches `daily`, `stk_limit` and `trade_cal`, which the two adapters'
+            # reads above already reach, so the dataset row below does not grow.
+            "panel_limit_events.vetoed_on",
+            # ... and, for that read only (fix round 1, review finding 1), the calendar it walks:
+            # the session's year and the one before it, at the session's publication instant,
+            # because the evening's own calendar stops at the epoch's year. Reaches `trade_cal`,
+            # already in the row; `session_publication_instant` is a clock and reaches none.
+            "panel_ingest.load_trading_calendar",
+            "panel_ingest.session_publication_instant",
         }
     ),
     "openalpha_cn.strategy_survivor_check": frozenset(
