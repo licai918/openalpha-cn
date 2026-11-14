@@ -1,0 +1,64 @@
+{
+  "ab_tests": {
+    "factor_tests": [
+      {
+        "direction": "lower_is_better",
+        "factor": "limit_up_count_20/v1"
+      },
+      {
+        "direction": "lower_is_better",
+        "factor": "broken_board_count_20/v1"
+      }
+    ],
+    "false_discovery_rate": 0.1,
+    "horizon": 20,
+    "issues": [
+      "V2-P7-027",
+      "V2-P7-028"
+    ],
+    "minimum_vetoed_observations": 60,
+    "schema": "p7-ab-tests/v1",
+    "stride": 20,
+    "veto": {
+      "lookback_sessions": 5,
+      "rule": "market_bearish_5/v1"
+    },
+    "window": "second_use"
+  },
+  "as_of_reason": "读数所用的知识即 ~/openalpha-research/panel 的 APFS 克隆（原目录库最后写入 2026-11-12 20:10 上海时间），并在克隆中于 2026-11-14 按每个会话 16:30 构建了 limit_up_count_20/v1 与 broken_board_count_20/v1 的 raw 观测（最后写入约 21:34 上海时间）",
+  "code_commit": "d70bd9f9bb37d99a2b6129dba9cd9496c52e1fee",
+  "config": {
+    "as_of": "2026-11-14T21:45:00+08:00",
+    "book": {
+      "seed": 0
+    },
+    "exchange": "SSE",
+    "max_carry_sessions": 250,
+    "min_coverage": 0.5,
+    "transform": "cross_section_standard/v1"
+  },
+  "expected_periods": null,
+  "issue": "V2-P7-027",
+  "reading": "v2-p7-027-028-second-use",
+  "request": {
+    "first": "2024-01-02",
+    "horizons": [
+      20
+    ],
+    "last": "2026-09-24",
+    "loser_decile_count": 2,
+    "scores": [
+      "composite"
+    ],
+    "stride": 20,
+    "tails": [
+      1,
+      2,
+      3
+    ]
+  },
+  "role": "secondary",
+  "schema": "openalpha-p7-reading-registration/v1",
+  "stop_rule": null,
+  "window": "second_use"
+}
