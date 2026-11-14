@@ -1966,6 +1966,19 @@ def test_a_hand_written_section_naming_another_window_is_refused() -> None:
         )
 
 
+def test_a_forward_registration_without_the_ab_section_or_as_primary_is_refused() -> None:
+    """`forward_ab_1` exists only to re-test the frozen A/B section and cannot be re-registered
+    after it opens, so a registration that omits the section, or takes the primary role, is
+    refused rather than spending the one forward window on G-0 alone."""
+    with pytest.raises(p7_reading.ReadingError, match="ab_tests"):
+        p7_reading._registration_of(forward_body(ab_tests=None))
+
+    primary = forward_body(ab_tests=p7_reading.adopted_ab_tests(window=FORWARD.name))
+    primary["role"] = "primary"
+    with pytest.raises(p7_reading.ReadingError, match="secondary"):
+        p7_reading._registration_of(primary)
+
+
 def test_a_forward_registration_at_or_after_the_first_session_open_is_refused(
     tmp_path: Path,
 ) -> None:

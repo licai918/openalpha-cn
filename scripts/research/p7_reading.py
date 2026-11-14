@@ -1223,6 +1223,11 @@ def _registration_of(body: Mapping[str, Any]) -> _Registration:
     role = body["role"]
     if role not in get_args(Role):
         raise ReadingError(f"the role {role!r} is not 'primary' or 'secondary'")
+    if window.name == FORWARD_AB_1.name and role != "secondary":
+        raise ReadingError(
+            f"a {FORWARD_AB_1.name} reading is secondary: it re-tests the frozen A/B section and "
+            "decides nothing, so it carries no stop rule"
+        )
     form = body["stop_rule"]
     if role == "secondary" and form is not None:
         raise ReadingError("a secondary reading carries no stop rule; it decides nothing")
@@ -1238,6 +1243,11 @@ def _registration_of(body: Mapping[str, Any]) -> _Registration:
     ab_tests = (
         None if body.get("ab_tests") is None else _ab_tests_of(body["ab_tests"], settings, window)
     )
+    if ab_tests is None and window.name == FORWARD_AB_1.name:
+        raise ReadingError(
+            f"a {FORWARD_AB_1.name} registration needs its ab_tests section: the window exists "
+            "only to re-test it and cannot be registered again once its first session opens"
+        )
     if ab_tests is not None and issue not in ab_tests.issues:
         raise ReadingError(
             f"the ab_tests issues {list(ab_tests.issues)} do not name the registration's issue "
