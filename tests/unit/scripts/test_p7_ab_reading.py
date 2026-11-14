@@ -13,17 +13,21 @@ read or written.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
+from panel_fixtures import (
+    _arrayed_rows,
+)
 from panel_fixtures import (
     _batch as batch,
 )
@@ -39,10 +43,13 @@ from strategy_fixtures import (
     PROBE_TRANSFORM,
     TWO_YEAR_BUILDS_FROM,
     TWO_YEAR_LAST,
+    _two_year_build,
+    _two_year_panel,
+    _write_by_year,
     daily_requirement,
-    write_two_year_corpus,
 )
 
+from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.name_history import (
     NAME_ANNOUNCEMENT_COLUMN,
     NAME_COLUMN,
@@ -52,10 +59,18 @@ from openalpha_cn.domain.name_history import (
     NameRecord,
 )
 from openalpha_cn.domain.panel_batch import PanelColumn
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig
 from openalpha_cn.panel.store import PanelStore
-from openalpha_cn.panel_factors import FACTOR_DEFINITIONS, compute_factor, write_factor_panels
+from openalpha_cn.panel_factors import (
+    FACTOR_DEFINITIONS,
+    apply_factor_transform,
+    compute_factor,
+    write_factor_panels,
+    write_processed_factor_panels,
+)
 from openalpha_cn.panel_ingest import (
+    load_trading_calendar,
     session_publication_instant,
     split_panel_batch_by_year,
     write_name_history,
@@ -340,9 +355,10 @@ def test_every_outcome_is_reachable_and_the_family_is_the_measured_tests() -> No
     assert set(block["family"]) == {p7_reading.VETO_TEST_ID, MOMENTUM, "reversal_1d/v1"}
 
 
-def test_a_not_measurable_test_stays_out_of_the_bh_family() -> None:
-    """Below 60 vetoed observations the A test is `not_measurable`: no p-value, not in the
-    family, and the family size the output states is the measured count."""
+def test_a_not_measurable_test_is_withheld_but_stays_in_the_declared_family() -> None:
+    """R-R1's family is all three registered tests: below 60 vetoed observations the A test has
+    no p-value and no verdict, but it stays in `m`, so `m` never falls to a data-dependent count.
+    The B tests' q-values are therefore computed at m = 3, not at the two measured tests."""
     block = evaluated(vetoed_observations=59)
 
     a_test = block["tests"][0]
@@ -350,11 +366,60 @@ def test_a_not_measurable_test_stays_out_of_the_bh_family() -> None:
     assert a_test["p_one_sided"] is None and a_test["p_adjusted"] is None
     assert a_test["vetoed_observations"] == 59
     assert "60" in (a_test["reason"] or "")
-    assert block["family_size"] == 2
+    assert block["family_size"] == 3 == len(block["tests"])
+    assert block["withheld"] == [p7_reading.VETO_TEST_ID]
     assert p7_reading.VETO_TEST_ID not in block["family"]
-    assert {
-        item["id"] for item in block["tests"] if item["outcome"] != p7_reading.AB_NOT_MEASURABLE
-    } == set(block["family"])
+    assert set(block["family"]) == {MOMENTUM, "reversal_1d/v1"}
+    by_id = {item["id"]: item for item in block["tests"]}
+    assert by_id[MOMENTUM]["bh_rank"] == 1
+    assert by_id[MOMENTUM]["p_adjusted"] == pytest.approx(3 * by_id[MOMENTUM]["p_one_sided"])
+    assert by_id["reversal_1d/v1"]["p_adjusted"] == pytest.approx(
+        3 * by_id["reversal_1d/v1"]["p_one_sided"] / 2
+    )
+
+
+def test_two_b_tests_at_just_under_five_percent_lose_to_the_three_test_family() -> None:
+    """The denominator decision, made concrete: with A withheld, two exact one-sided p-values of
+    3/64 and 6/64 are rejected by BH against a family of two and *not* rejected against the
+    declared family of three (their lines are 0.0333 and 0.0667), and their q-values are the
+    m = 3 ones. A two-test family would have made both candidates, which the ruling forbids."""
+    from openalpha_cn.backtest.multiple_testing import (
+        HypothesisTest,
+        MultipleTestingRequest,
+        control_false_discovery_rate,
+    )
+
+    block = evaluated(
+        values={
+            p7_reading.VETO_TEST_ID: (-0.01, -0.02, -0.03, -0.04, -0.05, -0.06),
+            MOMENTUM: (2.0, 3.0, 1.0, 2.0, -1.0, 2.0),
+            "reversal_1d/v1": (2.0, 1.0, 2.0, 3.0, 0.0, -1.0),
+        },
+        vetoed_observations=59,
+    )
+    by_id = {item["id"]: item for item in block["tests"]}
+    assert by_id[MOMENTUM]["p_one_sided"] == 0.046875
+    assert by_id["reversal_1d/v1"]["p_one_sided"] == 0.09375
+    assert block["family_size"] == 3
+    assert block["withheld"] == [p7_reading.VETO_TEST_ID]
+    assert {by_id[MOMENTUM]["outcome"], by_id["reversal_1d/v1"]["outcome"]} == {
+        p7_reading.AB_NO_EVIDENCE
+    }
+    assert by_id[MOMENTUM]["p_adjusted"] == pytest.approx(0.140625)
+    assert by_id["reversal_1d/v1"]["p_adjusted"] == pytest.approx(0.140625)
+
+    two_test = control_false_discovery_rate(
+        MultipleTestingRequest(
+            tests=(
+                HypothesisTest(hypothesis_id=MOMENTUM, p_value=0.046875, test="t"),
+                HypothesisTest(hypothesis_id="reversal_1d/v1", p_value=0.09375, test="t"),
+            ),
+            family_size=2,
+            false_discovery_rate=0.10,
+            dependence="independent-or-positively-dependent",
+        )
+    )
+    assert all(verdict.rejected for verdict in two_test.verdicts)
 
 
 def test_the_sixty_observation_floor_is_the_registered_bound() -> None:
@@ -380,6 +445,7 @@ def test_the_p_values_are_the_gn0_engines_own_and_family_size_is_not_page_counti
     from openalpha_cn.backtest.outcome_statistics import sign_flip_test
 
     block = evaluated()
+    built = spec()
     by_id = {item["id"]: item for item in block["tests"]}
 
     expected = sign_flip_test(
@@ -402,7 +468,7 @@ def test_the_p_values_are_the_gn0_engines_own_and_family_size_is_not_page_counti
     report = control_false_discovery_rate(
         MultipleTestingRequest(
             tests=family,
-            family_size=len(family),
+            family_size=len(built.entries),
             false_discovery_rate=0.10,
             dependence=p7_reading.AB_DEPENDENCE,
         )
@@ -464,8 +530,9 @@ def test_a_test_with_one_measured_period_is_not_measurable() -> None:
 
     assert block["tests"][1]["outcome"] == p7_reading.AB_NOT_MEASURABLE
     assert block["tests"][1]["measured_periods"] == 1
-    assert block["family_size"] == 1
+    assert block["family_size"] == 2
     assert block["family"] == [p7_reading.VETO_TEST_ID]
+    assert block["withheld"] == [MOMENTUM]
 
 
 def test_the_series_must_be_the_registered_tests_in_order() -> None:
@@ -659,7 +726,9 @@ def test_a_reading_with_the_ab_section_writes_its_family_and_wording_once(repo: 
     assert text.count("  test ") == 3
     assert "exploratory candidate" in text
     assert "exploratory candidate" in json.dumps(result["ab_tests"])
-    assert "family size 3" in text
+    assert "declared family size 3" in text
+    assert "decides no stop rule" in text
+    assert "exploratory candidates only" in text
     for line in (line for line in text.splitlines() if line.startswith("  test ")):
         assert "exploratory candidate" in line
     assert "confirmed" not in text.lower()
@@ -675,23 +744,45 @@ def test_a_reading_with_the_ab_section_has_one_read(repo: Path) -> None:
         run_read(registration, repo, StubMeasure(), hours=2)
 
 
-def test_a_document_without_or_with_a_changed_ab_block_is_refused(repo: Path) -> None:
-    """The measure is not trusted blindly: the block must be this registration's, and a refusal
-    writes no result while the claim stays spent."""
+@pytest.mark.parametrize(
+    "changes",
+    [
+        None,
+        {"false_discovery_rate": 0.5},
+        {"minimum_vetoed_observations": 1},
+    ],
+    ids=["missing-block", "changed-rate", "changed-floor"],
+)
+def test_a_document_whose_ab_block_is_not_the_registrations_is_recorded_as_refused(
+    repo: Path, changes: dict[str, Any] | None
+) -> None:
+    """The measure is not trusted blindly, but a mismatch may not discard the measured G-0
+    document: the G-0 part is written and the A/B part is recorded as refused (every test
+    `not_measurable`), with the claim spent as usual."""
     registration = register_ab(repo)
-    for document in (
-        {"kind": p7_diagnostics.READ_ONCE_KIND, "summary": {}},
-        ab_document(false_discovery_rate=0.5),
-        ab_document(minimum_vetoed_observations=1),
-    ):
-        with pytest.raises(p7_reading.ReadingConfigurationError):
-            run_read(registration, repo, StubMeasure(document))
-        assert not registration.with_name("v2-p7-027-028-second-use.result.json").exists()
-        assert registration.with_name("v2-p7-027-028-second-use.claim.json").exists()
-        # Remove the claim the refused read wrote, so the next case can try: what this test
-        # checks is the refusal, not the window rule, and the real read has one read only.
-        registration.with_name("v2-p7-027-028-second-use.claim.json").unlink()
-        registration.with_name("second_use.window-claim.json").unlink()
+    summary = {"composite": {"h2": {"read": 1}}}
+    document = {"kind": p7_diagnostics.READ_ONCE_KIND, "summary": summary}
+    if changes is not None:
+        document["ab_tests"] = ab_document(**changes)
+
+    result = run_read(registration, repo, StubMeasure(document))
+
+    assert result["summary"] == summary
+    block = result["ab_tests"]
+    assert block["family_size"] == 3
+    assert block["family"] == []
+    assert block["withheld"] == [
+        p7_reading.VETO_TEST_ID,
+        MOMENTUM,
+        "reversal_1d/v1",
+    ]
+    assert all(item["outcome"] == p7_reading.AB_NOT_MEASURABLE for item in block["tests"])
+    for item in block["tests"]:
+        assert item["reason"].startswith("measurement refused: ReadingConfigurationError:")
+    assert registration.with_name("v2-p7-027-028-second-use.result.json").exists()
+    text = registration.with_name("v2-p7-027-028-second-use.result.txt").read_text(encoding="utf-8")
+    assert text.count("  test ") == 3
+    assert "not_measurable (measurement refused:" in text
 
 
 def test_a_registration_without_the_ab_section_is_read_as_before(repo: Path) -> None:
@@ -752,11 +843,11 @@ def weekday_calendar(first: date, last: date) -> Any:
     )
 
 
-def an_event(session: date, *, kind: str = "broken_board") -> Any:
+def an_event(session: date, *, kind: str = "broken_board", code: str = "600000.SH") -> Any:
     from openalpha_cn.domain.limit_events import LimitEvent
 
     return LimitEvent(
-        ts_code="600000.SH",
+        ts_code=code,
         trade_date=session,
         kind=kind,
         board_count=1,
@@ -860,18 +951,90 @@ class _Transforms:
         return PROBE_TRANSFORM if key == PROBE_TRANSFORM.qualified_key else self.shipped.get(key)
 
 
-@pytest.fixture(scope="module")
-def corpus(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Any]:
-    """The two-year corpus, a 2027 name change, and raw `momentum_20_sessions/v1` builds on
-    every session the reading's window measures (the shipped evaluator, so the values are real
-    20-session momentum, not a stand-in number)."""
-    root = tmp_path_factory.mktemp("ab-reading")
-    panel = write_two_year_corpus(
-        root,
-        builds_from=TWO_YEAR_BUILDS_FROM,
-        processed={PROBE_TRANSFORM: TWO_YEAR_LAST},
+SCRIPTED_LIMIT_DAY: Final = date(2026, 12, 31)
+"""The last 2026 session, inside `READING_WINDOW`'s five-session lookback (2026-12-28..31 and
+2027-01-04): the veto's window must cross the year, and `limit_events_on` must load the prior
+year's calendar and prices for its streak walk."""
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class GeneratedCorpus:
+    """A two-year generated panel with scripted limit events, and what the script put where."""
+
+    root: Path
+    panel: Any
+    scripted_day: date
+    scripted_codes: tuple[str, ...]
+    """The securities whose bars and bands were scripted into one broken board on
+    `scripted_day` -- a hand-derivable veto set, from the real `limit_events_on`."""
+
+
+def _scripted_limit_panel(panel: Any) -> tuple[Any, tuple[str, ...]]:
+    """`panel` with a broken board scripted for seven securities on `SCRIPTED_LIMIT_DAY`.
+
+    Each security's bar keeps its generated close/open (so the price chain and every other
+    dataset's value are unchanged) and gets its high raised to the band; the band is set to
+    `pre_close * 1.1` and `pre_close * 0.9`. A bar that touches the up band intraday and closes
+    below it is `broken_board`, the event the veto's weight table reads as bearish.
+    """
+    daily = panel.batch(DAILY_DATASET)
+    limits = panel.batch(PRICE_LIMIT_DATASET)
+    dates = next(
+        tuple(str(value) for value in column.values)
+        for column in daily.columns
+        if column.name == "trade_date"
     )
+    index_of = {
+        (subject, day): index
+        for index, (subject, day) in enumerate(zip(daily.subjects, dates, strict=True))
+    }
+    pre_closes = next(column.values for column in daily.columns if column.name == "pre_close")
+    bar_overrides: dict[tuple[str, str], dict[str, object]] = {}
+    band_overrides: dict[tuple[str, str], dict[str, object]] = {}
+    codes: list[str] = []
+    for code in panel.securities[1:7]:
+        index = index_of.get((code, SCRIPTED_LIMIT_DAY.isoformat()))
+        if index is None:
+            continue
+        pre_close = float(pre_closes[index])
+        up = round(pre_close * 1.1, 2)
+        bar_overrides[(code, SCRIPTED_LIMIT_DAY.isoformat())] = {"high": up}
+        band_overrides[(code, SCRIPTED_LIMIT_DAY.isoformat())] = {
+            "up_limit": up,
+            "down_limit": round(pre_close * 0.9, 2),
+        }
+        codes.append(code)
+    batches = dict(panel.batches)
+    batches[DAILY_DATASET] = _arrayed_rows(daily, date_column="trade_date", overrides=bar_overrides)
+    batches[PRICE_LIMIT_DATASET] = _arrayed_rows(
+        limits, date_column="trade_date", overrides=band_overrides
+    )
+    return dataclasses.replace(panel, batches=batches), tuple(codes)
+
+
+@pytest.fixture(scope="module")
+def corpus(tmp_path_factory: pytest.TempPathFactory) -> GeneratedCorpus:
+    """The two-year corpus (built by hand so a limit streak can be scripted into it), a 2027 name
+    change, and raw `momentum_20_sessions/v1` builds on every session the reading's window
+    measures (the shipped evaluator, so the values are real 20-session momentum)."""
+    root = tmp_path_factory.mktemp("ab-reading")
+    panel, scripted_codes = _scripted_limit_panel(_two_year_panel())
     store = PanelStore(root / "panel")
+    _write_by_year(store, panel)
+    raws = [
+        _two_year_build(store, panel, session)
+        for session in panel.sessions
+        if session >= TWO_YEAR_BUILDS_FROM
+    ]
+    write_factor_panels(store, raws)
+    write_processed_factor_panels(
+        store,
+        [
+            apply_factor_transform(raw, PROBE_TRANSFORM, code_commit=COMMIT, built_at=raw.built_at)
+            for raw in raws
+            if raw.as_of.astimezone(SHANGHAI).date() <= TWO_YEAR_LAST
+        ],
+    )
     for _year, part in split_panel_batch_by_year(namechange_batch(panel.name_records)):
         write_name_history(store, part)
     announced = midnight_shanghai(RENAMED.announced_on)
@@ -920,7 +1083,12 @@ def corpus(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Any]:
             )
         )
     write_factor_panels(store, builds)
-    return root, panel
+    return GeneratedCorpus(
+        root=root,
+        panel=panel,
+        scripted_day=SCRIPTED_LIMIT_DAY,
+        scripted_codes=scripted_codes,
+    )
 
 
 def reading_body(panel: Any, *, changes: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -967,9 +1135,9 @@ def reading_body(panel: Any, *, changes: Mapping[str, Any] | None = None) -> dic
 
 
 def test_the_merged_read_measures_the_three_tests_and_keeps_gn0s_diagnostics(
-    corpus: tuple[Path, Any], monkeypatch: pytest.MonkeyPatch
+    corpus: GeneratedCorpus, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root, panel = corpus
+    root, panel = corpus.root, corpus.panel
     monkeypatch.setattr(p7_reading, "EXCHANGE", "SZSE")
     monkeypatch.setattr(p7_reading, "FACTOR_TRANSFORMS", _Transforms(p7_reading.FACTOR_TRANSFORMS))
     vetoed = tuple(panel.securities[::2])
@@ -1023,8 +1191,13 @@ def test_the_merged_read_measures_the_three_tests_and_keeps_gn0s_diagnostics(
     ]
     assert {item["outcome"] for item in block["tests"]} <= set(p7_reading.AB_OUTCOMES)
     measured = [item for item in block["tests"] if item["outcome"] != p7_reading.AB_NOT_MEASURABLE]
-    assert block["family_size"] == len(measured)
-    assert block["family"] == [item["id"] for item in measured]
+    assert block["family_size"] == len(block["tests"]) == 3
+    assert block["family"] == [
+        item["id"] for item in sorted(measured, key=lambda item: item["bh_rank"])
+    ]
+    assert block["withheld"] == [
+        item["id"] for item in block["tests"] if item["outcome"] == p7_reading.AB_NOT_MEASURABLE
+    ]
     assert "exploratory candidate" in block["wording"]
     veto_test = block["tests"][0]
     assert veto_test["vetoed_observations"] > 0
@@ -1150,3 +1323,364 @@ def test_the_committed_v2_p7_024_result_text_is_reproduced_byte_for_byte() -> No
 
     assert ("\n".join(p7_reading.reading_lines(result, body)) + "\n") == text
     assert "ab tests" not in text
+
+
+# --- the measured values: orientation, the build chosen, the floor's count, the sample -----------
+#
+# These use `_measure_ab_tests` with hand-built captured sources, so each number is computed by
+# hand in the test and a mutant that changes one of them turns red.
+
+
+def _captured(
+    days: Sequence[date],
+    survivors: Sequence[str],
+    labels: Mapping[tuple[date, str], float],
+    *,
+    horizon: int,
+) -> Any:
+    captured = p7_reading._Captured()
+    for day in days:
+        captured.scores[day] = tuple((code, 0.0) for code in survivors)
+    for (day, code), value in labels.items():
+        captured.labels[(horizon, day, code)] = value
+    return captured
+
+
+def _plan(days: Sequence[date], *, horizon: int, stride: int) -> Any:
+    return p7_windows.SignalPlan(
+        window=SECOND_USE,
+        first=days[0],
+        last=days[-1],
+        stride=stride,
+        horizons=(horizon,),
+        sessions=tuple(days),
+        embargoed=(),
+    )
+
+
+def _section(*, horizon: int, stride: int, factors: Sequence[dict[str, str]]) -> dict[str, Any]:
+    return ab_form(horizon=horizon, stride=stride, factor_tests=list(factors))
+
+
+class _FactorValues:
+    """A `_FactorReads` stand-in: one session's raw factor values by code."""
+
+    def __init__(self, values: Mapping[date, Mapping[str, float]]) -> None:
+        self._values = values
+
+    def values_on(self, definition: Any, day: date) -> Mapping[str, float]:
+        return self._values.get(day, {})
+
+
+def _measure(
+    *,
+    days: Sequence[date],
+    survivors: Sequence[str],
+    labels: Mapping[tuple[date, str], float],
+    factor_values: Mapping[date, Mapping[str, float]],
+    vetoed: Mapping[date, Sequence[str]],
+    spec_changes: Mapping[str, Any],
+    horizon: int = 1,
+    stride: int = 1,
+) -> dict[str, Any]:
+    built = p7_reading._ab_tests_of(
+        _section(
+            horizon=horizon,
+            stride=stride,
+            factors=spec_changes["factor_tests"],
+        ),
+        settings(horizon=horizon, stride=stride),
+        SECOND_USE,
+    )
+    calendar = weekday_calendar(date(2023, 12, 1), date(2024, 3, 1))
+
+    def events_for(session: date) -> tuple[Any, ...]:
+        return tuple(an_event(session, code=code) for code in vetoed.get(session, ()))
+
+    return p7_reading._measure_ab_tests(
+        calendar=calendar,
+        plan=_plan(days, horizon=horizon, stride=stride),
+        settings=settings(horizon=horizon, stride=stride),
+        captured=_captured(days, survivors, labels, horizon=horizon),
+        spec=built,
+        events_for=events_for,
+        factor_reads=_FactorValues(factor_values),
+    )
+
+
+def test_the_oriented_rank_ic_is_negative_when_a_lower_is_better_factor_rises_with_returns() -> (
+    None
+):
+    """The measure orients by the declared direction: a `lower_is_better` factor whose raw value
+    rises with the return has a negative oriented rank IC. (A mutant that drops the sign would
+    read +1 here.)"""
+    days = (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4))
+    codes = ("600000.SH", "600001.SH", "600002.SH")
+    returns = dict(zip(codes, (0.01, 0.02, 0.03), strict=True))
+    labels = {(day, code): value for day in days for code, value in returns.items()}
+    factor_values = {day: dict(returns) for day in days}
+    block = _measure(
+        days=days,
+        survivors=codes,
+        labels=labels,
+        factor_values=factor_values,
+        vetoed={},
+        spec_changes={
+            "factor_tests": [{"factor": "reversal_1d/v1", "direction": "lower_is_better"}]
+        },
+    )
+
+    factor_test = block["tests"][1]
+    assert factor_test["id"] == "reversal_1d/v1"
+    assert factor_test["measured_periods"] == len(days)
+    assert factor_test["mean"] == pytest.approx(-1.0)
+
+
+def test_plan_a_difference_is_hand_computed_and_counts_only_labelled_vetoed_survivors() -> None:
+    """One session's hand computation: survivors A/B/C are labelled and D is not; the veto names
+    A (a labelled survivor), D (an unlabelled survivor) and E (not a survivor). The difference is
+    mean(A) - mean(A, B, C) = 0.10 - 0.20 = -0.10, and the floor counts A only -- once per
+    session, not the three names the veto returned."""
+    day = date(2024, 1, 2)
+    survivors = ("600000.SH", "600001.SH", "600002.SH", "600003.SH")
+    labels = {
+        (day, "600000.SH"): 0.10,
+        (day, "600001.SH"): 0.20,
+        (day, "600002.SH"): 0.30,
+    }
+    block = _measure(
+        days=(day,),
+        survivors=survivors,
+        labels=labels,
+        factor_values={},
+        vetoed={day: ("600000.SH", "600003.SH", "600099.SH")},
+        spec_changes={"factor_tests": [{"factor": MOMENTUM, "direction": "higher_is_better"}]},
+    )
+
+    veto_test = block["tests"][0]
+    assert veto_test["mean"] == pytest.approx(-0.10)
+    assert veto_test["measured_periods"] == 1
+    assert veto_test["vetoed_observations"] == 1
+    assert veto_test["outcome"] == p7_reading.AB_NOT_MEASURABLE
+
+
+def test_the_measured_sample_is_the_non_overlapping_one_not_every_plan_session() -> None:
+    """`sampled_sessions` skips `ceil(horizon / stride)`-th sessions: with stride 1 and h2, six
+    plan sessions are a three-period sample. A mutant that measured every plan session would read
+    six."""
+    days = tuple(date(2024, 1, 2) + timedelta(days=offset) for offset in range(6))
+    codes = ("600000.SH", "600001.SH")
+    labels = {
+        (day, code): 0.01 + 0.01 * index + 0.001 * position
+        for index, day in enumerate(days)
+        for position, code in enumerate(codes)
+    }
+    factor_values = {
+        day: {codes[0]: float(index), codes[1]: float(index) + 1.0}
+        for index, day in enumerate(days)
+    }
+    block = _measure(
+        days=days,
+        survivors=codes,
+        labels=labels,
+        factor_values=factor_values,
+        vetoed={},
+        spec_changes={"factor_tests": [{"factor": MOMENTUM, "direction": "higher_is_better"}]},
+        horizon=2,
+        stride=1,
+    )
+
+    factor_test = block["tests"][1]
+    assert factor_test["sampled_sessions"] == 3
+    assert factor_test["measured_periods"] == 3
+
+
+def test_the_factor_read_chooses_the_1630_build_and_skips_non_finite_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The point-in-time build choice: of three builds stamped on one session's date, the 16:30
+    one is used (not the 15:00 before the close, not the 21:00 after it), the next session's own
+    build is used for the next session, and a non-finite value is not a cross-section member."""
+    definition = FACTOR_DEFINITIONS.get("momentum_20_sessions/v1")
+    day = date(2026, 1, 5)
+    next_day = date(2026, 1, 6)
+    published = session_publication_instant(day)
+
+    def row(subject: str, when: datetime, value: float) -> Any:
+        return SimpleNamespace(coverage="computed", value=value, as_of=when, subject=subject)
+
+    rows = (
+        row("600000.SH", datetime.combine(day, time(15, 0), tzinfo=SHANGHAI), 1.0),
+        row("600000.SH", published, 2.0),
+        row("600000.SH", datetime.combine(day, time(21, 0), tzinfo=SHANGHAI), 3.0),
+        row("600001.SH", published, float("inf")),
+        row("600000.SH", session_publication_instant(next_day), 4.0),
+    )
+    monkeypatch.setattr(p7_reading, "load_factor_observations", lambda *args, **kwargs: rows)
+    reads = p7_reading._FactorReads(object(), as_of=datetime(2026, 2, 1, tzinfo=UTC))  # type: ignore[arg-type]
+
+    assert reads.values_on(definition, day) == {"600000.SH": 2.0}
+    assert reads.values_on(definition, next_day) == {"600000.SH": 4.0}
+
+
+# --- the schema's own shape and the preflight's extra year --------------------------------------
+
+
+def test_the_a_b_schema_is_the_second_use_read() -> None:
+    """`p7-ab-tests/v1` is R-R1's second_use read; a hand-written section on the validation window
+    is refused even when the section's own window agrees with the registration's."""
+    validation = p7_windows.WINDOWS["validation"]
+    with pytest.raises(p7_reading.ReadingError, match="second_use"):
+        p7_reading._ab_tests_of(ab_form(window=validation.name), settings(), validation)
+
+
+def test_the_test_ids_refuse_a_body_whose_veto_rule_is_not_the_schemas() -> None:
+    with pytest.raises(p7_reading.ReadingError, match="market_bearish"):
+        p7_reading.ab_test_ids(
+            {**ab_form(), "veto": {"rule": "market_bullish_5/v1", "lookback_sessions": 5}}
+        )
+
+
+class _YearStore:
+    """A catalogue stand-in: which years each dataset lists."""
+
+    def __init__(self, held: Mapping[str, Sequence[int]], *, default: Sequence[int]) -> None:
+        self.held = held
+        self.default = tuple(default)
+
+    def registered_years(self, dataset: str) -> tuple[int, ...]:
+        return tuple(self.held.get(dataset, self.default))
+
+
+def test_the_a_b_preflight_asks_stk_limit_for_the_year_before() -> None:
+    """The veto's five-session window for 2024-01-02 reads `stk_limit` on 2023-12-26..29, so a
+    missing 2023 partition must be named before the claim. Without the A/B section `stk_limit` is
+    still a signal-day-only dataset and the year before is not asked of it."""
+    store = _YearStore({PRICE_LIMIT_DATASET: (2024, 2025, 2026)}, default=range(2023, 2027))
+
+    with_year_before = p7_reading.preflight_problems(
+        store,
+        window=SECOND_USE,
+        datasets=(PRICE_LIMIT_DATASET,),
+        year_before=(PRICE_LIMIT_DATASET,),
+    )
+    assert (
+        with_year_before and "stk_limit" in with_year_before[0] and "[2023]" in with_year_before[0]
+    )
+    assert (
+        p7_reading.preflight_problems(store, window=SECOND_USE, datasets=(PRICE_LIMIT_DATASET,))
+        == ()
+    )
+
+
+def test_the_a_b_preflight_names_the_missing_year_before_through_the_default_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same rule through `_panel_preflight`: the registration with the section is refused
+    before the claim, naming `stk_limit` for 2023, while the same registration without the section
+    is not."""
+    runtime = tmp_path / "runtime"
+    panel = runtime / "panel"
+    panel.mkdir(parents=True)
+    (panel / p7_reading.CATALOG_FILE).write_text("", encoding="utf-8")
+    store = _YearStore({PRICE_LIMIT_DATASET: (2024, 2025, 2026)}, default=range(2023, 2027))
+    monkeypatch.setattr(p7_reading, "capped_panel_store", lambda runtime_dir, window: store)
+    with_section = second_use_body(ab_tests=ab_form())
+    without_section = second_use_body()
+
+    problems = p7_reading._panel_preflight(runtime, SECOND_USE)(with_section)
+
+    assert any("stk_limit" in problem and "[2023]" in problem for problem in problems), problems
+    assert not any(
+        "stk_limit" in problem
+        for problem in p7_reading._panel_preflight(runtime, SECOND_USE)(without_section)
+    )
+
+
+def test_the_preflight_datasets_include_each_ab_factors_raw_observations() -> None:
+    """The A/B section's factors are read through `load_factor_observations`, so their raw
+    observation datasets are part of what the preflight lists."""
+    built = spec()
+    datasets = p7_reading._preflight_datasets(SurvivorBookConfig(seed=0), built)
+
+    assert "factor_obs_momentum_20_sessions_v1" in datasets
+    assert "factor_obs_reversal_1d_v1" in datasets
+
+
+# --- refusals in the A/B section may not cost G-0 its document -----------------------------------
+
+
+def test_a_refused_ab_measurement_still_writes_the_gn0_document(
+    corpus: GeneratedCorpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-session limit-events read that raises must not take the measured G-0 document down
+    with it: the result is the G-0 diagnostics plus a refused A/B block, and the refusal's reason
+    is redacted (a spent result file is not a channel for the store's location or a credential)."""
+    root, panel = corpus.root, corpus.panel
+    monkeypatch.setattr(p7_reading, "EXCHANGE", "SZSE")
+    monkeypatch.setattr(p7_reading, "FACTOR_TRANSFORMS", _Transforms(p7_reading.FACTOR_TRANSFORMS))
+
+    def refusing(*args: object, **kwargs: object) -> tuple[Any, ...]:
+        raise RuntimeError(
+            "cannot read /Users/someone/openalpha-research/panel/catalog.duckdb token=abcd1234"
+        )
+
+    monkeypatch.setattr(p7_reading, "limit_events_on", refusing)
+    binding = {
+        "reading": "v2-p7-027-028-second-use",
+        "registration_sha256": "a" * 64,
+        "registration_commit": "b" * 40,
+        "claim_sha256": "c" * 64,
+    }
+    body = reading_body(panel)
+
+    document = p7_reading._panel_measure(root)(body, READING_WINDOW, binding)
+
+    assert document["kind"] == p7_diagnostics.READ_ONCE_KIND
+    assert document["binding"] == binding
+    assert document["summary"]["composite"]["h2"]["read"] > 0
+    block = document["ab_tests"]
+    assert block["family_size"] == 3
+    assert block["family"] == []
+    assert block["withheld"] == [p7_reading.VETO_TEST_ID, *p7_reading.ab_test_ids(ab_form())[1:]]
+    assert all(item["outcome"] == p7_reading.AB_NOT_MEASURABLE for item in block["tests"])
+    for item in block["tests"]:
+        reason = item["reason"]
+        assert reason.startswith(
+            "measurement refused: RuntimeError: cannot read <path> token=<redacted>"
+        )
+        assert "/Users/someone" not in reason and "abcd1234" not in reason
+    registered = p7_reading._ab_tests_of(
+        body["ab_tests"], settings(horizon=2, stride=2), READING_WINDOW
+    )
+    assert p7_reading._require_ab_result(registered, document) == block
+
+
+def test_the_real_limit_event_read_gives_the_hand_computed_veto_set(
+    corpus: GeneratedCorpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1's end-to-end point, with the **real** `limit_events_on` (no stand-in): the corpus has
+    one scripted broken board per scripted security on 2026-12-31, the last session of the year
+    before the reading's first signal day. `_vetoed_on(2027-01-04)` reads that day and its four
+    predecessors across the year boundary, and the hand-computed answer is exactly the scripted
+    set: one -0.65 event each, mean -0.65 < -0.15."""
+    root, panel = corpus.root, corpus.panel
+    monkeypatch.setattr(p7_reading, "EXCHANGE", "SZSE")
+    store = p7_windows.capped_panel_store(root, READING_WINDOW)
+    reader = p7_reading._limit_events_reader(store)
+
+    events = reader(corpus.scripted_day)
+
+    assert corpus.scripted_codes, "the corpus script put no security on the session"
+    assert {event.ts_code for event in events} == set(corpus.scripted_codes)
+    assert {event.kind for event in events} == {"broken_board"}
+    calendar = load_trading_calendar(store, exchange="SZSE", years=(2026, 2027), as_of=panel.as_of)
+
+    assert p7_reading._vetoed_on(
+        READING_WINDOW.first, calendar=calendar, events_for=reader, lookback=5
+    ) == frozenset(corpus.scripted_codes)
+    # Five sessions after the scripted day the event is out of the window and nothing is vetoed.
+    later = date(2027, 1, 11)
+    assert p7_reading._vetoed_on(later, calendar=calendar, events_for=reader, lookback=5) == (
+        frozenset()
+    )

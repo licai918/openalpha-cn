@@ -150,17 +150,26 @@ two-sided p is `outcome_statistics.sign_flip_test`; the one-sided reading is
 `grid.one_sided_p_value` in the registered direction; the mean, sd and t are
 `decile_readout.summarize_series`. The measured tests face Benjamini-Hochberg
 (`control_false_discovery_rate`, declared as independent-or-positively-dependent) at the
-registered rate and with the registered family -- the tests that produced a p-value; a test below
-the observation floor or the p-value's minimum sample is `not_measurable`, stays out of the
-family, and says so. Each test's outcome is one of `candidate`, `no_evidence` or
-`not_measurable`; the result's text prints one line per test, each carrying the exploratory
-candidate wording, and the family line states the family size.
+registered rate and with the **declared family of all three registered tests** (R-R1's literal
+"across all three", and the controller's fix-round ruling): a test below the observation floor or
+the p-value's minimum sample is `not_measurable`, is withheld from the reported verdicts -- it is
+not a hypothesis whose q was large -- but it stays in the family denominator, so `m` never falls
+to a data-dependent count. Not shrinking the family is the conservative reading. Each test's
+outcome is one of `candidate`, `no_evidence` or `not_measurable`; the result's text prints one
+line per test, each carrying the exploratory candidate wording, and the family line states the
+declared family size, the reported count and the withheld count.
 
-The document's `ab_tests` block is held to the registration again before the result is written
-(`_require_ab_result`): frozen values, outcome categories, the p-value/rank/rejection of each
-measured test, the candidate rule, and the family and its size. A block that is not this
-registration's refuses the result, with the claim standing -- the same division `_measured` draws
-for the document's kind and binding.
+The A/B measurement is **isolated from the G-0 document** (`_measured_ab_tests`): the engine's
+readings are already measured when it runs, so any exception in the A/B section (a per-session
+limit-events read a restated row refuses, a factor manifest check, an empty plan, an empty
+cross-section) writes a refused block -- every test `not_measurable`, the declared family, no
+verdict, and a redacted `measurement refused: <Type>: <disclosable message>` reason -- while
+`result.json` and `result.txt` carry the full G-0 secondary diagnostics as usual. A refusal in
+the section may not cost the spent window the reading the claim was written for. The block is
+held to the registration again before the result is written (`_require_ab_result`): frozen
+values, outcome categories, the p-value/rank/rejection of each measured test, the candidate rule,
+and the declared family with its reported and withheld tests; a mismatched block is recorded as
+refused rather than discarding the measured G-0 document (`read_once`).
 
 What this does not establish:
 
@@ -496,6 +505,7 @@ _AB_RESULT_KEYS: Final = frozenset(
         "dependence",
         "family_size",
         "family",
+        "withheld",
         "wording",
         "tests",
     }
@@ -775,7 +785,10 @@ def ab_test_ids(form: Mapping[str, Any]) -> tuple[str, ...]:
     """The test ids an `ab_tests` body names, in registration order: A, then B's factors."""
     veto = form.get("veto")
     rule = veto.get("rule") if isinstance(veto, Mapping) else None
-    assert rule == VETO_RULE_ID, rule
+    if rule != VETO_RULE_ID:
+        raise ReadingError(
+            f"the ab_tests veto rule {rule!r} is not {VETO_RULE_ID!r}; no test ids to name"
+        )
     return (
         VETO_TEST_ID,
         *(str(item["factor"]) for item in form["factor_tests"] if isinstance(item, Mapping)),
@@ -799,6 +812,12 @@ def _ab_tests_of(form: object, settings: _Settings, window: DiagnosticWindow) ->
             f"the ab_tests section names the {name!r} window and the registration opens the "
             f"{window.name!r} window: the window is frozen at registration and a read cannot "
             "move it"
+        )
+    if window.name != WINDOWS["second_use"].name:
+        raise ReadingError(
+            f"{AB_TESTS_SCHEMA} is the second_use read: the A/B tests were ruled for the spent "
+            f"holdout window, not {window.name!r}; a hand-written section on another window is "
+            "not a shape this schema implements"
         )
     issues = section["issues"]
     if (
@@ -1560,18 +1579,27 @@ def evaluate_stop_rule(rule: StopRule, document: Mapping[str, Any]) -> dict[str,
 
 
 def preflight_problems(
-    store: PanelStore, *, window: DiagnosticWindow, datasets: Sequence[str]
+    store: PanelStore,
+    *,
+    window: DiagnosticWindow,
+    datasets: Sequence[str],
+    year_before: Sequence[str] = (),
 ) -> tuple[str, ...]:
     """Each dataset of `datasets` that lists no partition for a year the read opens of it, by name
     with the years it lacks; `()` when every one lists them all. The years are the window's, and
-    for a dataset of `YEAR_BEFORE_DATASETS` the year before it as well (the calendar, the label
-    reader over `label_years` and the facts day's history read it); `stk_limit` and the factor
-    datasets are read for signal days only, so a store whose factor builds begin with the window
-    is not refused for the year before. Only `registered_years` is asked: no partition is opened,
-    so a listed year may still be incomplete."""
+    for a dataset of `YEAR_BEFORE_DATASETS` -- plus `year_before`, the caller's extra reading of
+    the year before -- the year before it as well: the calendar, the label reader over
+    `label_years` and the facts day's history read it. With the A/B section, `stk_limit` joins
+    `year_before`: the veto's five-session window for the window's first signal day reaches into
+    the year before, so a missing `stk_limit` partition there is named before the claim instead of
+    met by the measurement after it. The factor datasets are read for signal days only, so a store
+    whose factor builds begin with the window is not refused for the year before. Only
+    `registered_years` is asked: no partition is opened, so a listed year may still be
+    incomplete."""
+    before = frozenset(YEAR_BEFORE_DATASETS) | frozenset(year_before)
     problems: list[str] = []
     for dataset in datasets:
-        first = window.first.year - (1 if dataset in YEAR_BEFORE_DATASETS else 0)
+        first = window.first.year - (1 if dataset in before else 0)
         years = range(first, window.ceiling_year + 1)
         held = set(store.registered_years(dataset))
         missing = [year for year in years if year not in held]
@@ -1632,6 +1660,7 @@ def _panel_preflight(
             store,
             window=window,
             datasets=_preflight_datasets(settings.explore.book, ab_tests),
+            year_before=(PRICE_LIMIT_DATASET,) if ab_tests is not None else (),
         )
         if problems:
             return problems
@@ -1745,8 +1774,10 @@ def evaluate_ab_tests(spec: AbTests, series: Sequence[AbTestSeries]) -> dict[str
     and its one-sided p is `grid.one_sided_p_value` read in the pre-registered direction. The
     measured tests face `control_false_discovery_rate` at the registered rate, with the family
     size every document in this repository stores: the number of tests that produced a p-value.
-    `not_measurable` tests stay out of the family -- they are not hypotheses whose q-value was
-    large -- and the block names the family size.
+    `not_measurable` tests stay out of the *reported verdicts* -- they are not hypotheses whose
+    q-value was large -- but they stay in the **declared family**, which R-R1 fixes at all three
+    tests (`len(spec.entries)`), so the family size never shrinks to a data-dependent count. The
+    block names the family size and lists the withheld tests.
 
     A test is `candidate` when the FDR procedure rejects it **and** the registered direction holds;
     a measured test that is not a candidate is `no_evidence`. A test is `not_measurable` when its
@@ -1807,9 +1838,15 @@ def evaluate_ab_tests(spec: AbTests, series: Sequence[AbTestSeries]) -> dict[str
             record["one_sided"] = grid.one_sided_p_value(randomised.p_value, observed)
         pending.append(record)
     measurable = [record for record in pending if record["reason"] is None]
+    withheld = [record["entry"].test_id for record in pending if record["reason"] is not None]
     verdicts: dict[str, Any] = {}
     family: list[str] = []
     if measurable:
+        # R-R1's family is **all three declared tests**, not the measured rows: the plan rules
+        # Benjamini-Hochberg "across all three", and `m` must not fall to a data-dependent count
+        # (the 60-observation floor and the period counts are data). The tests that produced no
+        # p-value are withheld from the reported verdicts -- they are not hypotheses whose q was
+        # large -- but they stay in the denominator, which is what `withheld_hypotheses` records.
         report = control_false_discovery_rate(
             MultipleTestingRequest(
                 tests=tuple(
@@ -1820,7 +1857,7 @@ def evaluate_ab_tests(spec: AbTests, series: Sequence[AbTestSeries]) -> dict[str
                     )
                     for record in measurable
                 ),
-                family_size=len(measurable),
+                family_size=len(entries),
                 false_discovery_rate=spec.false_discovery_rate,
                 dependence=AB_DEPENDENCE,
             )
@@ -1900,8 +1937,9 @@ def evaluate_ab_tests(spec: AbTests, series: Sequence[AbTestSeries]) -> dict[str
         "false_discovery_rate": spec.false_discovery_rate,
         "minimum_vetoed_observations": spec.veto.minimum_observations,
         "dependence": AB_DEPENDENCE,
-        "family_size": len(family),
+        "family_size": len(entries),
         "family": family,
+        "withheld": withheld,
         "wording": AB_BLOCK_WORDING,
         "tests": tests,
     }
@@ -1954,6 +1992,7 @@ def _require_ab_result(spec: AbTests, document: Mapping[str, Any]) -> dict[str, 
             f"test(s) and the registration {len(spec.entries)}"
         )
     measured_ids: list[str] = []
+    withheld: list[str] = []
     ranks: dict[str, int] = {}
     for entry, raw in zip(spec.entries, tests, strict=True):
         try:
@@ -2021,6 +2060,7 @@ def _require_ab_result(spec: AbTests, document: Mapping[str, Any]) -> dict[str, 
                     f"the measure's ab_tests test {entry.test_id!r} is not measurable and says "
                     "no reason"
                 )
+            withheld.append(entry.test_id)
             continue
         measured_ids.append(entry.test_id)
         mean = item["mean"]
@@ -2059,40 +2099,140 @@ def _require_ab_result(spec: AbTests, document: Mapping[str, Any]) -> dict[str, 
                 f"the measure's ab_tests test {entry.test_id!r} says {outcome!r} where its "
                 f"rejection {item['rejected']!r} and mean {mean!r} make it {wanted_outcome!r}"
             )
-    if block["family_size"] != len(measured_ids):
+    expected_family = len(spec.entries)
+    if block["family_size"] != expected_family:
         raise ReadingConfigurationError(
-            f"the measure's ab_tests family_size {block['family_size']!r} is not the "
-            f"{len(measured_ids)} measured test(s)"
+            f"the measure's ab_tests family_size {block['family_size']!r} is not the declared "
+            f"family of {expected_family} registered test(s): R-R1's family is all of them, "
+            "measured or withheld"
         )
-    if sorted(ranks.values()) != list(range(1, len(measured_ids) + 1)):
+    if len(measured_ids) + len(withheld) != expected_family or sorted(ranks.values()) != list(
+        range(1, len(measured_ids) + 1)
+    ):
         raise ReadingConfigurationError(
-            "the measure's ab_tests ranks are not 1..the measured-test count"
+            "the measure's ab_tests measured and withheld tests do not add up to the declared "
+            "family, or their ranks are not 1..the measured-test count"
         )
     family = block["family"]
     if (
         not isinstance(family, list)
         or sorted(family) != sorted(measured_ids)
         or family != [name for name, _ in sorted(ranks.items(), key=lambda pair: pair[1])]
+        or not isinstance(withheld, list)
+        or sorted(withheld) != sorted(block["withheld"])
+        or set(family) & set(withheld)
+        or set(family) | set(withheld) != {entry.test_id for entry in spec.entries}
     ):
         raise ReadingConfigurationError(
-            "the measure's ab_tests family is not the measured tests in Benjamini-Hochberg order"
+            "the measure's ab_tests family is not the measured tests in Benjamini-Hochberg "
+            "order plus the withheld tests, once each, across the declared family"
         )
     return dict(block)
+
+
+_AB_PATH_TOKEN: Final = re.compile(r"(?<![\w.-])(?:~/|/)[^\s,;:)\]]+")
+"""Anything that looks like an absolute or home path in a refusal message, redacted before the
+message enters a result: an A/B refusal is a data verdict, and a result file is not a place to
+learn where a store lives (`panel_view.PANEL_STORE_PLACEHOLDER`'s rule)."""
+
+_AB_SECRET: Final = re.compile(r"(?i)\b(token|secret|password|passwd|api[_-]?key)\s*[=:]\s*\S+")
+"""A credential-looking assignment, redacted the same way. The A/B measurement touches no
+credential, so this can only catch a message that quotes one; redacting it costs nothing."""
+
+
+def _refusal_reason(error: BaseException) -> str:
+    """`measurement refused: <Type>: <disclosable message>` for one A/B refusal.
+
+    The message is the error's own `disclosable` text where it declares one (the repository's
+    convention for text a body may carry: `PanelStorageError.disclosable`, `ModelViewError`), and
+    otherwise its `str`, with anything shaped like a path or a credential assignment replaced.
+    The result file is written and kept for a spent window, so it must not be a channel for the
+    store's location.
+    """
+    message = getattr(error, "disclosable", None)
+    if not isinstance(message, str) or not message.strip():
+        message = str(error)
+    text = " ".join(message.split())
+    text = _AB_PATH_TOKEN.sub("<path>", text)
+    text = _AB_SECRET.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+    return f"measurement refused: {type(error).__name__}: {text or 'no message'}"
+
+
+def _refused_ab_tests(spec: AbTests, error: BaseException) -> dict[str, Any]:
+    """The A/B block written when this read's A/B measurement was refused.
+
+    A refusal in the A/B section must not cost G-0 its secondary diagnostics: the one read is
+    spent once the claim is written, and the G-0 document has already been measured when this
+    block is built. So the block keeps every frozen value and writes each test `not_measurable`
+    with the redacted refusal as its reason, family size the declared family, no reported verdict
+    and every test withheld; the G-0 document goes to `result.json` and `result.txt` as usual. It
+    is the same shape `_require_ab_result` accepts, so a refused block is still the registration's.
+    """
+    reason = _refusal_reason(error)
+    tests: list[dict[str, Any]] = []
+    for entry in spec.entries:
+        veto = entry.kind == "veto_difference"
+        tests.append(
+            {
+                "id": entry.test_id,
+                "kind": entry.kind,
+                "factor": entry.factor,
+                "direction": entry.direction,
+                "alternative": entry.alternative,
+                "horizon": spec.horizon,
+                "stride": spec.stride,
+                "sampled_sessions": 0,
+                "measured_periods": 0,
+                "mean": None,
+                "sd": None,
+                "t": None,
+                "p_two_sided": None,
+                "p_one_sided": None,
+                "p_adjusted": None,
+                "exact": None,
+                "sign_patterns": None,
+                "bh_rank": None,
+                "rejected": None,
+                "outcome": AB_NOT_MEASURABLE,
+                "reason": reason,
+                "wording": AB_NOT_MEASURABLE_WORDING,
+                "vetoed_observations": 0 if veto else None,
+                "minimum_vetoed_observations": (spec.veto.minimum_observations if veto else None),
+            }
+        )
+    return {
+        "schema": AB_TESTS_SCHEMA,
+        "window": spec.window,
+        "horizon": spec.horizon,
+        "stride": spec.stride,
+        "false_discovery_rate": spec.false_discovery_rate,
+        "minimum_vetoed_observations": spec.veto.minimum_observations,
+        "dependence": AB_DEPENDENCE,
+        "family_size": len(spec.entries),
+        "family": [],
+        "withheld": [entry.test_id for entry in spec.entries],
+        "wording": AB_BLOCK_WORDING,
+        "tests": tests,
+    }
 
 
 def ab_tests_lines(block: Mapping[str, Any]) -> list[str]:
     """The A/B block as text: one line for the family, then one line per test.
 
     Every test line names its conclusion and carries `exploratory candidate` (or 探索性候选) in
-    its wording; no line upgrades a result to confirmatory. The family line states the size the
-    FDR control was computed against and how many tests stayed out of it.
+    its wording; no line upgrades a result to confirmatory, and a `not_measurable` line says why.
+    The family line states the declared family size, how many tests were reported and how many
+    were withheld from the verdicts but counted in that family.
     """
     tests = block["tests"]
     family_size = block["family_size"]
+    reported = block["family"]
+    withheld = block["withheld"]
     lines = [
-        f"ab tests {block['schema']}: {len(tests)} test(s); family size {family_size} measured "
-        f"test(s) enter Benjamini-Hochberg at q={_number(block['false_discovery_rate'])}, "
-        f"{len(tests) - family_size} not measurable stay out; every conclusion is an exploratory "
+        f"ab tests {block['schema']}: {len(tests)} test(s); declared family size {family_size}, "
+        f"Benjamini-Hochberg at q={_number(block['false_discovery_rate'])}: "
+        f"{len(reported)} measured test(s) reported, {len(withheld)} not measurable withheld "
+        "from the verdicts but counted in the family; every conclusion is an exploratory "
         "candidate (探索性候选), never confirmatory evidence"
     ]
     for item in tests:
@@ -2110,10 +2250,10 @@ def ab_tests_lines(block: Mapping[str, Any]) -> list[str]:
                 f"vetoed observations {item['vetoed_observations']} "
                 f"(minimum {item['minimum_vetoed_observations']})",
             )
-        lines.append(
-            f"  test {item['id']}: " + ", ".join(details) + f": {item['outcome']} -- "
-            f"{item['wording']}"
-        )
+        tail = f"{item['outcome']} -- {item['wording']}"
+        if item["outcome"] == AB_NOT_MEASURABLE and item["reason"]:
+            tail = f"{item['outcome']} ({item['reason']}) -- {item['wording']}"
+        lines.append(f"  test {item['id']}: " + ", ".join(details) + f": {tail}")
     return lines
 
 
@@ -2204,7 +2344,7 @@ def _vetoed_on(
         try:
             current = calendar.previous_trading_day(current)
         except CalendarHorizonError as error:
-            raise DiagnosticWindowError(
+            raise ReadingError(
                 f"the veto's {lookback}-session window ending {day.isoformat()} reaches the "
                 f"start of the calendar the reading loaded: {error}"
             ) from error
@@ -2243,6 +2383,8 @@ class _FactorReads:
             self._store, definition, years=(year,), as_of=self._as_of
         ):
             if row.coverage not in admitted or row.value is None:
+                continue
+            if not math.isfinite(row.value):
                 continue
             session = row.as_of.astimezone(_EXCHANGE_ZONE).date()
             builds.setdefault(session, {}).setdefault(row.as_of, {})[row.subject] = row.value
@@ -2337,7 +2479,7 @@ def _measure_ab_tests(
                 for code, _ in survivors
                 if (value := lookup.get(code)) is not None
             ]
-            if len(scored) < MINIMUM_INTERVAL_SAMPLE_SIZE:
+            if not scored:
                 continue
             labelled = {
                 code: captured.labels[(spec.horizon, day, code)]
@@ -2364,6 +2506,45 @@ def _measure_ab_tests(
             )
         )
     return evaluate_ab_tests(spec, series)
+
+
+def _measured_ab_tests(
+    ab_tests: AbTests | None,
+    *,
+    calendar: TradingCalendar,
+    plan: SignalPlan,
+    settings: _Settings,
+    captured: _Captured,
+    store: PanelStore,
+    as_of: datetime,
+) -> dict[str, Any] | None:
+    """The A/B block measured on its own, isolated from the G-0 document.
+
+    The G-0 engine has already run and its document is built from `readings` whatever happens
+    here: the one read is spent once the claim is written, so a refusal in the A/B section (a
+    per-session limit-events read that a restated row refuses, a factor manifest check, a
+    cross-section with no dispersion, an empty plan, anything) must not cost G-0 its secondary
+    diagnostics. On any exception this returns the refused block (`_refused_ab_tests`): every
+    test `not_measurable`, the declared family size, no verdict, and a redacted reason. No
+    `DiagnosticWindowError` can escape from here: the G-0 engine's own window checks have already
+    run, and `_vetoed_on`'s calendar edge is a `ReadingError` for exactly this reason.
+
+    `None` when the registration carries no A/B section -- that is the old reading, unchanged.
+    """
+    if ab_tests is None:
+        return None
+    try:
+        return _measure_ab_tests(
+            calendar=calendar,
+            plan=plan,
+            settings=settings,
+            captured=captured,
+            spec=ab_tests,
+            events_for=_limit_events_reader(store),
+            factor_reads=_FactorReads(store, as_of=as_of),
+        )
+    except Exception as error:  # the isolation is the point; see the docstring
+        return _refused_ab_tests(ab_tests, error)
 
 
 # --- the default measure -------------------------------------------------------------------------
@@ -2441,18 +2622,14 @@ def _panel_measure(runtime_dir: Path) -> Measure:
                 )
 
             readings = run_diagnostics(request, scores=scores, labels_for=labels_for)
-            ab_document = (
-                None
-                if ab_tests is None
-                else _measure_ab_tests(
-                    calendar=calendar,
-                    plan=plan,
-                    settings=settings,
-                    captured=captured,
-                    spec=ab_tests,
-                    events_for=_limit_events_reader(store),
-                    factor_reads=_FactorReads(store, as_of=explore.as_of),
-                )
+            ab_document = _measured_ab_tests(
+                ab_tests,
+                calendar=calendar,
+                plan=plan,
+                settings=settings,
+                captured=captured,
+                store=store,
+                as_of=explore.as_of,
             )
             partitions = store.partitions_read()
         document = diagnostic_document(
@@ -2572,7 +2749,15 @@ def read_once(
     result = dict(measured)
     if registered.ab_tests is not None:
         if "error" not in measured:
-            result["ab_tests"] = _require_ab_result(registered.ab_tests, measured)
+            try:
+                result["ab_tests"] = _require_ab_result(registered.ab_tests, measured)
+            except Exception as error:  # any mismatch must not discard the measured G-0 document
+                # The G-0 document is already measured and the claim is already spent; an A/B
+                # block that is not this registration's is recorded as refused instead of taking
+                # the whole read down with it. The read-once design exists to keep the result a
+                # spent window paid for, and a malformed block is exactly the case where refusing
+                # would cost the read while the refused block still says what went wrong.
+                result["ab_tests"] = _refused_ab_tests(registered.ab_tests, error)
     elif "ab_tests" in measured:
         raise ReadingConfigurationError(
             "the measure wrote an ab_tests block the registration does not carry; the claim "
@@ -3039,7 +3224,13 @@ def reading_lines(result: Mapping[str, Any], body: Mapping[str, Any]) -> list[st
         lines.append(f"the measurement was refused, and the one read is spent: {result['error']}")
     stop = result.get("stop_rule")
     if stop is None:
-        lines.append("no stop rule: a secondary, non-confirmatory reading decides nothing")
+        if body.get("ab_tests") is None:
+            lines.append("no stop rule: a secondary, non-confirmatory reading decides nothing")
+        else:
+            lines.append(
+                "no stop rule: a secondary, non-confirmatory reading decides no stop rule; the "
+                "A/B tests below are exploratory candidates only, never confirmatory evidence"
+            )
     else:
         rule = body["stop_rule"]
         lines.append(

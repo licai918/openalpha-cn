@@ -183,7 +183,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
 1. **A（`V2-P7-027`）**：每个抽样会话，被 `market_bearish_5/v1` 否决的幸存者的 h20 收益均值，减去全部幸存者的 h20 收益均值。否决用该会话及之前 4 个会话的涨停事件（`panel_limit_events.limit_events_on`，每个会话在它自己的 16:30 发布时点读），再由 `domain/limit_events.session_limit_events` + `domain/survivor_veto.vetoed_codes` 判定。被否决幸存者观测总数 < 60 → `not_measurable`。
 2. **B（`V2-P7-028`）**：`limit_up_count_20/v1` 与 `broken_board_count_20/v1` 的 h20 秩 IC，各自按登记里冻结的声明方向（`lower_is_better`）定向后做单侧检验（均值 > 0 方向）。
 
-三个 p 一起做 Benjamini-Hochberg，**q = 0.10**；每个检验的结论 ∈ `candidate` / `no_evidence` / `not_measurable`；**`not_measurable` 不进 BH 家族**，结果文本里写明家族大小（参与 BH 的检验数）与被排除的检验数。**所有结论都是探索性候选（exploratory candidate / 探索性候选），绝不是 confirmatory evidence**；这次读不升级任何措辞、不启动前向时钟、不构成 G-0 的证据。
+三个 p 一起做 Benjamini-Hochberg，**q = 0.10**；每个检验的结论 ∈ `candidate` / `no_evidence` / `not_measurable`。**BH 家族按 R-R1 原文是全部三个检验**（控制者修复轮裁决）：`not_measurable` 的检验不报告判定（withheld），但**仍计入家族大小**——家族大小固定为 3，不随数据变化而缩到「可测的个数」；结果文本里写明声明的家族大小、报告数与 withheld 数。**所有结论都是探索性候选（exploratory candidate / 探索性候选），绝不是 confirmatory evidence**；这次读不升级任何措辞、不启动前向时钟、不构成 G-0 的证据。
 
 **冻结在登记体里的东西**（`--ab-tests` 写出的就是这些值；读的时候从登记体取，不从代码常量重读）：
 
@@ -191,7 +191,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
 |---|---|
 | 窗口 | `second_use`（`2024-01-02..2026-09-24`） |
 | horizon / stride | 20 / 20（h20，非重叠） |
-| 多重检验 | Benjamini-Hochberg，q = 0.10，dependence = independent-or-positively-dependent |
+| 多重检验 | Benjamini-Hochberg，q = 0.10，dependence = independent-or-positively-dependent；家族 = 全部三个检验（不可测的 withheld 但仍计入 `m = 3`） |
 | 被否决观测下限 | 60 |
 | 否决规则 | `market_bearish_5/v1`，5 个会话（含当日） |
 | B 的两个因子 | `limit_up_count_20/v1`、`broken_board_count_20/v1`，方向 `lower_is_better` |
@@ -202,8 +202,9 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
 
 1. **§2 的每一条都成立**（不浅、无 grafts、代码未被改、`cp -c` 克隆、登记已提交、`--as-of` 不早于窗口末日发布）。运行目录与克隆的做法不变。
 2. **验证窗口的 window-claim 已提交。** `second_use` 只在验证窗口之后读；顺序检查在 §5。这次合并读数不改变顺序。
-3. **B 的两个因子已经构建进真实面板。** 这是计划「执行」的第 1 步，**0 次 Tushare 请求**：按 B 分支的构建命令（`openalpha factor build`）以每个会话自己的 16:30 为 `--as-of`、`--tier raw`、覆盖 2023–2026 年，把 `limit_up_count_20/v1` 与 `broken_board_count_20/v1` 的 raw observations 写进 `~/openalpha-research/panel`。**读数读的是 raw tier**，按 build 的 `as_of` 落在会话的上海日期、且不早于该会话 16:30 来取值。缺年会在 claim 之前由预检按数据集列出（`factor_obs_limit_up_count_20_v1` 等），预检之后才测量；**不要删预检、不要在缺构建时读**。
-4. **登记、claim、结果都不由本分支创建。** 本分支只加代码、测试与本节手册；真正登记与读由控制者在合并后、用户明确开始后执行。
+3. **`stk_limit` 的前一年已在面板里。** 否决的五个会话窗口对窗口第一个信号日（2024-01-02）会读到 2023-12-26..29 的 `stk_limit`；有 `ab_tests` 时预检把 `stk_limit` 当作需要前一年的数据集，缺 2023 分区会在 claim 之前按名字拒绝。没有 `ab_tests` 时 `stk_limit` 仍是只读信号日的数据集，不要求前一年。
+4. **B 的两个因子已经构建进真实面板。** 这是计划「执行」的第 1 步，**0 次 Tushare 请求**：按 B 分支的构建命令（`openalpha factor build`）以每个会话自己的 16:30 为 `--as-of`、`--tier raw`、覆盖 2023–2026 年，把 `limit_up_count_20/v1` 与 `broken_board_count_20/v1` 的 raw observations 写进 `~/openalpha-research/panel`。**读数读的是 raw tier**，按 build 的 `as_of` 落在会话的上海日期、且不早于该会话 16:30 来取值。缺年会在 claim 之前由预检按数据集列出（`factor_obs_limit_up_count_20_v1` 等），预检之后才测量；**不要删预检、不要在缺构建时读**。
+5. **登记、claim、结果都不由本分支创建。** 本分支只加代码、测试与本节手册；真正登记与读由控制者在合并后、用户明确开始后执行。
 
 ### 7.2 命令
 
@@ -246,9 +247,10 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
 
 结果文本在 G-0 的诊断之后追加一节 `ab tests ...`：
 
-- 第一行是家族说明：`family size N measured test(s) enter Benjamini-Hochberg at q=0.1`，以及 `M not measurable stay out`。
-- **每个检验一行**，含 `sampled` / `measured` 期数、A 的 `vetoed observations`（与 60 下限）、mean、t、单侧 p、q，以及结论 `candidate` / `no_evidence` / `not_measurable`。每行都带 exploratory candidate / 探索性候选 的措辞；没有任何一行把结论说成 confirmatory。
+- 第一行是家族说明：`declared family size 3, Benjamini-Hochberg at q=0.1: N measured test(s) reported, M not measurable withheld from the verdicts but counted in the family`。
+- **每个检验一行**，含 `sampled` / `measured` 期数、A 的 `vetoed observations`（与 60 下限）、mean、t、单侧 p、q，以及结论 `candidate` / `no_evidence` / `not_measurable`；`not_measurable` 行还带原因（`60` 下限、样本期数不足，或 `measurement refused: <类型>: <可披露消息>`）。每行都带 exploratory candidate / 探索性候选 的措辞；没有任何一行把结论说成 confirmatory。
 - `sampled` 是计划抽样的会话数，`measured` 是数据真给出数的会话数；A 的某个抽样会话若没有「带标签的被否决幸存者」，该会话不产生差值（不是 0），`vetoed observations` 只数差值实际用到的被否决观测。
-- JSON 的 `ab_tests` 块给出同样的数：`false_discovery_rate`、`family_size`、`family`（按 BH 秩排序的检验 id）、每个检验的 `outcome`、`p_two_sided`、`p_one_sided`、`p_adjusted`、`bh_rank`、`rejected`，以及 A 的 `vetoed_observations` 与 `minimum_vetoed_observations`。
+- JSON 的 `ab_tests` 块给出同样的数：`false_discovery_rate`、`family_size`（声明的 3）、`family`（报告了判定的检验 id，按 BH 秩排序）、`withheld`（不可测、不计判定的检验 id）、每个检验的 `outcome`、`p_two_sided`、`p_one_sided`、`p_adjusted`、`bh_rank`、`rejected`，以及 A 的 `vetoed_observations` 与 `minimum_vetoed_observations`。
+- **A/B 部分被拒不会毁掉 G-0。** 认领一写出、G-0 的诊断已经测完之后，A/B 部分的任何异常（某会话的逐时点 `limit_events_on` 被拒绝、因子 manifest 检查失败、空计划、空横截面等）都只把三个检验写成 `not_measurable`，原因写 `measurement refused: <类型>: <可披露消息>`（不含存储路径或凭据），`family_size` 仍是 3、三个都 withheld；`result.json` / `result.txt` 照常写出完整的 G-0 secondary 诊断。一次读只花一次窗口，不能因为 A/B 的拒绝把 G-0 的读数一起丢掉。
 
-**判读**：`candidate` 只是「按预注册方向、经 BH 后仍被拒绝」的探索性候选，是后续预注册跟进（A 的并行第二本账 / B 的 walk-forward 网格行）的输入，不是证据；`no_evidence` 是这次设计下读不出；`not_measurable`（A 的被否决观测 < 60、或某检验的 measured 期数 < 2）是它自己的结论，**不是** no evidence。读本身不改变 G-0、006b、前向时钟或实盘门。
+**判读**：`candidate` 只是「按预注册方向、经 BH 后仍被拒绝」的探索性候选，是后续预注册跟进（A 的并行第二本账 / B 的 walk-forward 网格行）的输入，不是证据；`no_evidence` 是这次设计下读不出；`not_measurable`（A 的被否决观测 < 60、或某检验的 measured 期数 < 2，或 A/B 测量被拒）是它自己的结论，**不是** no evidence。家族大小始终是声明的 3：一个不可测的检验会抬高其余检验的 BH 门槛（更保守），不会被悄悄移出分母。读本身不改变 G-0、006b、前向时钟或实盘门。
