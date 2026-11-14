@@ -1,0 +1,64 @@
+{
+  "ab_tests": {
+    "factor_tests": [
+      {
+        "direction": "lower_is_better",
+        "factor": "limit_up_count_20/v1"
+      },
+      {
+        "direction": "lower_is_better",
+        "factor": "broken_board_count_20/v1"
+      }
+    ],
+    "false_discovery_rate": 0.1,
+    "horizon": 20,
+    "issues": [
+      "V2-P7-027",
+      "V2-P7-028"
+    ],
+    "minimum_vetoed_observations": 60,
+    "schema": "p7-ab-tests/v1",
+    "stride": 20,
+    "veto": {
+      "lookback_sessions": 5,
+      "rule": "market_bearish_5/v1"
+    },
+    "window": "forward_ab_1"
+  },
+  "as_of_reason": "前向窗口 2026-11-16..2027-06-30 的最后一个信号日的 h20 标签约在 2027-07-28 可知；读数用 2027-07-30 当日建库完成后冻结的面板克隆，as_of 取该日 22:00 上海时间，晚于 16:30 发布与当日建库，且不晚于面板最后一个 daily 会话的发布（R-F5 预检）",
+  "code_commit": "7c8b9129048d1a07d93584f7b0460b402e83a407",
+  "config": {
+    "as_of": "2027-07-30T22:00:00+08:00",
+    "book": {
+      "seed": 0
+    },
+    "exchange": "SSE",
+    "max_carry_sessions": 250,
+    "min_coverage": 0.5,
+    "transform": "cross_section_standard/v1"
+  },
+  "expected_periods": null,
+  "issue": "V2-P7-027",
+  "reading": "v2-p7-027-028-forward-ab-1",
+  "request": {
+    "first": "2026-11-16",
+    "horizons": [
+      20
+    ],
+    "last": "2027-06-30",
+    "loser_decile_count": 2,
+    "scores": [
+      "composite"
+    ],
+    "stride": 20,
+    "tails": [
+      1,
+      2,
+      3
+    ]
+  },
+  "role": "secondary",
+  "schema": "openalpha-p7-reading-registration/v1",
+  "stop_rule": null,
+  "window": "forward_ab_1"
+}
