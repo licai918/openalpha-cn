@@ -350,6 +350,13 @@ registration names its predecessor in (`V2-P7-023`), repeated because a P6 regis
 it is refused here and `src/` imports no script; the two spellings are held equal by the dispatch
 test (`test_the_smoke_key_the_continuation_module_spells_is_the_daily_commands`)."""
 
+SURVIVOR_PARALLEL_OF_KEY: Final[str] = "survivor_parallel_of"
+"""The key of a survivor registration's `settings` that names the committed base registration it
+runs beside (`V2-P7-027`, R-N5): `{"path", "sha256"}`, written by `scripts/p7_register.py`. A
+registration carrying it is a parallel book -- outside the 006b chain -- and its launchd jobs get
+their own labels (Task 5b). The spelling is pinned here and in the writer's own test; `src/`
+imports no script."""
+
 SMOKE_BANNER: Final[str] = (
     "smoke: do not place these orders -- a V2-P7-019 smoke registration, not the V2-P7-006 "
     "registration; nothing it prints is evidence"
@@ -6537,6 +6544,44 @@ def sync_pinned_environment(worktree: Path, *, uv: Path) -> Path:
 
 LAUNCHD_LABEL: Final[str] = "com.openalpha.daily-selection"
 LAUNCHD_MORNING_LABEL: Final[str] = "com.openalpha.daily-selection.morning"
+
+
+def _launchd_label(label: str, registration: Path) -> str:
+    """`label` for a base book, suffixed with the frozen configuration's id for a parallel one.
+
+    A parallel registration (`settings.survivor_parallel_of`, `V2-P7-027` Task 5b) runs beside the
+    base book, so the two books' launchd jobs must not share a label: the suffix is the
+    registration's `config_id` first 16 characters (`f"{label}.{config_id[:16]}"`). The file is
+    read only to choose the label, and nothing here installs anything: the printer stays
+    print-only.
+
+    A path that is not a readable JSON document keeps the base label. That is the base book's
+    case -- the printer's existing tests name a registration the pinned worktree does not hold yet
+    -- and it is what keeps a base book's printed bytes identical to before (R-N4). A registration
+    that does carry the block but names no `config_id` is refused by name: a suffixed label needs
+    one.
+    """
+    try:
+        if not registration.is_file():
+            return label
+        document = json.loads(registration.read_bytes())
+    except Exception:
+        return label
+    if not isinstance(document, dict):
+        return label
+    settings = document.get("settings")
+    if not isinstance(settings, dict) or SURVIVOR_PARALLEL_OF_KEY not in settings:
+        return label
+    config_id = document.get("config_id")
+    if not isinstance(config_id, str) or not config_id:
+        raise ValueError(
+            f"--registration {registration} carries settings.{SURVIVOR_PARALLEL_OF_KEY} and no "
+            "config_id: a parallel book's launchd label is its configuration's id first 16 "
+            "characters, so the registration has to name one"
+        )
+    return f"{label}.{config_id[:16]}"
+
+
 MORNING_PLIST_HOUR: Final[int] = 8
 MORNING_PLIST_MINUTE: Final[int] = 30
 """The morning job fires at 08:30 on the machine's local time -- the start of the window
@@ -6653,7 +6698,7 @@ def launchd_plist(
     one whose journal is already complete, which prints the summary again with no request and no
     write."""
     return _launchd_job(
-        label=LAUNCHD_LABEL,
+        label=_launchd_label(LAUNCHD_LABEL, registration),
         hour=18,
         minute=30,
         tail=(),
@@ -6686,7 +6731,7 @@ def launchd_morning_plist(
     fails closed rather than re-checking after the auction. The registration is the caller's,
     resolved and proved inside `worktree` (`launchd_registration`). Printed, never installed."""
     return _launchd_job(
-        label=LAUNCHD_MORNING_LABEL,
+        label=_launchd_label(LAUNCHD_MORNING_LABEL, registration),
         hour=MORNING_PLIST_HOUR,
         minute=MORNING_PLIST_MINUTE,
         tail=("--morning-recheck",),

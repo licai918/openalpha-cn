@@ -1800,6 +1800,284 @@ def test_the_launchd_jobs_take_the_registration_and_the_morning_recheck(
     assert not odd.exists()
 
 
+# --- V2-P7-027 Task 5b: a parallel book prints its own launchd labels ---------------------------
+
+BASE_WORKTREE: Final[Path] = Path("/p7-base/pinned")
+BASE_RUNTIME: Final[Path] = Path("/p7-base/runtime")
+BASE_LOGS: Final[Path] = Path("/p7-base/logs")
+BASE_UV: Final[Path] = Path("/p7-base/bin/uv")
+BASE_REGISTRATION: Final[Path] = BASE_WORKTREE / "docs/research/p7-registration.json"
+"""Fixed, non-existent paths: the printed job embeds paths, so a byte-for-byte literal needs the
+same ones every run, and the printer creates nothing."""
+
+BASE_EVENING_PLIST: Final[str] = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+    '<plist version="1.0">\n'
+    "<dict>\n"
+    "\t<key>Label</key>\n"
+    "\t<string>com.openalpha.daily-selection</string>\n"
+    "\t<key>ProgramArguments</key>\n"
+    "\t<array>\n"
+    "\t\t<string>/p7-base/bin/uv</string>\n"
+    "\t\t<string>run</string>\n"
+    "\t\t<string>--no-sync</string>\n"
+    "\t\t<string>--env-file</string>\n"
+    "\t\t<string>.env</string>\n"
+    "\t\t<string>/p7-base/pinned/.venv/bin/python</string>\n"
+    "\t\t<string>/p7-base/pinned/scripts/daily_selection.py</string>\n"
+    "\t\t<string>--runtime-dir</string>\n"
+    "\t\t<string>/p7-base/runtime</string>\n"
+    "\t\t<string>--repo</string>\n"
+    "\t\t<string>/p7-base/pinned</string>\n"
+    "\t\t<string>--registration</string>\n"
+    "\t\t<string>/p7-base/pinned/docs/research/p7-registration.json</string>\n"
+    "\t</array>\n"
+    "\t<key>WorkingDirectory</key>\n"
+    "\t<string>/p7-base/pinned</string>\n"
+    "\t<key>EnvironmentVariables</key>\n"
+    "\t<dict>\n"
+    "\t\t<key>UV_PROJECT_ENVIRONMENT</key>\n"
+    "\t\t<string>/p7-base/pinned/.venv</string>\n"
+    "\t\t<key>PATH</key>\n"
+    "\t\t<string>/usr/bin:/bin:/usr/sbin:/sbin</string>\n"
+    "\t</dict>\n"
+    "\t<key>StartCalendarInterval</key>\n"
+    "\t<array>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>1</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>18</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>2</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>18</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>3</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>18</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>4</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>18</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>5</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>18</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t</array>\n"
+    "\t<key>StandardOutPath</key>\n"
+    "\t<string>/p7-base/logs/daily-selection.out.log</string>\n"
+    "\t<key>StandardErrorPath</key>\n"
+    "\t<string>/p7-base/logs/daily-selection.err.log</string>\n"
+    "\t<key>RunAtLoad</key>\n"
+    "\t<false/>\n"
+    "</dict>\n"
+    "</plist>\n"
+)
+BASE_MORNING_PLIST: Final[str] = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+    '<plist version="1.0">\n'
+    "<dict>\n"
+    "\t<key>Label</key>\n"
+    "\t<string>com.openalpha.daily-selection.morning</string>\n"
+    "\t<key>ProgramArguments</key>\n"
+    "\t<array>\n"
+    "\t\t<string>/p7-base/bin/uv</string>\n"
+    "\t\t<string>run</string>\n"
+    "\t\t<string>--no-sync</string>\n"
+    "\t\t<string>--env-file</string>\n"
+    "\t\t<string>.env</string>\n"
+    "\t\t<string>/p7-base/pinned/.venv/bin/python</string>\n"
+    "\t\t<string>/p7-base/pinned/scripts/daily_selection.py</string>\n"
+    "\t\t<string>--runtime-dir</string>\n"
+    "\t\t<string>/p7-base/runtime</string>\n"
+    "\t\t<string>--repo</string>\n"
+    "\t\t<string>/p7-base/pinned</string>\n"
+    "\t\t<string>--registration</string>\n"
+    "\t\t<string>/p7-base/pinned/docs/research/p7-registration.json</string>\n"
+    "\t\t<string>--morning-recheck</string>\n"
+    "\t</array>\n"
+    "\t<key>WorkingDirectory</key>\n"
+    "\t<string>/p7-base/pinned</string>\n"
+    "\t<key>EnvironmentVariables</key>\n"
+    "\t<dict>\n"
+    "\t\t<key>UV_PROJECT_ENVIRONMENT</key>\n"
+    "\t\t<string>/p7-base/pinned/.venv</string>\n"
+    "\t\t<key>PATH</key>\n"
+    "\t\t<string>/usr/bin:/bin:/usr/sbin:/sbin</string>\n"
+    "\t</dict>\n"
+    "\t<key>StartCalendarInterval</key>\n"
+    "\t<array>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>1</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>8</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>2</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>8</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>3</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>8</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>4</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>8</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Weekday</key>\n"
+    "\t\t\t<integer>5</integer>\n"
+    "\t\t\t<key>Hour</key>\n"
+    "\t\t\t<integer>8</integer>\n"
+    "\t\t\t<key>Minute</key>\n"
+    "\t\t\t<integer>30</integer>\n"
+    "\t\t</dict>\n"
+    "\t</array>\n"
+    "\t<key>StandardOutPath</key>\n"
+    "\t<string>/p7-base/logs/daily-selection.morning.out.log</string>\n"
+    "\t<key>StandardErrorPath</key>\n"
+    "\t<string>/p7-base/logs/daily-selection.morning.err.log</string>\n"
+    "\t<key>RunAtLoad</key>\n"
+    "\t<false/>\n"
+    "</dict>\n"
+    "</plist>\n"
+)
+"""The base book's two jobs, captured from the commit before Task 5b (the literals are the
+`plistlib.dumps` bytes, so a moved byte in a base job fails here)."""
+
+
+def test_the_base_book_plist_is_unchanged() -> None:
+    """R-N4 for the printer: a base book's two jobs are byte-identical to the literals captured
+    before Task 5b. The registration carries no `survivor_parallel_of`, so the printer adds no
+    label suffix -- and it names no config_id either."""
+    evening = daily.launchd_plist(
+        worktree=BASE_WORKTREE,
+        runtime_dir=BASE_RUNTIME,
+        log_dir=BASE_LOGS,
+        registration=BASE_REGISTRATION,
+        uv=BASE_UV,
+    )
+    morning = daily.launchd_morning_plist(
+        worktree=BASE_WORKTREE,
+        runtime_dir=BASE_RUNTIME,
+        log_dir=BASE_LOGS,
+        registration=BASE_REGISTRATION,
+        uv=BASE_UV,
+    )
+
+    assert evening == BASE_EVENING_PLIST
+    assert morning == BASE_MORNING_PLIST
+
+
+def _plist_for(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    config_id: str,
+    settings: Mapping[str, Any],
+    morning: bool = False,
+    relative: str = "docs/research/p7-registration.json",
+) -> dict[str, Any]:
+    """The job `daily.main` prints for a registration file inside the pinned worktree."""
+    worktree = tmp_path / "pinned"
+    registration = worktree / relative
+    registration.parent.mkdir(parents=True, exist_ok=True)
+    registration.write_text(
+        json.dumps({"config": {}, "config_id": config_id, "settings": settings}),
+        encoding="utf-8",
+    )
+    flag = "--launchd-morning-plist" if morning else "--launchd-plist"
+    arguments = [
+        "--runtime-dir",
+        str(tmp_path / "runtime"),
+        "--worktree",
+        str(worktree),
+        "--uv",
+        str(tmp_path / "bin" / "uv"),
+        "--registration",
+        relative,
+        flag,
+        str(tmp_path / "logs"),
+    ]
+
+    assert daily.main(arguments) == 0
+    job: dict[str, Any] = plistlib.loads(capsys.readouterr().out.encode("utf-8"))
+    return job
+
+
+def test_a_base_registration_keeps_the_base_labels(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A base (v1/no-veto) registration is not a parallel book: both jobs keep the base labels,
+    even when the registration file is present and readable."""
+    evening = _plist_for(tmp_path, capsys, config_id="a" * 64, settings={"random_seed": 1})
+    morning = _plist_for(
+        tmp_path, capsys, config_id="a" * 64, settings={"random_seed": 1}, morning=True
+    )
+
+    assert evening["Label"] == "com.openalpha.daily-selection"
+    assert morning["Label"] == "com.openalpha.daily-selection.morning"
+
+
+def test_a_parallel_registration_prints_its_own_launchd_labels(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A registration carrying `settings.survivor_parallel_of` is a parallel book: its two jobs'
+    labels carry the config id's first 16 characters, so the two books' jobs cannot collide while
+    both are still only printed (R-N5, Task 5b)."""
+    assert daily.SURVIVOR_PARALLEL_OF_KEY == "survivor_parallel_of"
+    config_id = "0123456789abcdef" + "9" * 48
+    settings = {
+        "survivor_parallel_of": {
+            "path": "docs/research/p7-registration.json",
+            "sha256": "0" * 64,
+        }
+    }
+
+    evening = _plist_for(tmp_path, capsys, config_id=config_id, settings=settings)
+    morning = _plist_for(tmp_path, capsys, config_id=config_id, settings=settings, morning=True)
+
+    assert evening["Label"] == f"com.openalpha.daily-selection.{config_id[:16]}"
+    assert morning["Label"] == f"com.openalpha.daily-selection.morning.{config_id[:16]}"
+
+
 def test_an_explicit_absolute_p6_registration_is_still_printed_inside_the_pinned_worktree(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
