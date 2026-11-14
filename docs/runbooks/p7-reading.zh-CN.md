@@ -50,6 +50,7 @@
    ```
 
 6. **`--as-of` 不早于窗口最后一个交易日的发布时刻。** 窗口末日 `2023-12-29` 的 16:30（上海时间）之前，最后几期的标签还不可知，`read_once` 拒绝（`ReadingError`，退出码 2）。`--as-of-reason` 是一行，说明为什么这个 `as_of` 就是这次读数所处的知识。`--exchange` 必须是 `SSE`：诊断读的就是这个日历；`SZSE` 在参数校验时就被拒绝（退出码 2）。
+   **`as_of` 还不得晚于面板 `daily` 已发布到的最后一个会话。** 若 `as_of` 的时刻已经发布了比面板 `daily` 最后会话更晚的会话，预检会在写任何 claim 之前以 `ReadingPreflightError` 拒绝，并写出那个最后会话 D：`as_of` 必须在 D 那一次会话的最后写入之内（或把面板建到 `as_of`），否则测量只会得到 `date_gap`。周末/节假日的 `as_of` 按它之前最近已发布的会话判定；D 当天 19:00 通过（`V2-P7-024` 的 R-F5，`_as_of_gap_problem`）。
 7. **解释器环境。** 用本仓库 `uv sync --all-extras --dev` 建出的 `.venv`。注意：`uv.lock` 在绑定里只证明锁文件没变，**不证明运行环境与它一致**（`scripts/research/p7_reading.py:162-163`）。
 
 ## 3. 程序
@@ -133,7 +134,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
 |---|---|---|
 | 0 | 登记写出，或读数完成并写出结果；停止规则的判定照常打印 | 读完成则窗口已认领 |
 | 2 | 用法，或登记写不成的 `ReadingError`（参数、窗口名、交换所、`as_of`、登记体）；**认领之后**，写结果时遇到 `OSError` 也是 2 | 认领之前：什么都没写、没认领；认领之后：认领已写出，窗口已花掉 |
-| 3 | 认领之前被拒（运行目录、登记未提交、代码变了、外来包或脚本、已认领、`second_use` 在验证窗口之前、浅克隆或 grafts、预检问题）；**认领之后**，测量返回的文档不绑定认领（`ReadingConfigurationError`）或认领文件被另一个读抢先（`FileExistsError`）也是 3 | 认领之前：什么都没花掉；认领之后：认领留在磁盘上，窗口已花掉 |
+| 3 | 认领之前被拒（运行目录、登记未提交、代码变了、外来包或脚本、已认领、`second_use` 在验证窗口之前、`forward_ab_1` 在 `second_use` 之前或登记提交的 committer 时间不早于窗口开盘、浅克隆或 grafts、预检问题）；**认领之后**，测量返回的文档不绑定认领（`ReadingConfigurationError`）或认领文件被另一个读抢先（`FileExistsError`）也是 3 | 认领之前：什么都没花掉；认领之后：认领留在磁盘上，窗口已花掉 |
 | 4 | 日历算出的精确期数不是登记的先验数：停、报告 | 什么都没写、没认领 |
 
 **退出 2 或 3 之后，先看 `docs/research/p7-readings/` 有没有认领文件。** 只要存在 `validation.window-claim.json` 或 `v2-p7-024-validation.claim.json`，窗口就已经花掉：**不要因为退出码删认领，也不要再读**；把退出码、消息与认领文件一起报告给用户。只有在确认没有任何认领文件时，2 或 3 才等于「什么都没花掉」。
@@ -254,3 +255,38 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scr
 - **A/B 部分被拒不会毁掉 G-0。** 认领一写出、G-0 的诊断已经测完之后，A/B 部分的任何异常（某会话的逐时点 `limit_events_on` 被拒绝、因子 manifest 检查失败、空计划、空横截面等）都只把三个检验写成 `not_measurable`，`family_size` 仍是 3、三个都 withheld，块上 `refused: true`，每个检验的 `sampled_sessions` / `measured_periods` 是 `null`（not reached，不是空计划）；`result.json` / `result.txt` 照常写出完整的 G-0 secondary 诊断。一次读只花一次窗口，不能因为 A/B 的拒绝把 G-0 的读数一起丢掉。拒绝原因写 `measurement refused: <类型>: <可披露消息>`，写入结果前**脱敏**：仓库根、运行目录与 home 目录先按字面替换成 `<repo>` / `<runtime>` / `<home>`（仓库根本身含空格也能整体替换），其余绝对路径（含空格）从第一个路径标记起替换成 `<path>`，任何含 `/` 的片段替换成 `<path>`，`NAME=value` 形式的凭据保留名字、值替换成 `<redacted>`，整行截断；**结果文件不会出现存储路径或凭据值**。
 
 **判读**：`candidate` 只是「按预注册方向、经 BH 后仍被拒绝」的探索性候选，是后续预注册跟进（A 的并行第二本账 / B 的 walk-forward 网格行）的输入，不是证据；`no_evidence` 是这次设计下读不出；`not_measurable`（A 的被否决观测 < 60、或某检验的 measured 期数 < 2，或 A/B 测量被拒）是它自己的结论，**不是** no evidence。家族大小始终是声明的 3：一个不可测的检验会抬高其余检验的 BH 门槛（更保守），不会被悄悄移出分母。读本身不改变 G-0、006b、前向时钟或实盘门。
+
+### 7.4 前向窗口 `forward_ab_1`：同一份冻结的 A/B 节，换一个窗口重测（R-F1..R-F4，`V2-P7-027` + `V2-P7-028`）
+
+`second_use` 那次读（`f9c85cd`）的 A/B 结论只是探索性候选。`forward_ab_1` 是它们的**前向重测**：同一个冻结的 `p7-ab-tests/v1` 节、同样的三个检验与阈值，登记在窗口第一个会话开盘**之前**，读在窗口数据齐全之后。它是 R-F6 对「任何 P7 诊断不得使用 2026-09-24 之后的数据」的**唯一例外**：登记先于窗口，窗口的任何结果都不可能在登记时被看到。
+
+- **窗口。** `forward_ab_1` = `2026-11-16..2027-06-30`（`scripts/research/p7_windows.py` 的 `FORWARD_AB_1`，year ceiling 2027）。窗口末日不在年末，所以切掉 2027-06-30 之后的行靠的是标签规则（`plan_signal_days` 的禁运），不是年上限。
+- **节。** `--window forward_ab_1 --ab-tests` 写出的节与 `second_use` 的**逐值相同**（h20、stride 20、q = 0.10、60 个被否决观测下限、`market_bearish_5/v1` + 5 会话、B 的两个因子与 `lower_is_better`），只有节上的 `window` 变成 `forward_ab_1`。`adopted_ab_tests(window="forward_ab_1")` 是写出它的入口；解析器拒绝节窗口与登记窗口不一致的节。
+- **登记截止（R-F3）。** 登记时钟 **≥ `2026-11-16T09:30:00+08:00`** 时 `register` 直接拒绝（退出码 2，dry-run 也一样）：前向登记必须写在窗口开盘之前。读的时候再查一次：登记提交的 **committer 时间**（`git log --format=%cI`）不早于该时刻就拒绝（退出码 3，认领之前）。committer 时间是提交者自报的记录，**不是证明**——结果文本会写明这一点；只有在读之前把该提交推到别人持有的远端，才算有人见证。因此这次登记提交必须在 `2026-11-15 20:30`（多伦多）/ `2026-11-16 09:30`（北京）之前。
+- **登记提交永不改写。** 读取侧取的是 HEAD 历史上最后一次改动登记文件的提交（`git log -1 HEAD -- <登记文件>`）的 committer 时间。开盘之后对它做 rebase、amend、cherry-pick、squash，或在合并时让它被重写，都会把这个时间推到开盘之后，`forward_ab_1` 从此永久不可读。所以：登记**单独**提交；之后只用快进或 `--no-ff` 合并；永不改写它；是否在开盘前把它推到远端作见证，由用户决定（推送不是本流程自动做的事）。`forward_ab_1` 登记**必须**带 `--ab-tests` 且 `role` 为 `secondary`，否则解析器拒绝（它只为重测 A/B 节而存在，开盘后不能重登）。
+- **顺序（R-F4）。** `forward_ab_1` 读之前，`second_use` 的 `second_use.window-claim.json` 必须**已提交**且从某个 ref 或未过期 reflog 可达（候选是从那次读来的）；否则 `read_once` 以 `SecondUseNotSpentError` 拒绝（退出码 3）。G-0 的次要诊断照 `second_use` 的方式运行：`role` 是 `secondary`、没有停止规则、没有 `expected_periods`；三个 A/B 检验同样跑。
+- **`--as-of` 与面板。** `--as-of` 必须不早于窗口末日发布（`2027-06-30` 16:30 上海），并留出 h20 标签：计划的登记用 `--as-of 2027-07-30T22:00:00+08:00`（最后一个信号日之后约 21 个会话）。R-F5 的预检会在 `as_of` 的已发布会话晚于面板 `daily` 最后会话时、在写任何 claim 之前拒绝（§2 第 6 条），所以**读要等到面板真的持有 `2026-11-16..2027-06-30` 与 h20 标签**；读本身是用户的「开始」，不是合入这一步。
+
+登记与读的命令形状（`--runtime-dir`、`--repo` 等其余参数与 §7.2 相同）：
+
+```bash
+# register：必须在 2026-11-16 09:30（北京）之前提交
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scripts/research/p7_read.py register \
+  --repo "$PWD" --runtime-dir <克隆根> \
+  --window forward_ab_1 \
+  --reading v2-p7-027-028-forward-ab-1 \
+  --issue V2-P7-027 \
+  --as-of 2027-07-30T22:00:00+08:00 \
+  --as-of-reason "<一行：为什么这个 as_of 是这次读数所处的知识>" \
+  --stride 20 --horizons 20 --tails 1 2 3 --score composite \
+  --book '{"seed": 0}' --transform cross_section_standard/v1 \
+  --min-coverage 0.5 --max-carry-sessions 250 --exchange SSE \
+  --ab-tests --dry-run
+
+# read：面板持有窗口与 h20 标签之后，用户明确开始才执行；一次、不可逆
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync "$PWD/.venv/bin/python" scripts/research/p7_read.py read \
+  --repo "$PWD" --runtime-dir <克隆根> \
+  --registration "$PWD/docs/research/p7-readings/v2-p7-027-028-forward-ab-1.registration.json"
+```
+
+读完之后立刻按 §3 第 5 步提交 `forward_ab_1.window-claim.json`、`v2-p7-027-028-forward-ab-1.claim.json`、`.result.json`、`.result.txt`。结果文本在 G-0 诊断与 `ab tests` 一节之前多一行 **forward property**，写明登记提交、窗口第一个会话开盘时刻，以及「committer 时间是自报记录、不是证明」；三个检验的结论仍是**探索性候选（候选）**，不是确认性证据。这次读不改变 G-0、`006b`、前向时钟或实盘门；`forward_ab_1` 与 `second_use` 一样只读一次。

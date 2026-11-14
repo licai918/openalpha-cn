@@ -3,9 +3,12 @@
 `register [--dry-run]` writes the reading's registration: the adopted stop rule (one number per
 named constant) and `expected_periods`, the exact number of non-overlapping periods the plan
 expects the window's calendar to hold. `--ab-tests` adds the optional, versioned A/B section
-(`p7_reading.adopted_ab_tests`): one merged `second_use` read that also decides plan A's veto and
-plan B's two factor tests (`V2-P7-027`, `V2-P7-028`). Without the flag no section is written,
-and the registration is the `v2-p7-024` shape unchanged. `--dry-run` computes them and writes
+(`p7_reading.adopted_ab_tests(window=...)`): one merged `second_use` read that also decides plan A's
+veto and plan B's two factor tests (`V2-P7-027`, `V2-P7-028`), or the `forward_ab_1` read that
+re-tests the same frozen candidates on the forward window. Without the flag no section is written,
+and the registration is the `v2-p7-024` shape unchanged. A `forward_ab_1` registration is refused
+once the window's first session has opened (`2026-11-16` 09:30 Asia/Shanghai, `R-F3`), the dry run
+included. `--dry-run` computes them and writes
 nothing. `read` checks
 the same count first -- reading the calendar, never outcome data, and claiming nothing -- and then
 calls `p7_reading.read_once`, the only library path into the window. Every flag is required except
@@ -23,7 +26,8 @@ Exit codes, the operator's signal:
   configuration value is a required flag (no code defaults, so a value the user never approved
   cannot enter one); a missing path is a usage error with its path, never a traceback;
 * 3 -- refused: before the claim (runtime directory, registration, bound code, foreign package or
-  script, already claimed, `second_use` too early, shallow or grafts, a preflight problem) or
+  script, already claimed, `second_use` or the forward window too early, shallow or grafts, a
+  preflight problem) or
   after it (an unbound document, an unreadable calendar or panel, a read that got there first):
   a 3 may follow the claim -- look for a claim file, and do not delete one;
 * 4 -- the calendar's exact count is not the `expected_periods` the registration records: stop and
@@ -96,7 +100,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     register.add_argument("--repo", type=Path, required=True)
     register.add_argument("--runtime-dir", type=Path, required=True)
-    register.add_argument("--window", required=True, help="'validation' or 'second_use'")
+    register.add_argument(
+        "--window", required=True, help="'validation', 'second_use' or 'forward_ab_1'"
+    )
     register.add_argument("--reading", default=None, help="defaults to v2-p7-024-<window>")
     register.add_argument("--issue", default="V2-P7-024")
     register.add_argument("--as-of", required=True, help="the knowledge clock, an ISO instant")
@@ -143,7 +149,8 @@ def _window_named(name: object) -> p7_windows.DiagnosticWindow:
     window = p7_windows.WINDOWS.get(name) if isinstance(name, str) else None
     if window is None:
         raise p7_reading.ReadingError(
-            f"the window {name!r} is not one a reading opens; it opens 'validation' or 'second_use'"
+            f"the window {name!r} is not one a reading opens; it opens 'validation', 'second_use' "
+            "or 'forward_ab_1'"
         )
     return window
 
@@ -154,6 +161,9 @@ def _register(arguments: argparse.Namespace) -> int:
             "the research window is not read once: it is read through p7_diagnostics explore"
         )
     window = _window_named(arguments.window)
+    # R-F3: a forward registration cannot be written after its first session opens, and the dry
+    # run is refused too -- the command never prints a registration that could not be written.
+    p7_reading.refuse_a_late_forward_registration(window)
     role: Literal["primary", "secondary"] = (
         "primary" if window.name == p7_windows.VALIDATION.name else "secondary"
     )
@@ -198,7 +208,7 @@ def _register(arguments: argparse.Namespace) -> int:
         said = resolved.stderr.decode(errors="replace").strip()
         raise p7_reading.ReadingError(f"{arguments.repo} is not a git repository: {said}")
     code_commit = resolved.stdout.decode().strip()
-    ab_tests = p7_reading.adopted_ab_tests() if arguments.ab_tests else None
+    ab_tests = None if not arguments.ab_tests else p7_reading.adopted_ab_tests(window=window.name)
     body = p7_reading._body_of(
         reading=reading,
         issue=arguments.issue,

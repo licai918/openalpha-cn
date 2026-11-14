@@ -1032,7 +1032,8 @@ def _parser() -> argparse.ArgumentParser:
         help="read the research window's deciles, tails and rank IC",
         description=(
             f"Read the research window ({research.first}..{research.last}) and nothing else; "
-            "the validation window and the holdout are read only through p7_reading.read_once."
+            "the validation window, the holdout and the forward_ab_1 window are read only "
+            "through p7_reading.read_once."
         ),
     )
     explore.add_argument("--runtime-dir", type=Path, required=True)

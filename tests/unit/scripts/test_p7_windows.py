@@ -426,7 +426,7 @@ def test_a_window_cannot_open_a_year_it_does_not_hold() -> None:
 def test_the_window_table_cannot_be_edited_at_run_time() -> None:
     with pytest.raises(TypeError):
         p7_windows.WINDOWS["all"] = p7_windows.RESEARCH  # type: ignore[index]
-    assert set(p7_windows.WINDOWS) == {"research", "validation", "second_use"}
+    assert set(p7_windows.WINDOWS) == {"research", "validation", "second_use", "forward_ab_1"}
 
 
 def test_no_plan_reaches_past_the_day_the_second_use_ended() -> None:
@@ -664,3 +664,18 @@ def test_a_research_root_spelled_through_dotdot_is_refused_even_before_it_exists
         p7_windows.checked_runtime_directory(
             research / "panel", research_runtime=spelled_root, main_checkout=checkout
         )
+
+
+def test_the_forward_window_is_registered_before_its_first_session_opens() -> None:
+    """R-F6's one exception: `forward_ab_1` reads past 2026-09-24 because it is registered before
+    its first session, 2026-11-16; its 2027 ceiling is the whole year, so the label rule (the
+    planner's embargo end, 2027-06-30) is what cuts it -- not the year cap."""
+    forward = p7_windows.WINDOWS["forward_ab_1"]
+
+    assert forward is p7_windows.FORWARD_AB_1
+    assert (forward.first, forward.last, forward.ceiling_year) == (
+        date(2026, 11, 16),
+        date(2027, 6, 30),
+        2027,
+    )
+    assert forward.last < date(forward.ceiling_year, 12, 31)

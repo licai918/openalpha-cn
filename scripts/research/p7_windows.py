@@ -8,12 +8,20 @@ at one of them by default:
 * **validation** 2022-01-04..2023-12-29, last year 2023 -- spent only through
   `p7_reading.read_once`: a committed pre-registration, claimed before it is measured, usable once;
 * **second use** 2024-01-02..2026-09-24 (`holdout`'s first day to the day P6's one-shot holdout
-  ended), last year 2026 -- the same ceremony, and a secondary, non-confirmatory reading.
+  ended), last year 2026 -- the same ceremony, and a secondary, non-confirmatory reading;
+* **forward A/B** 2026-11-16..2027-06-30, last year 2027 -- the same ceremony, and the one
+  forward read of the A/B section (`V2-P7-027`, `V2-P7-028`), registered before its first session
+  opens.
 
 No P7 diagnostic is to use anything dated after 2026-09-24: confirmatory evidence comes only from
 the forward record registered before its outcomes, which is the weekly report's business. That is
 a rule for the readers and the planner below, not something the store enforces (see "What the
 guard is, and is not").
+
+**`forward_ab_1` is the one exception to that date rule** (`R-F6`): it is the only window that
+reads past 2026-09-24, and it may, because its registration is committed before its first session
+opens -- none of the window's outcomes could have entered the registration, so the read is the
+forward record this rule asks for rather than a use of seen data.
 
 `WindowCappedStore` is the guard. It is a `PanelStore` whose every read door first checks that the
 year asked for is at most the window's last year, whose catalogue listings show only such years, and
@@ -27,9 +35,11 @@ What the guard is, and is not:
 
 * It is a guard **by year**. The research/validation and validation/second-use borders fall exactly
   on year borders (2021-12-31 | 2022-01-04 and 2023-12-29 | 2024-01-02: the exchange is shut on
-  the days between), so a year cap is the window there. The second-use stretch is the exception:
+  the days between), so a year cap is the window there. The second-use stretch is one exception:
   its last year, 2026, holds rows after 2026-09-24, the store serves that partition whole, and
-  only the label rule below (and the reader, which must cut by date) keeps them out.
+  only the label rule below (and the reader, which must cut by date) keeps them out. The forward
+  window is the same kind of exception: its last year, 2027, holds rows after 2027-06-30, and the
+  label rule at the window's own last day is what keeps them out.
 * It does not replace `plan_signal_days`. A signal day whose label would exit after the window's
   last day must never be asked for, and the planner **names** it (`SignalPlan.embargoed`) instead
   of dropping it. Both checks are needed: the store knows no dates, the planner reads no data.
@@ -44,7 +54,8 @@ What the code that uses this module must do (none of it is enforced here):
   catalogue's `catalog.duckdb.lock` / `.gate` beside it (and a read-once measurement holds the
   catalogue's shared side for its whole computation) -- open an APFS clone instead.
 * The command line (`p7_diagnostics`) resolves a window by name from `WINDOWS`, defaults to
-  `RESEARCH`, and refuses `VALIDATION` and `SECOND_USE` outside `p7_reading.read_once`.
+  `RESEARCH`, and refuses `VALIDATION`, `SECOND_USE` and `FORWARD_AB_1` outside
+  `p7_reading.read_once`.
 * A diagnostic's `as_of` is its **knowledge clock** -- what the panel knew when the diagnostic
   ran, revisions included -- and may be long after the window; the year cap is what enforces the
   **economic date**, since no door serves a year past the ceiling whatever the `as_of`. A
@@ -90,10 +101,12 @@ CATALOG_FILE: Final[str] = "catalog.duckdb"
 """The panel catalogue's file name inside a panel root (`PanelStore.__init__`)."""
 
 READ_ONCE_NOTE: Final[str] = (
-    "the validation window and the holdout are read only through p7_reading.read_once; "
+    "the validation window, the holdout and the forward_ab_1 window are read only through "
+    "p7_reading.read_once; "
     f"the second-use store admits the whole of {SECOND_USE_LAST.year}, rows after "
-    f"{SECOND_USE_LAST} included, so cutting rows by date is the reader's duty (the read-once "
-    "path), not the store's"
+    f"{SECOND_USE_LAST} included, and the forward store the whole of 2027, rows after "
+    "2027-06-30 included, so cutting rows by date is the reader's duty (the read-once path), "
+    "not the store's"
 )
 """What every refusal for reaching past a window says about the way past it, and about what a
 year cap does not do."""
@@ -223,8 +236,19 @@ SECOND_USE: Final[DiagnosticWindow] = DiagnosticWindow(
 )
 """The holdout stage's first day to `SECOND_USE_LAST`: read only through `p7_reading.read_once`."""
 
+FORWARD_AB_1: Final[DiagnosticWindow] = DiagnosticWindow(
+    name="forward_ab_1",
+    first=date(2026, 11, 16),
+    last=date(2027, 6, 30),
+    ceiling_year=2027,
+)
+"""The one forward window (`V2-P7-027`, `V2-P7-028`): the first session after the 2026-11-14
+registration to 2027-06-30, read only through `p7_reading.read_once` and only for the A/B
+section. It is `R-F6`'s one exception to "nothing after 2026-09-24" -- it is registered before
+its first session opens, so no outcome of it could have entered the registration."""
+
 WINDOWS: Final[Mapping[str, DiagnosticWindow]] = MappingProxyType(
-    {window.name: window for window in (RESEARCH, VALIDATION, SECOND_USE)}
+    {window.name: window for window in (RESEARCH, VALIDATION, SECOND_USE, FORWARD_AB_1)}
 )
 """The windows by the names the command line takes."""
 
