@@ -309,7 +309,7 @@ def test_the_command_reads_the_validation_window_once_and_writes_the_verdict(
     commit_file(repo, registration, "the registration", at=COMMITTED)
 
     measure = Measure()
-    monkeypatch.setattr(p7_reading, "_panel_measure", lambda runtime_dir: measure)
+    monkeypatch.setattr(p7_reading, "_panel_measure", lambda runtime_dir, **kwargs: measure)
     monkeypatch.setattr(p7_reading, "preflight_problems", lambda *a, **k: ())
 
     code = _command(*_read_arguments(repo, calendar_panel, registration))

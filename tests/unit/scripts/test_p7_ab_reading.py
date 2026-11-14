@@ -769,6 +769,7 @@ def test_a_document_whose_ab_block_is_not_the_registrations_is_recorded_as_refus
 
     assert result["summary"] == summary
     block = result["ab_tests"]
+    assert block["refused"] is True
     assert block["family_size"] == 3
     assert block["family"] == []
     assert block["withheld"] == [
@@ -777,6 +778,10 @@ def test_a_document_whose_ab_block_is_not_the_registrations_is_recorded_as_refus
         "reversal_1d/v1",
     ]
     assert all(item["outcome"] == p7_reading.AB_NOT_MEASURABLE for item in block["tests"])
+    assert all(
+        item["sampled_sessions"] is None and item["measured_periods"] is None
+        for item in block["tests"]
+    )
     for item in block["tests"]:
         assert item["reason"].startswith("measurement refused: ReadingConfigurationError:")
     assert registration.with_name("v2-p7-027-028-second-use.result.json").exists()
@@ -1622,7 +1627,8 @@ def test_a_refused_ab_measurement_still_writes_the_gn0_document(
 
     def refusing(*args: object, **kwargs: object) -> tuple[Any, ...]:
         raise RuntimeError(
-            "cannot read /Users/someone/openalpha-research/panel/catalog.duckdb token=abcd1234"
+            "TUSHARE_TOKEN=abcd1234 cannot read "
+            "/Users/someone/openalpha-research/panel/catalog.duckdb"
         )
 
     monkeypatch.setattr(p7_reading, "limit_events_on", refusing)
@@ -1640,6 +1646,7 @@ def test_a_refused_ab_measurement_still_writes_the_gn0_document(
     assert document["binding"] == binding
     assert document["summary"]["composite"]["h2"]["read"] > 0
     block = document["ab_tests"]
+    assert block["refused"] is True
     assert block["family_size"] == 3
     assert block["family"] == []
     assert block["withheld"] == [p7_reading.VETO_TEST_ID, *p7_reading.ab_test_ids(ab_form())[1:]]
@@ -1647,9 +1654,11 @@ def test_a_refused_ab_measurement_still_writes_the_gn0_document(
     for item in block["tests"]:
         reason = item["reason"]
         assert reason.startswith(
-            "measurement refused: RuntimeError: cannot read <path> token=<redacted>"
+            "measurement refused: RuntimeError: TUSHARE_TOKEN=<redacted> cannot read <path>"
         )
         assert "/Users/someone" not in reason and "abcd1234" not in reason
+        assert item["sampled_sessions"] is None and item["measured_periods"] is None
+        assert item["vetoed_observations"] is None
     registered = p7_reading._ab_tests_of(
         body["ab_tests"], settings(horizon=2, stride=2), READING_WINDOW
     )
@@ -1684,3 +1693,105 @@ def test_the_real_limit_event_read_gives_the_hand_computed_veto_set(
     assert p7_reading._vetoed_on(later, calendar=calendar, events_for=reader, lookback=5) == (
         frozenset()
     )
+
+
+# --- the refusal's redaction and the refused block's shape --------------------------------------
+
+
+def test_the_refusal_reason_redacts_space_bearing_roots_paths_and_credentials() -> None:
+    """The repository root contains a space and the earlier regex stopped at it. The known roots
+    are replaced by literal first (`<repo>`, `<runtime>`, `<home>`), any remaining absolute path
+    is cut at its first marker (spaces included), and `NAME=value` credentials keep their name
+    with the value redacted. The result is one bounded line."""
+    repo = Path("/Users/licai918me.com/Documents/OpenAlpha cn/.claude/worktrees/p7-ab-reading")
+    runtime = Path("/private/tmp/x y/runtime")
+    roots = p7_reading._redaction_roots(repo=repo, runtime=runtime)
+    probes = (
+        f"cannot read {repo}/runtime/panel/catalog.duckdb",
+        f"cannot read {runtime}/panel/catalog.duckdb",
+        f"cannot read {Path.home()}/secret/panel/catalog.duckdb",
+        "cannot read /private/tmp/x y/panel/catalog.duckdb and continue",
+        "TUSHARE_TOKEN=abc123 DEEPSEEK_API_KEY=def456",
+        "Tushare token: ghi789",
+    )
+    reasons = [p7_reading._refusal_reason(RuntimeError(probe), roots=roots) for probe in probes]
+
+    for reason in reasons:
+        assert "\n" not in reason and len(reason) <= p7_reading._AB_MAX_REASON
+        for leaked in (
+            str(repo),
+            str(runtime),
+            str(Path.home()),
+            "/private/tmp/x y",
+            "OpenAlpha cn",
+            "abc123",
+            "def456",
+            "ghi789",
+        ):
+            assert leaked not in reason, (leaked, reason)
+    assert "<repo>" in reasons[0] or "<path>" in reasons[0]
+    assert "<runtime>" in reasons[1] or "<path>" in reasons[1]
+    assert "<home>" in reasons[2] or "<path>" in reasons[2]
+    assert "<path>" in reasons[3]
+    assert "TUSHARE_TOKEN=<redacted>" in reasons[4]
+    assert "DEEPSEEK_API_KEY=<redacted>" in reasons[4]
+    assert "ghi789" not in reasons[5] and "<redacted>" in reasons[5]
+
+
+def test_a_refused_block_marks_its_session_counts_as_not_reached() -> None:
+    """A refused block is not an empty plan: `refused: true` says why, and `sampled_sessions` /
+    `measured_periods` are `None` (not reached) rather than a plausible 0. The validation accepts
+    exactly that shape and refuses a refused block that carries counts."""
+    built = spec()
+    refused = p7_reading._refused_ab_tests(built, RuntimeError("boom"))
+
+    assert refused["refused"] is True
+    assert all(
+        item["sampled_sessions"] is None and item["measured_periods"] is None
+        for item in refused["tests"]
+    )
+    assert p7_reading._require_ab_result(built, {"ab_tests": refused}) == refused
+
+    with_counts = {
+        **refused,
+        "tests": [{**refused["tests"][0], "sampled_sessions": 6}, *refused["tests"][1:]],
+    }
+    with pytest.raises(p7_reading.ReadingConfigurationError, match="reached no sample"):
+        p7_reading._require_ab_result(built, {"ab_tests": with_counts})
+
+
+def test_a_refused_ab_block_leaks_no_store_path_or_credential_into_the_result_files(
+    repo: Path,
+) -> None:
+    """The permanent result files of a spent window are the channel this redaction exists for: a
+    space-bearing repository root, the home path and two environment-style credentials must not
+    survive into `result.json` or `result.txt`."""
+    space = repo / "OpenAlpha cn"
+    space.mkdir(parents=True, exist_ok=True)
+    registration = register_ab(repo)
+    built = p7_reading._ab_tests_of(ab_form(), settings(), SECOND_USE)
+    error = RuntimeError(
+        f"cannot read {space}/runtime/panel/catalog.duckdb, {Path.home()}/secret/panel "
+        "TUSHARE_TOKEN=abc123 DEEPSEEK_API_KEY=def456"
+    )
+    refused = p7_reading._refused_ab_tests(
+        built, error, roots=p7_reading._redaction_roots(repo=space, runtime=space / "runtime")
+    )
+    document = {
+        "kind": p7_diagnostics.READ_ONCE_KIND,
+        "summary": {"composite": {"h2": {"read": 1}}},
+        "ab_tests": refused,
+    }
+
+    result = run_read(registration, repo, StubMeasure(document))
+
+    assert result["ab_tests"]["refused"] is True
+    text = registration.with_name("v2-p7-027-028-second-use.result.txt").read_text(encoding="utf-8")
+    payload = registration.with_name("v2-p7-027-028-second-use.result.json").read_text(
+        encoding="utf-8"
+    )
+    for leaked in (str(space), str(Path.home()), "OpenAlpha cn", "abc123", "def456"):
+        assert leaked not in text, (leaked, text)
+        assert leaked not in payload, (leaked, payload)
+    assert "<redacted>" in text
+    assert "<path>" in text or "<repo>" in text

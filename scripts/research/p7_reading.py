@@ -165,7 +165,14 @@ limit-events read a restated row refuses, a factor manifest check, an empty plan
 cross-section) writes a refused block -- every test `not_measurable`, the declared family, no
 verdict, and a redacted `measurement refused: <Type>: <disclosable message>` reason -- while
 `result.json` and `result.txt` carry the full G-0 secondary diagnostics as usual. A refusal in
-the section may not cost the spent window the reading the claim was written for. The block is
+the section may not cost the spent window the reading the claim was written for. The refusal
+message is redacted before it enters those files: the known store roots -- the repository root
+(which can contain spaces), the runtime directory and the home directory -- are replaced by
+`<repo>`/`<runtime>`/`<home>` by literal match first, any remaining absolute path (spaces
+included) becomes `<path>` from its first marker, any token containing a slash becomes `<path>`,
+`NAME=value` credential assignments keep their name with `<redacted>` as the value, and the line is
+truncated; a refused block is marked `refused: true` and its per-test session counts are `None`
+("not reached"), never a plausible 0. The block is
 held to the registration again before the result is written (`_require_ab_result`): frozen
 values, outcome categories, the p-value/rank/rejection of each measured test, the candidate rule,
 and the declared family with its reported and withheld tests; a mismatched block is recorded as
@@ -503,6 +510,7 @@ _AB_RESULT_KEYS: Final = frozenset(
         "false_discovery_rate",
         "minimum_vetoed_observations",
         "dependence",
+        "refused",
         "family_size",
         "family",
         "withheld",
@@ -1937,6 +1945,7 @@ def evaluate_ab_tests(spec: AbTests, series: Sequence[AbTestSeries]) -> dict[str
         "false_discovery_rate": spec.false_discovery_rate,
         "minimum_vetoed_observations": spec.veto.minimum_observations,
         "dependence": AB_DEPENDENCE,
+        "refused": False,
         "family_size": len(entries),
         "family": family,
         "withheld": withheld,
@@ -1957,8 +1966,10 @@ def _require_ab_result(spec: AbTests, document: Mapping[str, Any]) -> dict[str, 
     back against the registration; every outcome must be one of the three; a `not_measurable` test
     carries no p-value and no rank; a measured test carries both and its `candidate`/`no_evidence`
     outcome must agree with its own rejection and mean; the family and its size must be the
-    measured tests, ranked by the FDR procedure's own order. A document that fails any of it is
-    refused with the claim standing -- no result is written.
+    measured tests, ranked by the FDR procedure's own order. A **refused** block (`refused: true`,
+    every test `not_measurable`, no session count reached, family empty and every test withheld) is
+    the refused shape `_refused_ab_tests` writes and is accepted as this registration's; `read_once`
+    records a block that fails any of this as refused rather than discarding the measured document.
     """
     try:
         block = _require_keys("ab_tests result", document.get("ab_tests"), _AB_RESULT_KEYS)
@@ -1990,6 +2001,11 @@ def _require_ab_result(spec: AbTests, document: Mapping[str, Any]) -> dict[str, 
         raise ReadingConfigurationError(
             f"the measure's ab_tests carries {len(tests) if isinstance(tests, list) else tests!r} "
             f"test(s) and the registration {len(spec.entries)}"
+        )
+    refused = block["refused"]
+    if type(refused) is not bool:
+        raise ReadingConfigurationError(
+            f"the measure's ab_tests refused flag is {refused!r}, not a bool"
         )
     measured_ids: list[str] = []
     withheld: list[str] = []
@@ -2024,18 +2040,29 @@ def _require_ab_result(spec: AbTests, document: Mapping[str, Any]) -> dict[str, 
                 f"the measure's ab_tests test {entry.test_id!r} carries a non-text reason"
             )
         sampled, measured = item["sampled_sessions"], item["measured_periods"]
-        if type(sampled) is not int or type(measured) is not int or not 0 <= measured <= sampled:
+        if refused:
+            if sampled is not None or measured is not None:
+                raise ReadingConfigurationError(
+                    f"the measure's refused ab_tests test {entry.test_id!r} carries session "
+                    f"counts ({sampled!r}, {measured!r}); a refused test reached no sample"
+                )
+            if item["vetoed_observations"] is not None:
+                raise ReadingConfigurationError(
+                    f"the measure's refused ab_tests test {entry.test_id!r} carries an "
+                    "observation count"
+                )
+        elif type(sampled) is not int or type(measured) is not int or not 0 <= measured <= sampled:
             raise ReadingConfigurationError(
                 f"the measure's ab_tests test {entry.test_id!r} measured {measured!r} of "
                 f"{sampled!r} sampled period(s)"
             )
-        if entry.kind == "veto_difference":
+        if not refused and entry.kind == "veto_difference":
             if type(item["vetoed_observations"]) is not int or item["vetoed_observations"] < 0:
                 raise ReadingConfigurationError(
                     f"the measure's ab_tests test {entry.test_id!r} carries no vetoed "
                     "observation count"
                 )
-        elif item["vetoed_observations"] is not None:
+        elif not refused and item["vetoed_observations"] is not None:
             raise ReadingConfigurationError(
                 f"the measure's ab_tests test {entry.test_id!r} tests a factor and carries a "
                 "vetoed observation count"
@@ -2106,6 +2133,17 @@ def _require_ab_result(spec: AbTests, document: Mapping[str, Any]) -> dict[str, 
             f"family of {expected_family} registered test(s): R-R1's family is all of them, "
             "measured or withheld"
         )
+    if refused:
+        if (
+            block["family"] != []
+            or block["withheld"] != [entry.test_id for entry in spec.entries]
+            or ranks
+        ):
+            raise ReadingConfigurationError(
+                "the measure's refused ab_tests block reports a verdict or withholds less than "
+                "every registered test"
+            )
+        return dict(block)
     if len(measured_ids) + len(withheld) != expected_family or sorted(ranks.values()) != list(
         range(1, len(measured_ids) + 1)
     ):
@@ -2130,45 +2168,117 @@ def _require_ab_result(spec: AbTests, document: Mapping[str, Any]) -> dict[str, 
     return dict(block)
 
 
-_AB_PATH_TOKEN: Final = re.compile(r"(?<![\w.-])(?:~/|/)[^\s,;:)\]]+")
-"""Anything that looks like an absolute or home path in a refusal message, redacted before the
-message enters a result: an A/B refusal is a data verdict, and a result file is not a place to
-learn where a store lives (`panel_view.PANEL_STORE_PLACEHOLDER`'s rule)."""
+_AB_PATH_TOKEN: Final = re.compile(r"\S*/\S*")
+"""A token containing a slash, redacted once the known store roots have been replaced. A relative
+path (`panel/catalog.duckdb`) contains no absolute prefix of its own, so the token pass is what
+catches it."""
 
-_AB_SECRET: Final = re.compile(r"(?i)\b(token|secret|password|passwd|api[_-]?key)\s*[=:]\s*\S+")
-"""A credential-looking assignment, redacted the same way. The A/B measurement touches no
-credential, so this can only catch a message that quotes one; redacting it costs nothing."""
+_AB_SECRET_ASSIGNMENTS: Final = (
+    re.compile(r"(?i)([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)[A-Z0-9_]*)\s*[=:]\s*\S+"),
+    re.compile(
+        r"(?i)\b([A-Za-z0-9_-]*(?:token|secret|password|passwd|api[_-]?key)[A-Za-z0-9_-]*)"
+        r"\s*[=:]\s*\S+"
+    ),
+)
+"""Credential-looking assignments. The first pattern catches `NAME=value` environment forms whose
+name has no word boundary before the keyword (`TUSHARE_TOKEN`, `DEEPSEEK_API_KEY` -- the `_` is a
+word character, which is why the earlier `\btoken` form never matched them); the second catches
+prose forms (`Tushare token: abc`). Both keep the name and redact the value."""
+
+_AB_MAX_REASON: Final = 300
+"""A refusal reason is one bounded line. The result file of a spent window is permanent; a long
+message is truncated rather than allowed to grow it unboundedly."""
 
 
-def _refusal_reason(error: BaseException) -> str:
-    """`measurement refused: <Type>: <disclosable message>` for one A/B refusal.
+def _redaction_roots(*, repo: Path | None, runtime: Path | None) -> tuple[tuple[str, str], ...]:
+    """The known store locations, as `(literal, placeholder)` pairs longest first.
+
+    The result file must not name where the panel lives, and the path can contain spaces -- this
+    repository's own root does. Replacing the known roots' exact spellings before any regex is
+    what closes the space case: a regex token stops at the first blank, the literal replacement
+    does not. `Path.home()` is always included (`<home>`); the repository root and the runtime
+    directory are `<repo>` and `<runtime>`.
+    """
+    named: list[tuple[Path | None, str]] = [
+        (Path.home(), "<home>"),
+        (repo, "<repo>"),
+        (runtime, "<runtime>"),
+    ]
+    pairs: list[tuple[str, str]] = []
+    for path, placeholder in named:
+        if path is None:
+            continue
+        for spelling in {str(path), str(path.expanduser())}:
+            if len(spelling) > 1:  # never replace the filesystem root itself
+                pairs.append((spelling, placeholder))
+        try:
+            resolved = str(path.resolve())
+        except OSError:  # pragma: no cover - a path whose parent disappeared
+            resolved = ""
+        if len(resolved) > 1:
+            pairs.append((resolved, placeholder))
+    return tuple(sorted(set(pairs), key=lambda pair: len(pair[0]), reverse=True))
+
+
+def _first_path_marker(text: str) -> int | None:
+    """Where the first absolute/home path starts, or `None`: a path may contain spaces, so the
+    only safe cut for an unknown absolute path is from its first `/` or `~` to the end."""
+    for index, char in enumerate(text):
+        if char in "~/" and (index == 0 or text[index - 1] in " \t([=:'\""):
+            return index
+    return None
+
+
+def _redacted_message(message: str, roots: Sequence[tuple[str, str]]) -> str:
+    """One refusal message with every known root, path and credential assignment redacted."""
+    text = " ".join(str(message).split())
+    for needle, placeholder in roots:
+        text = text.replace(needle, placeholder)
+    marker = _first_path_marker(text)
+    if marker is not None:
+        text = text[:marker].rstrip() + " <path>"
+    text = _AB_PATH_TOKEN.sub("<path>", text)
+    for pattern in _AB_SECRET_ASSIGNMENTS:
+        text = pattern.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+    return text
+
+
+def _refusal_reason(error: BaseException, *, roots: Sequence[tuple[str, str]] = ()) -> str:
+    """`measurement refused: <Type>: <redacted message>` for one A/B refusal.
 
     The message is the error's own `disclosable` text where it declares one (the repository's
     convention for text a body may carry: `PanelStorageError.disclosable`, `ModelViewError`), and
-    otherwise its `str`, with anything shaped like a path or a credential assignment replaced.
-    The result file is written and kept for a spent window, so it must not be a channel for the
-    store's location.
+    otherwise its `str`. Either is redacted: the known store roots (repository, runtime, home) are
+    replaced by `<repo>`/`<runtime>`/`<home>`, any remaining absolute path -- spaces included --
+    becomes `<path>` from its first marker, any token containing a slash becomes `<path>`, and any
+    credential-shaped assignment keeps its name with `<redacted>` as the value. The result is one
+    line, truncated to `_AB_MAX_REASON`. The result file is written and kept for a spent window,
+    so it must not be a channel for the store's location or a credential.
     """
     message = getattr(error, "disclosable", None)
     if not isinstance(message, str) or not message.strip():
         message = str(error)
-    text = " ".join(message.split())
-    text = _AB_PATH_TOKEN.sub("<path>", text)
-    text = _AB_SECRET.sub(lambda match: f"{match.group(1)}=<redacted>", text)
-    return f"measurement refused: {type(error).__name__}: {text or 'no message'}"
+    text = _redacted_message(message, roots) or "no message"
+    reason = f"measurement refused: {type(error).__name__}: {text}"
+    if len(reason) > _AB_MAX_REASON:
+        reason = reason[: _AB_MAX_REASON - 3].rstrip() + "..."
+    return reason
 
 
-def _refused_ab_tests(spec: AbTests, error: BaseException) -> dict[str, Any]:
+def _refused_ab_tests(
+    spec: AbTests, error: BaseException, *, roots: Sequence[tuple[str, str]] = ()
+) -> dict[str, Any]:
     """The A/B block written when this read's A/B measurement was refused.
 
     A refusal in the A/B section must not cost G-0 its secondary diagnostics: the one read is
     spent once the claim is written, and the G-0 document has already been measured when this
     block is built. So the block keeps every frozen value and writes each test `not_measurable`
-    with the redacted refusal as its reason, family size the declared family, no reported verdict
-    and every test withheld; the G-0 document goes to `result.json` and `result.txt` as usual. It
-    is the same shape `_require_ab_result` accepts, so a refused block is still the registration's.
+    with the redacted refusal as its reason; the block is marked `refused: true`, reports no
+    verdict, withholds every test, and the per-test session counts are `None` -- "not reached",
+    which is the truth and not an empty plan. The G-0 document goes to `result.json` and
+    `result.txt` as usual. The shape is what `_require_ab_result` accepts for a refused block.
     """
-    reason = _refusal_reason(error)
+    reason = _refusal_reason(error, roots=roots)
     tests: list[dict[str, Any]] = []
     for entry in spec.entries:
         veto = entry.kind == "veto_difference"
@@ -2181,8 +2291,8 @@ def _refused_ab_tests(spec: AbTests, error: BaseException) -> dict[str, Any]:
                 "alternative": entry.alternative,
                 "horizon": spec.horizon,
                 "stride": spec.stride,
-                "sampled_sessions": 0,
-                "measured_periods": 0,
+                "sampled_sessions": None,
+                "measured_periods": None,
                 "mean": None,
                 "sd": None,
                 "t": None,
@@ -2196,7 +2306,7 @@ def _refused_ab_tests(spec: AbTests, error: BaseException) -> dict[str, Any]:
                 "outcome": AB_NOT_MEASURABLE,
                 "reason": reason,
                 "wording": AB_NOT_MEASURABLE_WORDING,
-                "vetoed_observations": 0 if veto else None,
+                "vetoed_observations": None,
                 "minimum_vetoed_observations": (spec.veto.minimum_observations if veto else None),
             }
         )
@@ -2208,6 +2318,7 @@ def _refused_ab_tests(spec: AbTests, error: BaseException) -> dict[str, Any]:
         "false_discovery_rate": spec.false_discovery_rate,
         "minimum_vetoed_observations": spec.veto.minimum_observations,
         "dependence": AB_DEPENDENCE,
+        "refused": True,
         "family_size": len(spec.entries),
         "family": [],
         "withheld": [entry.test_id for entry in spec.entries],
@@ -2228,17 +2339,19 @@ def ab_tests_lines(block: Mapping[str, Any]) -> list[str]:
     family_size = block["family_size"]
     reported = block["family"]
     withheld = block["withheld"]
+    refused = block["refused"]
     lines = [
         f"ab tests {block['schema']}: {len(tests)} test(s); declared family size {family_size}, "
         f"Benjamini-Hochberg at q={_number(block['false_discovery_rate'])}: "
         f"{len(reported)} measured test(s) reported, {len(withheld)} not measurable withheld "
-        "from the verdicts but counted in the family; every conclusion is an exploratory "
-        "candidate (探索性候选), never confirmatory evidence"
+        "from the verdicts but counted in the family"
+        + ("; the A/B measurement was refused, so every test is not_measurable" if refused else "")
+        + "; every conclusion is an exploratory candidate (探索性候选), never confirmatory evidence"
     ]
     for item in tests:
         details = [
-            f"sampled {item['sampled_sessions']}",
-            f"measured {item['measured_periods']}",
+            f"sampled {_number(item['sampled_sessions'])}",
+            f"measured {_number(item['measured_periods'])}",
             f"mean {_number(item['mean'])}",
             f"t {_number(item['t'])}",
             f"one-sided p {_number(item['p_one_sided'])}",
@@ -2517,6 +2630,7 @@ def _measured_ab_tests(
     captured: _Captured,
     store: PanelStore,
     as_of: datetime,
+    roots: Sequence[tuple[str, str]] = (),
 ) -> dict[str, Any] | None:
     """The A/B block measured on its own, isolated from the G-0 document.
 
@@ -2529,7 +2643,9 @@ def _measured_ab_tests(
     `DiagnosticWindowError` can escape from here: the G-0 engine's own window checks have already
     run, and `_vetoed_on`'s calendar edge is a `ReadingError` for exactly this reason.
 
-    `None` when the registration carries no A/B section -- that is the old reading, unchanged.
+    `None` when the registration carries no A/B section -- that is the old reading, unchanged;
+    `roots` are the known store locations `_refused_ab_tests` redacts by literal replacement
+    before the regex passes, because a path can contain spaces.
     """
     if ab_tests is None:
         return None
@@ -2544,13 +2660,13 @@ def _measured_ab_tests(
             factor_reads=_FactorReads(store, as_of=as_of),
         )
     except Exception as error:  # the isolation is the point; see the docstring
-        return _refused_ab_tests(ab_tests, error)
+        return _refused_ab_tests(ab_tests, error, roots=roots)
 
 
 # --- the default measure -------------------------------------------------------------------------
 
 
-def _panel_measure(runtime_dir: Path) -> Measure:
+def _panel_measure(runtime_dir: Path, *, repo: Path | None = None) -> Measure:
     """The registered diagnostics on the panel inside `runtime_dir`, capped at the window.
 
     The calendar, every score and label, and the content hash of every partition served are all
@@ -2559,8 +2675,14 @@ def _panel_measure(runtime_dir: Path) -> Measure:
     called). The hold is kept across the computation as well: writers wait for it, which a read of
     a cloned panel can afford. The document records the registration's `code_commit`, which steps
     2 and 3 of `read_once` hold the running code to.
+
+    `repo` is the repository root when the caller knows it (the read-once path does); with the
+    A/B section it joins `runtime_dir` and the home directory as a literal redaction root, so a
+    refusal message cannot carry a store path -- this repository's own root contains a space.
+    Called with no `repo`, the runtime directory and the home directory are the roots.
     """
     checked_runtime_directory(runtime_dir)
+    roots = _redaction_roots(repo=repo, runtime=runtime_dir)
 
     def measure(
         body: Mapping[str, Any], window: DiagnosticWindow, binding: Mapping[str, Any]
@@ -2630,6 +2752,7 @@ def _panel_measure(runtime_dir: Path) -> Measure:
                 captured=captured,
                 store=store,
                 as_of=explore.as_of,
+                roots=roots,
             )
             partitions = store.partitions_read()
         document = diagnostic_document(
@@ -2741,7 +2864,7 @@ def read_once(
         "claim_sha256": hashlib.sha256(claim_content).hexdigest(),
     }
     measured = _measured(
-        _panel_measure(runtime_dir) if measure is None else measure,
+        _panel_measure(runtime_dir, repo=root) if measure is None else measure,
         committed.body,
         window,
         binding,
@@ -2757,7 +2880,11 @@ def read_once(
                 # the whole read down with it. The read-once design exists to keep the result a
                 # spent window paid for, and a malformed block is exactly the case where refusing
                 # would cost the read while the refused block still says what went wrong.
-                result["ab_tests"] = _refused_ab_tests(registered.ab_tests, error)
+                result["ab_tests"] = _refused_ab_tests(
+                    registered.ab_tests,
+                    error,
+                    roots=_redaction_roots(repo=root, runtime=runtime_dir),
+                )
     elif "ab_tests" in measured:
         raise ReadingConfigurationError(
             "the measure wrote an ab_tests block the registration does not carry; the claim "
