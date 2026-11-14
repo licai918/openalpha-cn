@@ -1,11 +1,23 @@
 """`scripts/survivor_annotate.py`: A's veto and B's factors beside the daily list.
 
 The annotation is a **print-only** command for the human trader: it reads a finished survivor
-day's journal and a clone of the panel, and prints one row per name the day's plan acts on --
+day's journal and a clone of the panel, and prints one row per name the day's plan **acts on** --
 its role in that plan, plan A's veto with the count and mean the rule was decided from, and plan
 B's two limit-event factors with their percentile in the stored cross section. It writes
 nothing, sends no request, admits no registration and is not bound by one (R-N2): every cell is
 candidate reference, never part of the list, the paper book or the journal.
+
+The roles come from the orders the user actually places (`paper.open_orders`, through
+`plan_names`): `ENTRY` is a planned or carried buy, `EXIT` a live sell (so a carried sell is not
+mistaken for a holding), `HOLD` a holding with no live sell, `WATCH` the next names the rule
+would draw. The decision's `entries`/`exits` are a cross-check, not the source: a journal whose
+orders and decision disagree is refused by name rather than printed with a role nobody can act
+on.
+
+The smoke banner fails on: it is derived from the journal's recorded `registration.path`, whose
+`sha256` must equal the journal's, so a smoke day is bracketed with or without `--registration`;
+when no registration can be resolved or verified, the first and last lines say the smoke status
+is unknown rather than staying silent.
 
 Everything here is built at test time: the panel is generated and written through the real
 writers (hard rule 6), the B raw builds go through the real factor engine with the evaluator
@@ -13,11 +25,11 @@ seam planted, and the journal is a fabricated complete `openalpha-daily-survivor
 generated calendar is `panel_fixtures`' `SZSE` one, so the command's own exchange discovery is
 exercised rather than assumed.
 
-Two refusals carry the issue's boundaries: a session with no raw B build exits 1 and prints the
-exact `openalpha factor build ...` line (review focus 3), and a session inside the veto window
+Three refusals carry the issue's boundaries: a session with no raw B build exits 1 and prints
+the exact `openalpha factor build ...` line (review focus 3); a session inside the veto window
 restated after its own 16:30 refuses by name rather than reproducing a different vetoed set
-(R-N3a) -- the panel store keeps no earlier version of a restated row, so the read raises
-`PanelStorageError` and the annotation must convert it, not show the restated bytes.
+(R-N3a); and a window that reaches the start of the panel's calendar says so instead of being
+blamed on a restatement.
 """
 
 from __future__ import annotations
@@ -95,6 +107,9 @@ HOLD_VETOED_CODE: Final[str] = "600000.SH"
 HOLD_PLAIN_CODE: Final[str] = "300750.SZ"
 WATCH_CODE: Final[str] = "601318.SH"
 """Left out of both B builds, so its two factor cells are the `null` case."""
+CARRIED_BUY_CODE: Final[str] = "600519.SH"
+CARRIED_SELL_CODE: Final[str] = "688981.SH"
+"""Orders still live from an earlier evening: a BUY the user still places and a repeat SELL."""
 BROKEN_VALUES: Final[Mapping[str, float]] = MappingProxyType(
     {
         ENTRY_CODE: 2.0,
@@ -109,6 +124,12 @@ BROKEN_VALUES: Final[Mapping[str, float]] = MappingProxyType(
 """B's broken-board values, planted through the evaluator seam: one number per subject."""
 LATER_UP_VALUE: Final[float] = 5.0
 """A second `limit_up_count_20` build two hours after the close: the earliest build must win."""
+EARLY_UP_VALUE: Final[float] = 9.0
+"""A build stamped at noon on the session's own day: it did not know that day's close."""
+PREVIOUS_UP_VALUE: Final[float] = 7.0
+"""A build of the previous session, visible at the read but not this session's answer."""
+NEXT_UP_VALUE: Final[float] = 8.0
+"""A build stamped on the session after: it is not this session's answer either."""
 SMOKE_REGISTRATION: Final[dict[str, Any]] = {"settings": {"smoke_run": {"issue": "V2-P7-019"}}}
 
 
@@ -123,6 +144,7 @@ class World:
     config_id: str
     session: date
     journal_path: Path
+    registration_path: Path
 
     @property
     def panel_directory(self) -> Path:
@@ -206,31 +228,55 @@ def _build(
     )
 
 
+RECORDED_REGISTRATION_NAME: Final[str] = "p7-registration.json"
+"""The bare name `daily_selection` records, resolved against the repository root and so usually
+unresolvable from a runtime directory: the banner then says the smoke status is unknown."""
+
+
 def _journal(
     *,
     session: date,
     config_id: str,
     paper: Mapping[str, Any] | None,
     opening: Mapping[str, Any] | None = None,
+    registration_path: Path | None = None,
+    recorded_path: str | None = None,
+    recorded_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """A finished survivor day as the command files it: JSON, `result` present, wording last."""
+    """A finished survivor day as the command files it: JSON, `result` present, wording last.
+
+    `registration_path` records that file's absolute path and its real sha256, so the annotation
+    can verify it by default; without one the journal records only the bare name the daily
+    command writes, which is unresolvable and exercises the "not verified" banner.
+    """
     result: dict[str, Any] = {"session": session.isoformat(), "wording": SURVIVOR_WORDING}
     if opening is not None:
         result["opening"] = dict(opening)
     else:
         result["paper"] = None if paper is None else dict(paper)
+    registration: dict[str, Any] = {
+        "path": (
+            str(registration_path) if registration_path is not None else RECORDED_REGISTRATION_NAME
+        ),
+        "sha256": (
+            hashlib.sha256(registration_path.read_bytes()).hexdigest()
+            if registration_path is not None
+            else "a" * 64
+        ),
+        "commit": "b" * 40,
+        "config_id": config_id,
+    }
+    if recorded_path is not None:
+        registration["path"] = recorded_path
+    if recorded_sha256 is not None:
+        registration["sha256"] = recorded_sha256
     return {
         "schema": daily.SURVIVOR_JOURNAL_SCHEMA,
         "session": session.isoformat(),
         "as_of": _evening(session).isoformat(),
         "held": [],
         "held_from": None,
-        "registration": {
-            "path": "p7-registration.json",
-            "sha256": "a" * 64,
-            "commit": "b" * 40,
-            "config_id": config_id,
-        },
+        "registration": registration,
         "panel": {"caught_up": []},
         "result": result,
     }
@@ -242,11 +288,27 @@ def _plan(
     exits: Sequence[str] = (),
     holdings: Sequence[str] = (),
     watch: Sequence[str] = (),
+    buys: Sequence[str] = (),
+    carried_buys: Sequence[str] = (),
+    sells: Sequence[str] | None = None,
+    carried_sells: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """The `result.paper` block `plan_names` and the decision's two lists are read out of."""
+    """The `result.paper` block the annotation reads: the orders, the book, and the decision.
+
+    `sells` defaults to `exits` -- the evening's decided sells are the sell orders it planned --
+    and the two carried lists are orders still live from earlier evenings, which the decision
+    lists do not mention.
+    """
+    decided_sells = tuple(exits) if sells is None else tuple(sells)
+    orders = (
+        [{"ts_code": code, "side": "buy", "carried": False} for code in buys]
+        + [{"ts_code": code, "side": "buy", "carried": True} for code in carried_buys]
+        + [{"ts_code": code, "side": "sell", "carried": False} for code in decided_sells]
+        + [{"ts_code": code, "side": "sell", "carried": True} for code in carried_sells]
+    )
     return {
         "book": {"holdings": [{"ts_code": code} for code in holdings]},
-        "open_orders": [{"ts_code": code, "side": "sell", "carried": False} for code in exits],
+        "open_orders": orders,
         "decision": {
             "exits": [{"ts_code": code, "reason": "lost_survivor"} for code in exits],
             "entries": [{"ts_code": code, "reason": "INITIAL_BUILD"} for code in entries],
@@ -256,11 +318,15 @@ def _plan(
 
 
 def _story_plan() -> dict[str, Any]:
+    """A plan with every role, including the two orders carried over from earlier evenings."""
     return _plan(
         entries=(ENTRY_CODE,),
         exits=(EXIT_CODE,),
-        holdings=(EXIT_CODE, HOLD_VETOED_CODE, HOLD_PLAIN_CODE),
+        holdings=(EXIT_CODE, CARRIED_SELL_CODE, HOLD_VETOED_CODE, HOLD_PLAIN_CODE),
         watch=(WATCH_CODE,),
+        buys=(ENTRY_CODE,),
+        carried_buys=(CARRIED_BUY_CODE,),
+        carried_sells=(CARRIED_SELL_CODE,),
     )
 
 
@@ -279,6 +345,8 @@ def _story(root: Path) -> World:
     runtime = root / "runtime"
     store = PanelStore(runtime / "panel")
     write_generated_panel(store, panel)
+    registration = root / "registration.json"
+    registration.write_text(json.dumps({"settings": {}}), encoding="utf-8")
     published = _published(session)
     subjects = tuple(code for code in panel.securities if code != WATCH_CODE)
     limit_up = _build(
@@ -305,8 +373,39 @@ def _story(root: Path) -> World:
         subjects=subjects,
         values=lambda code: LATER_UP_VALUE,
     )
-    write_factor_panels(store, [limit_up, broken, rebuilt])
-    journal = _journal(session=session, config_id=CONFIG_ID, paper=_story_plan())
+    # The three builds that must not be this session's answer: before its close, on the day
+    # before, and on the day after.
+    early = _build(
+        store,
+        panel,
+        LIMIT_UP_COUNT_20,
+        as_of=datetime(session.year, session.month, session.day, 12, 0, tzinfo=SHANGHAI),
+        subjects=subjects,
+        values=lambda code: EARLY_UP_VALUE,
+    )
+    previous = _build(
+        store,
+        panel,
+        LIMIT_UP_COUNT_20,
+        as_of=_published(panel.sessions[TARGET_INDEX - 1]),
+        subjects=subjects,
+        values=lambda code: PREVIOUS_UP_VALUE,
+    )
+    following = _build(
+        store,
+        panel,
+        LIMIT_UP_COUNT_20,
+        as_of=_published(panel.sessions[TARGET_INDEX + 1]),
+        subjects=subjects,
+        values=lambda code: NEXT_UP_VALUE,
+    )
+    write_factor_panels(store, [limit_up, broken, rebuilt, early, previous, following])
+    journal = _journal(
+        session=session,
+        config_id=CONFIG_ID,
+        paper=_story_plan(),
+        registration_path=registration,
+    )
     path = _write_journal(runtime, CONFIG_ID, journal)
     return World(
         root=root,
@@ -316,6 +415,7 @@ def _story(root: Path) -> World:
         config_id=CONFIG_ID,
         session=session,
         journal_path=path,
+        registration_path=registration,
     )
 
 
@@ -341,6 +441,7 @@ def _bare(root: Path) -> World:
         config_id=CONFIG_ID,
         session=session,
         journal_path=path,
+        registration_path=root / "registration.json",
     )
 
 
@@ -406,10 +507,10 @@ def _tree(root: Path) -> dict[str, str]:
 
 
 def test_the_four_roles_appear_once_each(capsys: pytest.CaptureFixture[str], story: World) -> None:
-    """The plan's names carry ENTRY, EXIT, HOLD and WATCH, and every name appears once.
+    """Every role appears; each name once, and a carried order is a row like any other.
 
-    The exit name is also in the book's holdings -- a decided sale is still held until the open
-    -- so the row proves the role precedence rather than reading the book twice.
+    The exit names are also in the book's holdings -- a sale is still held until the open -- so
+    the rows prove the role precedence rather than reading the book twice.
     """
     document = _document(capsys, story)
 
@@ -418,15 +519,91 @@ def test_the_four_roles_appear_once_each(capsys: pytest.CaptureFixture[str], sto
     assert document["config_id"] == CONFIG_ID
     assert document["wording"] == SURVIVOR_WORDING
     roles = [row["role"] for row in document["rows"]]
-    assert roles == ["ENTRY", "EXIT", "HOLD", "HOLD", "WATCH"]
+    assert roles == ["ENTRY", "ENTRY", "EXIT", "EXIT", "HOLD", "HOLD", "WATCH"]
     assert set(roles) == {"ENTRY", "EXIT", "HOLD", "WATCH"}
     assert [row["ts_code"] for row in document["rows"]] == [
         ENTRY_CODE,
+        CARRIED_BUY_CODE,
         EXIT_CODE,
+        CARRIED_SELL_CODE,
         HOLD_PLAIN_CODE,
         HOLD_VETOED_CODE,
         WATCH_CODE,
     ]
+    assert "smoke" not in document
+
+
+def test_a_carried_buy_and_a_carried_sell_are_both_rows_with_their_roles(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """The orders still live from earlier evenings are on the list the user acts on.
+
+    Neither is in the evening's decision: a carried buy is not a new entry and a carried sell is
+    not a new exit, so a role read off `decision.entries`/`decision.exits` would miss the buy and
+    call the sell a `HOLD`.
+    """
+    document = _document(capsys, story)
+    rows = _rows(document)
+    journal = json.loads(story.journal_path.read_text(encoding="utf-8"))
+    decision = journal["result"]["paper"]["decision"]
+    decided_entries = {item["ts_code"] for item in decision["entries"]}
+    decided_exits = {item["ts_code"] for item in decision["exits"]}
+    assert CARRIED_BUY_CODE not in decided_entries
+    assert CARRIED_SELL_CODE not in decided_exits
+
+    assert rows[CARRIED_BUY_CODE]["role"] == "ENTRY"
+    assert rows[CARRIED_SELL_CODE]["role"] == "EXIT"
+    assert CARRIED_SELL_CODE not in {
+        row["ts_code"] for row in document["rows"] if row["role"] == "HOLD"
+    }
+
+
+def test_a_journal_whose_orders_contradict_its_decision_is_refused_by_name(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """The decision is a cross-check: an order it does not name refuses rather than mis-roles."""
+    plan = _story_plan()
+    plan["open_orders"].append({"ts_code": HOLD_PLAIN_CODE, "side": "buy", "carried": False})
+    config_id = "cfg-annotation-mismatch1"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=plan,
+            registration_path=story.registration_path,
+        ),
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+    assert code == 1
+    assert out == ""
+    assert "disagree" in err
+    assert HOLD_PLAIN_CODE in err
+
+    missing_sell = _story_plan()
+    missing_sell["open_orders"] = [
+        order
+        for order in missing_sell["open_orders"]
+        if not (order["side"] == "sell" and order["ts_code"] == EXIT_CODE)
+    ]
+    config_id = "cfg-annotation-mismatch2"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=missing_sell,
+            registration_path=story.registration_path,
+        ),
+    )
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+    assert code == 1
+    assert out == ""
+    assert "disagree" in err
+    assert EXIT_CODE in err
 
 
 def test_the_annotation_prints_the_header_every_role_and_the_journal_wording(
@@ -441,10 +618,12 @@ def test_the_annotation_prints_the_header_every_role_and_the_journal_wording(
     assert lines[0] == annotate.HEADER
     assert lines[-1] == SURVIVOR_WORDING
     body = lines[1:-1]
-    assert len(body) == 5
+    assert len(body) == 7
     by_code = {line.split()[1]: line for line in body}
     assert by_code[ENTRY_CODE].startswith(f"ENTRY {ENTRY_CODE} | veto: none")
+    assert by_code[CARRIED_BUY_CODE].startswith(f"ENTRY {CARRIED_BUY_CODE} | veto: none")
     assert by_code[EXIT_CODE].startswith(f"EXIT {EXIT_CODE} | veto: none")
+    assert by_code[CARRIED_SELL_CODE].startswith(f"EXIT {CARRIED_SELL_CODE} | veto: none")
     vetoed = by_code[HOLD_VETOED_CODE]
     assert vetoed.startswith(f"HOLD {HOLD_VETOED_CODE} | veto: market_bearish_5/v1, vetoed")
     assert "events 1" in vetoed
@@ -520,6 +699,36 @@ def test_the_earliest_raw_build_at_or_after_the_close_is_the_one_shown(
     assert row["limit_up_count_20"]["value"] == 0.0
     assert row["limit_up_count_20"]["value"] != LATER_UP_VALUE
     assert row["broken_board_count_20"]["value"] == BROKEN_VALUES[ENTRY_CODE]
+
+
+def test_a_build_stamped_before_the_sessions_close_is_not_a_session_answer(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """A noon build on the session's own day did not know the close, so it answers nothing."""
+    row = _rows(_document(capsys, story))[ENTRY_CODE]
+
+    assert row["limit_up_count_20"]["value"] == 0.0
+    assert row["limit_up_count_20"]["value"] != EARLY_UP_VALUE
+
+
+def test_a_build_stamped_on_the_previous_session_is_not_this_sessions_answer(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """An earlier session's build is visible at the read and must still not answer this one."""
+    row = _rows(_document(capsys, story))[ENTRY_CODE]
+
+    assert row["limit_up_count_20"]["value"] == 0.0
+    assert row["limit_up_count_20"]["value"] != PREVIOUS_UP_VALUE
+
+
+def test_a_build_stamped_on_the_next_session_is_not_shown(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """A build published on the following day cannot substitute for this session's."""
+    row = _rows(_document(capsys, story))[ENTRY_CODE]
+
+    assert row["limit_up_count_20"]["value"] == 0.0
+    assert row["limit_up_count_20"]["value"] != NEXT_UP_VALUE
 
 
 # --- the command writes nothing and sends no request (R-N2) --------------------------------------
@@ -814,6 +1023,28 @@ def test_a_restatement_inside_the_veto_window_is_refused_and_writes_nothing(
     assert _tree(runtime / "panel") == panel_before
 
 
+def test_a_window_reaching_the_calendar_start_names_the_calendar(
+    capsys: pytest.CaptureFixture[str], bare: World
+) -> None:
+    """A January session whose predecessors the panel does not store says so, not "restated"."""
+    session = bare.panel.sessions[0]  # 2026-01-05: the first session this panel stores
+    config_id = "cfg-annotation-january"
+    _write_journal(
+        bare.runtime,
+        config_id,
+        _journal(session=session, config_id=config_id, paper=_story_plan()),
+    )
+
+    code, out, err = _invoke(capsys, _arguments(bare, session=session, config_id=config_id))
+
+    assert code == 1
+    assert out == ""
+    assert "start of the calendar" in err
+    assert "five-session window" in err
+    assert "2025 trade_cal" in err
+    assert "restat" not in err
+
+
 # --- the default session and the smoke banner ----------------------------------------------------
 
 
@@ -838,33 +1069,143 @@ def test_the_default_session_is_the_newest_complete_journal(
     assert document["session"] == story.session.isoformat()
 
 
-def test_a_smoke_registration_banners_the_annotation(
+def test_a_smoke_journal_banners_the_annotation_without_the_flag(
     capsys: pytest.CaptureFixture[str], story: World, tmp_path: Path
 ) -> None:
-    """A smoke registration marks the printed form first and last and the JSON under `smoke`."""
+    """The banner is derived from the journal's own registration, not only from the flag."""
     registration = tmp_path / "smoke-registration.json"
     registration.write_text(json.dumps(SMOKE_REGISTRATION), encoding="utf-8")
-    arguments = [*_arguments(story, session=story.session), "--registration", str(registration)]
+    config_id = "cfg-annotation-smoke01"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=_story_plan(),
+            registration_path=registration,
+        ),
+    )
 
-    code, out, err = _invoke(capsys, arguments)
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
     assert code == 0, err
     lines = out.splitlines()
     assert lines[0] == daily.SMOKE_BANNER
     assert lines[-1] == daily.SMOKE_BANNER
 
-    code, out, err = _invoke(capsys, [*arguments, "--json"])
+    code, out, err = _invoke(
+        capsys,
+        _arguments(story, session=story.session, config_id=config_id, json_output=True),
+    )
     assert code == 0, err
     assert json.loads(out)[daily.SMOKE_DOCUMENT_KEY] == daily.SMOKE_BANNER
+
+
+def test_the_registration_flag_must_match_the_journals_sha256(
+    capsys: pytest.CaptureFixture[str], story: World, tmp_path: Path
+) -> None:
+    """An override that is a different file is a usage error, not a silent banner source."""
+    other = tmp_path / "another-registration.json"
+    other.write_text(
+        json.dumps({"settings": {}, "note": "a different registration"}), encoding="utf-8"
+    )
+    config_id = "cfg-annotation-smoke02"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=_story_plan(),
+            registration_path=story.registration_path,
+        ),
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        annotate.main(
+            [
+                *_arguments(story, session=story.session, config_id=config_id),
+                "--registration",
+                str(other),
+            ]
+        )
+    assert raised.value.code == 2
+    err = capsys.readouterr().err
+    assert "sha256" in err
+    assert str(other) in err
+
+
+def test_an_unresolvable_registration_prints_the_not_verified_line(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """No registration can be resolved or verified: the banner fails on, saying it is unknown."""
+    config_id = "cfg-annotation-unknown1"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(session=story.session, config_id=config_id, paper=_story_plan()),
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == annotate.UNVERIFIED_SMOKE_BANNER
+    assert lines[-1] == annotate.UNVERIFIED_SMOKE_BANNER
+
+    code, out, err = _invoke(
+        capsys,
+        _arguments(story, session=story.session, config_id=config_id, json_output=True),
+    )
+    assert code == 0, err
+    assert json.loads(out)[daily.SMOKE_DOCUMENT_KEY] == annotate.UNVERIFIED_SMOKE_BANNER
+
+
+def test_the_registration_flag_verifies_a_recorded_path_that_cannot_be_resolved(
+    capsys: pytest.CaptureFixture[str], story: World, tmp_path: Path
+) -> None:
+    """The override supplies the file; the journal's sha256 still decides whether it is the one."""
+    registration = tmp_path / "smoke-registration.json"
+    registration.write_text(json.dumps(SMOKE_REGISTRATION), encoding="utf-8")
+    config_id = "cfg-annotation-smoke03"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=_story_plan(),
+            recorded_path="(not resolvable)/registration.json",
+            recorded_sha256=hashlib.sha256(registration.read_bytes()).hexdigest(),
+        ),
+    )
+
+    code, out, err = _invoke(
+        capsys,
+        [
+            *_arguments(story, session=story.session, config_id=config_id),
+            "--registration",
+            str(registration),
+        ],
+    )
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == daily.SMOKE_BANNER
+    assert lines[-1] == daily.SMOKE_BANNER
 
 
 # --- the import limits ---------------------------------------------------------------------------
 
 
-def test_the_script_imports_no_paper_book_no_composition_build_storage_and_no_providers() -> None:
-    """The annotation is a read-only print command: it cannot reach the paper book or a provider.
+def test_the_script_directly_imports_no_paper_book_no_composition_build_storage_or_providers() -> (
+    None
+):
+    """The annotation's own imports reach neither the paper book nor a provider.
 
-    "No `build_storage`" is checked by name and "no `providers`" by module, because both are one
-    import away from a command that claims it sends no request and writes nothing.
+    "Directly" is the whole claim, and the audit finding this test's name records: the script
+    reuses `daily_selection`, and importing that loads `openalpha_cn.providers*` and
+    `openalpha_cn.runtime.composition` transitively. That import is code, not an action; the
+    runtime test below replaces those modules' construction and request entry points with
+    tripwires and runs a whole annotation with none of them called.
     """
     script = ROOT / "scripts" / "survivor_annotate.py"
     tree = ast.parse(script.read_text(encoding="utf-8"), filename=str(script))
@@ -881,3 +1222,51 @@ def test_the_script_imports_no_paper_book_no_composition_build_storage_and_no_pr
     assert not [name for name in modules if name.startswith("openalpha_cn.providers")]
     assert not [name for name in modules if name.startswith("openalpha_cn.runtime")]
     assert "build_storage" not in names
+
+
+def test_a_full_annotation_calls_no_paper_book_storage_and_no_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    story: World,
+) -> None:
+    """The transitive imports are never used: each entry point raises if the annotation calls it."""
+    from openalpha_cn.providers import akshare, chainlin, tushare
+    from openalpha_cn.providers import file as file_provider
+    from openalpha_cn.runtime import composition
+
+    calls: list[str] = []
+
+    def _tripwire(name: str) -> Callable[..., Any]:
+        def called(*args: Any, **kwargs: Any) -> Any:
+            calls.append(name)
+            raise AssertionError(f"the annotation called {name}")
+
+        return called
+
+    monkeypatch.setattr(
+        composition, "build_storage", _tripwire("runtime.composition.build_storage")
+    )
+    monkeypatch.setattr(daily, "build_storage", _tripwire("daily_selection.build_storage"))
+    monkeypatch.setattr(tushare.TushareProvider, "__init__", _tripwire("TushareProvider"))
+    monkeypatch.setattr(
+        tushare.UrllibTushareTransport, "__init__", _tripwire("UrllibTushareTransport")
+    )
+    monkeypatch.setattr(
+        tushare.UrllibTushareTransport, "post", _tripwire("UrllibTushareTransport.post")
+    )
+    monkeypatch.setattr(file_provider.FileProvider, "__init__", _tripwire("FileProvider"))
+    monkeypatch.setattr(
+        chainlin.ChainLinDataProvider, "__init__", _tripwire("ChainLinDataProvider")
+    )
+    monkeypatch.setattr(
+        chainlin.UrllibChainLinTransport,
+        "get_json",
+        _tripwire("UrllibChainLinTransport.get_json"),
+    )
+    monkeypatch.setattr(akshare.AKShareProvider, "__init__", _tripwire("AKShareProvider"))
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session))
+
+    assert code == 0, err
+    assert out
+    assert calls == []

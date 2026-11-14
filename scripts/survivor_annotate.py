@@ -9,14 +9,22 @@ in the stored cross section. It prints; it does not decide, change, file or requ
 
 **The journal.** One finished survivor day's `openalpha-daily-survivor/v1` journal, read through
 `daily_selection.read_survivor_journal` -- never P6's reader, which names another summary step.
-The plan is `strategy_survivor_morning.plan_names`' own reading (holdings, the open orders, the
-decision's watch list) plus the decision's `entries` and `exits` lists from
-`result.paper.decision`; each name gets one role, `ENTRY`, `EXIT`, `HOLD` or `WATCH`, with the
-decision winning over the book (a decided sale is still held until the open). A day that files
-no plan is refused by name: the epoch day only opens the book, and a settle-only day ran no
-evening, so neither has a list to annotate -- and the command refuses rather than printing an
-empty one. A journal with no `result` is a day whose steps stopped before its paper step, and is
-refused for the same reason.
+The roles are the orders the user acts on, read through `strategy_survivor_morning.plan_names`:
+
+- `ENTRY` -- a *planned buy* or a *carried buy*, the buys on `paper.open_orders`;
+- `EXIT` -- a *live sell*, tonight's or one still live from an earlier evening (a sale never
+  expires, and a carried sell a role read off the decision would mislabel as a holding);
+- `HOLD` -- a holding with no live sell (a sale is still held until the open, so an exiting name
+  is not also a holding row);
+- `WATCH` -- the next names the rule would draw.
+
+The decision's `entries`/`exits` from `result.paper.decision` are a **cross-check**, not the
+source: a planned buy the decision does not name, or a decided exit with no sell order, is a
+journal whose orders cannot be matched to the decision that made them and is refused by name. A
+day that files no plan is refused too: the epoch day only opens the book, and a settle-only day
+ran no evening, so neither has a list to annotate -- and the command refuses rather than
+printing an empty one. A journal with no `result` is a day whose steps stopped before its paper
+step, and is refused for the same reason.
 
 **The panel.** A clone of the panel (an APFS copy in practice, named with
 `--panel-runtime-dir`), opened only through `panel_view.panel_store`. The `panel/catalog.duckdb`
@@ -52,21 +60,27 @@ name in a cross section that is entirely tied sits at 0.5 -- the rank a display 
 
 ## What it refuses by name, and what it never does (R-N2)
 
-Exit 1: no journal, an unfinished journal, the epoch or a settle-only day, no panel catalog, a
-restated session inside the veto window, a panel whose calendar is missing or holds more than
-one exchange, and no raw B build for the session. Exit 2: usage.
+Exit 1: no journal, an unfinished journal, an order/decision disagreement, the epoch or a
+settle-only day, no panel catalog, a restated session inside the veto window (or one whose
+partition/catalog cannot be read), a window that reaches the start of the panel's calendar, a
+panel whose calendar is missing or holds more than one exchange, and no raw B build for the
+session. Exit 2: usage, and a `--registration` override that is not the journal's registration.
 
 It writes nothing, creates nothing, sends no request and admits no registration -- a journal is
-read, never validated against the registration that wrote it. `--registration` is accepted for
-one purpose only, `--show-book`'s: to know whether the run belongs to a smoke registration, so
-the smoke banner brackets the print (and lands under the JSON document's `smoke` key). Every
-cell it prints is 候选参考 / candidate reference: not the list, not the paper book, not the
-journal, and nothing here is evidence.
+read, never validated against the registration that wrote it. **The smoke banner fails on:** it
+is decided by the registration the journal records (resolved from the repository root) once its
+sha256 equals the journal's, so a smoke day is bracketed without any flag; when no registration
+can be resolved or verified the first and last lines say the smoke status is unknown.
+`--registration` is the override for the case the recorded name does not resolve (a pinned
+worktree's file), and it must be the same file the journal ran under. Every cell it prints is
+候选参考 / candidate reference: not the list, not the paper book, not the journal, and nothing
+here is evidence.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -100,6 +114,7 @@ from openalpha_cn.panel_factors import (  # noqa: E402
     BROKEN_BOARD_COUNT_20,
     LIMIT_UP_COUNT_20,
     FactorEngineError,
+    factor_observation_dataset,
     load_factor_observations,
 )
 from openalpha_cn.panel_ingest import (  # noqa: E402
@@ -142,6 +157,19 @@ _READ_ZONE: Final[ZoneInfo] = ZoneInfo(DEFAULT_DATE_TIMEZONE)
 
 _DAY_JOURNAL: Final[re.Pattern[str]] = re.compile(r"\d{4}-\d{2}-\d{2}\.json")
 """`<session>.json`, and not the `<session>.morning...json` checks that share the directory."""
+
+REPOSITORY: Final[Path] = _SCRIPTS.parent
+"""The checkout this script lives in: a journal records its registration's name relative to it."""
+
+UNVERIFIED_SMOKE_BANNER: Final[str] = (
+    "登记未核对，是否冒烟未知 / registration not verified; smoke status unknown"
+)
+"""The first and last printed line when the run's registration cannot be resolved and checked.
+
+The banner fails **on**, never off (`daily_selection.smoke_banner`'s house rule): a smoke day
+whose registration cannot be verified must not lose its banner just because the recorded name
+does not resolve from this runtime directory.
+"""
 
 
 class AnnotationError(RuntimeError):
@@ -193,16 +221,26 @@ def raw_cross_section(
     the close), and the earliest build at or after that instant is the session's. Only
     `TIER_ADMITTED_CODES["raw"]` -- the `computed` code -- and finite values are read, so a name
     the build could not value is absent rather than a number nobody measured.
+
+    A year the panel does not register for this factor is the ordinary "no build" case and is
+    answered without reading anything; a year it does register but cannot read is a different
+    fault -- a damaged or blocked partition -- and is refused as such, not as a build the
+    `factor build` line would produce. That distinction is a catalog fact, not a phrase in the
+    engine's exception text.
     """
     published = session_publication_instant(session)
+    if session.year not in store.registered_years(factor_observation_dataset(definition)):
+        raise MissingFactorBuild(definition=definition, session=session)
     try:
         observations = load_factor_observations(
             store, definition, years=(session.year,), as_of=_read_instant(session)
         )
-    except Exception as error:  # a blocked year is "no build for this session", not a crash
-        if not _is_a_blocked_factor_read(error):
-            raise
-        raise MissingFactorBuild(definition=definition, session=session) from error
+    except FactorEngineError as error:
+        raise AnnotationError(
+            f"the panel holds {definition.qualified_key} observations for {session.year} and "
+            f"cannot read them at {_read_instant(session).isoformat()}: {error}. The annotation "
+            "refuses a partition it cannot read rather than reporting it as a missing build"
+        ) from error
     admitted = TIER_ADMITTED_CODES["raw"]
     builds: dict[datetime, dict[str, float]] = {}
     for observation in observations:
@@ -219,20 +257,6 @@ def raw_cross_section(
     if not builds:
         raise MissingFactorBuild(definition=definition, session=session)
     return dict(builds[min(builds)])
-
-
-def _is_a_blocked_factor_read(error: Exception) -> bool:
-    """Whether a factor read failed because the panel holds no build, and not for another reason.
-
-    `load_factor_observations` raises one `FactorEngineError` for a blocked partition (including
-    "the year is not registered at all", the ordinary no-build case) and the same type for a
-    partition whose rows no longer match their manifest ("... are not the answers that build
-    produced"). Only the first is a missing build, and the engine's blocked-read sentence is the
-    one it writes from its readiness verdict -- "cannot be read at" -- so that is the phrase this
-    recognises; anything else is re-raised and refused as a panel that cannot answer, not as a
-    build a factor build command would produce.
-    """
-    return "cannot be read at" in str(error)
 
 
 def percentile(value: float, cross_section: Sequence[float]) -> float:
@@ -275,8 +299,8 @@ def annotate(
     config_id = _config_id_of(journal)
     session = _session_of(journal)
     plan = _plan_of(result)
-    entries = _decision_names(result, "entries")
-    exits = _decision_names(result, "exits")
+    decision_entries = _decision_names(result, "entries")
+    decision_exits = _decision_names(result, "exits")
     details = _veto_details(store, session=session, calendar=calendar, exchange=exchange)
     cross_sections = {
         definition.key: raw_cross_section(store, definition, session=session)
@@ -284,7 +308,9 @@ def annotate(
     }
     rows = [
         _row(role, code, details=details, cross_sections=cross_sections)
-        for role, code in _roles(plan, entries=entries, exits=exits)
+        for role, code in _roles(
+            plan, decision_entries=decision_entries, decision_exits=decision_exits
+        )
     ]
     wording = result.get("wording")
     if not isinstance(wording, str) or not wording:
@@ -304,17 +330,44 @@ def annotate(
 def _veto_details(
     store: PanelStore, *, session: date, calendar: TradingCalendar, exchange: str
 ) -> Mapping[str, VetoDetail]:
-    """The veto's answer per name, refusing rather than reproducing a restated window (R-N3a)."""
+    """The veto's answer per name, with one refusal sentence per cause of failure.
+
+    The two failures this window can meet are different questions and are told apart by their
+    exception, not by one message that blames a restatement for both:
+
+    - `LimitEventReadError` -- the window's predecessor walk runs past the first session the
+      calendar this panel holds knows (a January session whose prior year is not stored, or the
+      calendar's own start). The rule needs five sessions and is not answered on a shorter one.
+    - `PanelStorageError` -- one of the window's sessions cannot be read at its own 16:30: a row
+      restated after that instant (the store keeps no earlier version, so the evening's set
+      cannot be reproduced, R-N3a), or its partition/catalog cannot be read at all.
+    """
     try:
         window = veto_window(store, session=session, calendar=calendar, exchange=exchange)
-    except (LimitEventReadError, PanelStorageError) as error:
+    except LimitEventReadError as error:
+        prior = session.year - 1
+        missing = prior not in set(store.registered_years(TRADING_CALENDAR_DATASET))
+        note = (
+            f" This panel holds no {prior} trade_cal, so the predecessors before "
+            f"{session.year}-01-01 cannot be counted at all."
+            if missing
+            else ""
+        )
+        raise AnnotationError(
+            f"the veto's five-session window ending {session.isoformat()} cannot be assembled: "
+            f"{error}. The rule needs five sessions ending at the signal day, and the calendar "
+            f"this panel holds does not reach far enough back from {session.isoformat()} for "
+            "them; a shorter window would answer a different question and is not used."
+            f"{note} Nothing was written and no request was sent"
+        ) from error
+    except PanelStorageError as error:
         raise AnnotationError(
             f"the veto's five-session window ending {session.isoformat()} cannot be read at each "
             f"session's own 16:30: {error}. A session inside that window was restated after its "
-            "own publication, and the panel store keeps no earlier version of a restated row, so "
-            "the vetoed set cannot be reproduced; showing the restated bytes would print a "
-            "different set. It is refused by name, not substituted (R-N3a). Nothing was written "
-            "and no request was sent"
+            "own publication -- the store keeps no earlier version of a restated row, so the "
+            "evening's vetoed set cannot be reproduced (R-N3a) -- or its partition, or the "
+            "catalog itself, cannot be read at that instant. The window is refused by name "
+            "rather than substituted, and nothing was written and no request was sent"
         ) from error
     return veto_details(window)
 
@@ -358,20 +411,31 @@ def _decision_names(result: Mapping[str, Any], key: str) -> tuple[str, ...]:
 
 
 def _roles(
-    plan: PlanNames, *, entries: Sequence[str], exits: Sequence[str]
+    plan: PlanNames, *, decision_entries: Sequence[str], decision_exits: Sequence[str]
 ) -> tuple[tuple[str, str], ...]:
     """One `(role, ts_code)` per name, each name once, in `ROLE_ORDER` then by code.
 
-    The decision wins over the book: a held name the evening decided to sell is an `EXIT` row,
-    not a `HOLD` one, and a name the decision does not act on is a `HOLD` (still held) or a
-    `WATCH` (the next the rule would draw).
+    The roles are the orders the user acts on, not the decision's lists: `ENTRY` is a planned or
+    carried buy (a buy still live from an earlier evening is not in tonight's decision and would
+    otherwise have no row), `EXIT` is a live sell -- **including a carried one**, which a role
+    read off `decision.exits` would mislabel as `HOLD` -- `HOLD` is a holding with no live sell
+    (a sale is still held until the open, so an exiting name is not also a holding row), and
+    `WATCH` is the next names the rule would draw. The decision is the cross-check
+    (`_refuse_orders_the_decision_does_not_name`), so a journal whose orders and decision
+    disagree is refused rather than printed.
     """
+    _refuse_orders_the_decision_does_not_name(
+        plan, decision_entries=decision_entries, decision_exits=decision_exits
+    )
+    selling = set(plan.selling)
     role_of: dict[str, str] = {}
-    for code in entries:
+    for code in (*plan.planned_buys, *plan.carried_buys):
         role_of.setdefault(code, "ENTRY")
-    for code in exits:
+    for code in plan.selling:
         role_of.setdefault(code, "EXIT")
     for code in plan.holdings:
+        if code in selling:
+            continue
         role_of.setdefault(code, "HOLD")
     for code in plan.watch_list:
         role_of.setdefault(code, "WATCH")
@@ -381,6 +445,41 @@ def _roles(
             key=lambda item: (ROLE_ORDER.index(item[0]), item[1]),
         )
     )
+
+
+def _refuse_orders_the_decision_does_not_name(
+    plan: PlanNames, *, decision_entries: Sequence[str], decision_exits: Sequence[str]
+) -> None:
+    """The evening's decision against the plan's orders: a disagreement refuses the annotation.
+
+    Only the directions `build_trade_list` guarantees are checked. Tonight's buys are drawn from
+    `decision.entries` (a decided entry that could not be funded produces no order, so a
+    *planned buy* must be one of them), and every decided exit becomes a sell order (carried
+    sells are extra, and carry no decision of tonight). A name that is both bought and sold is
+    never a plan the book could have produced.
+    """
+    buying = {*plan.planned_buys, *plan.carried_buys}
+    both = sorted(buying & set(plan.selling))
+    if both:
+        raise AnnotationError(
+            f"the journal's plan lists {both} both as a buy and as a sell: one name cannot be "
+            "both, so its role cannot be printed"
+        )
+    unplanned = sorted(set(plan.planned_buys) - set(decision_entries))
+    if unplanned:
+        raise AnnotationError(
+            f"the journal's plan and its decision disagree: it holds planned buy(s) {unplanned} "
+            f"that the decision's entries do not name ({sorted(decision_entries)}). The "
+            "annotation refuses a day whose orders cannot be matched to the decision that made "
+            "them"
+        )
+    unplaced = sorted(set(decision_exits) - set(plan.selling))
+    if unplaced:
+        raise AnnotationError(
+            f"the journal's plan and its decision disagree: the decision's exits {unplaced} are "
+            f"not on the plan's sell orders ({sorted(plan.selling)}). The annotation refuses a "
+            "day whose orders cannot be matched to the decision that made them"
+        )
 
 
 def _row(
@@ -534,6 +633,65 @@ def _newest_complete(directory: Path) -> tuple[date, dict[str, Any]] | None:
     return None
 
 
+def _sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _recorded_registration(journal: Mapping[str, Any]) -> tuple[Path | None, str | None]:
+    """The registration path the journal records, resolved from the repository root, and its sha256.
+
+    `daily_selection` records the registration's bare file name, so resolving it from a runtime
+    directory usually finds nothing; that is the case the caller reports as "not verified"
+    rather than silently deciding the run is not a smoke one. An absolute recorded path is used
+    as it is.
+    """
+    registration = journal.get("registration")
+    if not isinstance(registration, Mapping):
+        return None, None
+    recorded = registration.get("path")
+    digest = registration.get("sha256")
+    path = None
+    if isinstance(recorded, str) and recorded:
+        candidate = Path(recorded)
+        path = candidate if candidate.is_absolute() else REPOSITORY / candidate
+    return path, digest if isinstance(digest, str) and digest else None
+
+
+def _smoke_banner(
+    journal: Mapping[str, Any], override: Path | None, *, parser: argparse.ArgumentParser
+) -> str | None:
+    """The banner the journal's registration says to print, verified against the journal's sha256.
+
+    A **verified** registration decides: `SMOKE_BANNER` when its settings mark a smoke run, else
+    no banner. When it cannot be resolved or its sha256 does not equal the journal's, the answer
+    is `UNVERIFIED_SMOKE_BANNER` -- fail on -- unless `--registration` supplied the file, in
+    which case the override must match the journal exactly: a different file is a usage error
+    (exit 2) rather than a banner over the wrong day.
+    """
+    recorded, digest = _recorded_registration(journal)
+    if override is not None:
+        given = _sha256(override)
+        if given is None:
+            parser.error(
+                f"--registration {override} cannot be read, so whether this run is a smoke one "
+                f"cannot be verified against the journal's recorded sha256 {digest!r}. Nothing "
+                "was printed"
+            )
+        if digest is None or given != digest:
+            parser.error(
+                f"--registration {override} has sha256 {given}, and the journal records "
+                f"{digest!r}: they are different registration files, so the annotation cannot "
+                "tell which one this day ran under. Nothing was printed"
+            )
+        return daily_selection.smoke_banner(override)
+    if recorded is None or digest is None or _sha256(recorded) != digest:
+        return UNVERIFIED_SMOKE_BANNER
+    return daily_selection.smoke_banner(recorded)
+
+
 def _require_panel_catalog(panel_runtime_dir: Path) -> None:
     """Refuse a runtime directory whose panel would be created by opening it."""
     catalog = panel_runtime_dir / PANEL_SUBDIRECTORY / "catalog.duckdb"
@@ -629,6 +787,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         session, journal = _journal_for(
             arguments.runtime_dir, arguments.config_id, arguments.session
         )
+        banner = _smoke_banner(journal, arguments.registration, parser=parser)
         panel_runtime_dir = (
             arguments.runtime_dir
             if arguments.panel_runtime_dir is None
@@ -638,11 +797,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         store = panel_store(panel_runtime_dir)
         exchange, calendar = _load_calendar(store, session=session)
         document = annotate(journal=journal, store=store, calendar=calendar, exchange=exchange)
-        banner = (
-            None
-            if arguments.registration is None
-            else daily_selection.smoke_banner(arguments.registration)
-        )
         document = dict(daily_selection.with_smoke(document, banner))
         if arguments.json:
             print(json.dumps(document, sort_keys=True, ensure_ascii=False))
