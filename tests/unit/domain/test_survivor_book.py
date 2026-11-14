@@ -1,18 +1,26 @@
-"""The survivor book's vocabulary and configuration (`V2-P7-005`, `V2-P7-017`).
+"""The survivor book's vocabulary and configuration (`V2-P7-005`, `V2-P7-017`, `V2-P7-027`).
 
 What is pinned here is that the configuration is a *contract* -- frozen, versioned, content-
 addressed, with no default for the seed -- and that the two quantities every later layer leans on,
 the share of a list a fraction covers and the lots a budget buys, round the way the design says.
 `V2-P7-017` adds the configuration's whole digest, which a paper-book snapshot carries.
+
+`V2-P7-027` adds the plan-A entry veto (`entry_veto: "none" | "market_bearish_5/v1"`) as a v2
+field, and its load-bearing rule is that adding it must move **nothing** about v1. So the v1
+default's stored JSON, `config_id` and whole digest are pasted below as literals computed on the
+base commit (`539bd06`, before the field existed): a v1 registration, journal key, paper-book
+snapshot and reading must stay readable and identical, and a test that compared the new code
+with itself could not notice a change.
 """
 
+import json
 import os
 import re
 import subprocess
 import sys
 from decimal import Decimal
 from pathlib import Path
-from typing import get_args, get_type_hints
+from typing import Final, get_args, get_type_hints
 
 import pytest
 from pydantic import ValidationError
@@ -31,10 +39,136 @@ from openalpha_cn.domain.survivor_book import (
     lot_quantity,
     survivor_config_digest,
 )
+from openalpha_cn.domain.survivor_veto import VETO_RULE_ID
 
 
 def config(**overrides: object) -> SurvivorBookConfig:
     return SurvivorBookConfig(seed=7, **overrides)  # type: ignore[arg-type]
+
+
+V1_STORED_JSON: Final[str] = (
+    '{"schema_version":"survivor-book-config/v1","holding_count":10,'
+    '"capital":"350000","boards":["main"],"liquidity_drop_fraction":"0.30",'
+    '"min_listing_sessions":250,"loser_decile_count":2,"entry_floor_fraction":"0.25",'
+    '"near_exit_fraction":"0.10","cooldown_sessions":20,'
+    '"max_replacements_per_session":2,"buy_order_expiry_sessions":3,"lot_size":100,'
+    '"cost_reserve_fraction":"0.005","selection_rule":"seeded_hash/v1","seed":7,'
+    '"composite_factors":["residual_vol_60/v1","return_vol_60/v1","turnover_60/v1",'
+    '"downside_vol_60/v1"]}'
+)
+"""`SurvivorBookConfig(seed=7)`'s stored JSON at `539bd06`, before `V2-P7-027` added a field.
+
+Computed on the base commit with `model_dump_json(exclude_computed_fields=True)` -- the bytes a
+registration stores and the journal/paper-book identity addresses. plan A must not move them, so
+this string is a measurement of the old code rather than of the new one.
+"""
+
+V1_CONFIG_ID: Final[str] = "sbc_d87a16142738e229764b5c66"
+"""`SurvivorBookConfig(seed=7).config_id` at `539bd06` (same anchor as `V1_STORED_JSON`)."""
+
+V1_CONFIG_DIGEST: Final[str] = "d87a16142738e229764b5c66a4d14d853c997abb62b7f43493143fa4bf2bad48"
+"""The whole digest at `539bd06`; `V1_CONFIG_ID` is its first 24 digits."""
+
+
+def test_the_v1_stored_form_and_identity_are_pinned_byte_for_byte() -> None:
+    """Adding plan A's field must not move one v1 byte (`AGENTS.md` hard rule 3).
+
+    The three literals above were measured on the base commit, so a serializer that merely
+    agrees with itself -- the failure mode of computing an expected value from the code under
+    test -- cannot make this pass.
+    """
+    held = config()
+
+    assert held.schema_version == "survivor-book-config/v1"
+    assert held.entry_veto == "none"
+    assert held.model_dump_json(exclude_computed_fields=True) == V1_STORED_JSON
+    assert held.config_id == V1_CONFIG_ID
+    assert survivor_config_digest(held) == V1_CONFIG_DIGEST
+    assert SurvivorBookConfig.model_validate_json(V1_STORED_JSON) == held
+
+
+def test_the_v1_field_is_excluded_from_every_stored_form_not_only_the_identity() -> None:
+    """`entry_veto` is not a v1 field: it must not appear in a dump, a digest or an identity.
+
+    `survivor_config_digest` and `stable_model_id` both read
+    `model_dump(mode="json", exclude_computed_fields=True)`; `strategy_survivor`'s registration
+    check reads it too and compares it, as JSON text, with the block a registration stores. A
+    field that leaked into the dump would make every stored v1 registration stop being its own
+    stored form -- refused by name at step 1 of the daily command.
+    """
+    held = config()
+
+    assert "entry_veto" not in held.model_dump(mode="json", exclude_computed_fields=True)
+    assert "entry_veto" not in json.loads(held.model_dump_json(exclude_computed_fields=True))
+    assert "entry_veto" not in json.loads(held.model_dump_json())
+
+
+def test_the_versions_and_the_declared_veto_rule_are_their_own_closed_vocabularies() -> None:
+    """The two `Literal`s are the contract a registration is read against."""
+    versions = get_args(SurvivorBookConfig.model_fields["schema_version"].annotation)
+    vetoes = get_args(SurvivorBookConfig.model_fields["entry_veto"].annotation)
+
+    assert set(versions) == {"survivor-book-config/v1", "survivor-book-config/v2"}
+    assert set(vetoes) == {"none", VETO_RULE_ID}
+
+
+def test_a_v2_configuration_must_name_its_entry_veto_explicitly() -> None:
+    """v2 is the version that carries the veto, so it is not allowed to lean on a default."""
+    with pytest.raises(ValidationError, match="entry_veto"):
+        SurvivorBookConfig(seed=7, schema_version="survivor-book-config/v2")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError, match="entry_veto"):
+        SurvivorBookConfig.model_validate({"schema_version": "survivor-book-config/v2", "seed": 7})
+
+
+def test_a_v1_configuration_may_only_carry_the_none_veto() -> None:
+    """A rule that predates the field cannot claim to be acted on: v1 means "no veto"."""
+    with pytest.raises(ValidationError, match="entry_veto"):
+        config(entry_veto="market_bearish_5/v1")
+    # Naming the only legal value explicitly is accepted, but it is not v1's stored form: the
+    # registration check below is why that is the right answer rather than a second spelling.
+    assert config(entry_veto="none").model_dump_json(exclude_computed_fields=True) == V1_STORED_JSON
+
+
+def test_a_v2_configuration_serializes_the_veto_it_names_and_has_its_own_identity() -> None:
+    """The other half: once the version allows a rule, the field is stored and addressed."""
+    held = SurvivorBookConfig(
+        seed=7,
+        schema_version="survivor-book-config/v2",
+        entry_veto=VETO_RULE_ID,
+    )
+
+    stored = held.model_dump(mode="json", exclude_computed_fields=True)
+    assert stored["entry_veto"] == VETO_RULE_ID
+    stored_json = held.model_dump_json(exclude_computed_fields=True)
+    assert SurvivorBookConfig.model_validate_json(stored_json) == held
+    assert held.config_id != V1_CONFIG_ID
+    assert survivor_config_digest(held) != V1_CONFIG_DIGEST
+    # `none` is a legal v2 spelling: v2 answers "this book has no veto" explicitly.
+    assert (
+        SurvivorBookConfig(
+            seed=7, schema_version="survivor-book-config/v2", entry_veto="none"
+        ).entry_veto
+        == "none"
+    )
+
+
+def test_a_v1_registration_block_naming_the_default_veto_is_not_its_stored_form() -> None:
+    """Why v1 accepts but strips the field: one book keeps one registered spelling.
+
+    `strategy_survivor.read_survivor_registration` validates the block, dumps it again and
+    requires the text to be equal. With the field stripped from v1's dump, a block that names
+    `"entry_veto": "none"` re-dumps without it and is refused as not the stored form -- the same
+    rule that already refuses a block restating any other default.
+    """
+    block = {**config().model_dump(mode="json", exclude_computed_fields=True), "entry_veto": "none"}
+
+    assert SurvivorBookConfig.model_validate(block) == config()
+    assert (
+        SurvivorBookConfig.model_validate(block).model_dump(
+            mode="json", exclude_computed_fields=True
+        )
+        != block
+    )
 
 
 def test_the_defaults_are_the_values_the_design_names() -> None:

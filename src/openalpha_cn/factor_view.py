@@ -285,7 +285,7 @@ from openalpha_cn.domain.name_history import (
     RiskWarning,
 )
 from openalpha_cn.domain.panel_batch import PanelBatchError
-from openalpha_cn.domain.price_limits import PriceLimit
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET, PriceLimit
 from openalpha_cn.domain.stock_universe import (
     STOCK_BASIC_DATASET,
     StockUniverse,
@@ -349,6 +349,7 @@ from openalpha_cn.panel_ingest import (
     load_stock_universe,
     load_suspensions,
     load_trading_calendar,
+    price_limit_requirement,
     write_panel_batches,
 )
 from openalpha_cn.panel_neutralization import (
@@ -2795,6 +2796,7 @@ REQUIREMENT_BUILDERS: Final[Mapping[str, Callable[..., ReadinessRequirement]]] =
         DAILY_DATASET: daily_requirement,
         DAILY_BASIC_DATASET: daily_basic_requirement,
         INDEX_DAILY_DATASET: index_price_requirement,
+        PRICE_LIMIT_DATASET: price_limit_requirement,
         **{dataset: financial_statement_requirement for dataset in FINANCIAL_STATEMENT_DATASETS},
     }
 )
@@ -2805,8 +2807,8 @@ to build its own `ReadinessRequirement` -- "a gate that built its own could ask 
 different question from the one its own reader asks, and the two verdicts would drift" -- so a
 builder has to supply one per dataset, and the only correct source is the module that also owns the
 reader. A dataset with no row here is refused **by name** in `_requirements` rather than defaulted
-to a weaker question: the six rows cover every dataset the twenty shipped factors declare, and a
-factor reading a seventh dataset arrives as a refusal naming the dataset instead of a build whose
+to a weaker question: the rows here cover every dataset the shipped factors declare, and a factor
+reading a dataset with no row arrives as a refusal naming the dataset instead of a build whose
 coverage codes were decided by a requirement nobody wrote. `V2-P3-017`'s
 `deducted_earnings_yield_ttm` is the first factor to reach the `fina_indicator` row, which was
 written with the other three statement rows and had had no reader until then.
@@ -2815,10 +2817,11 @@ written with the other three statement rows and had had no reader until then.
 builder that re-derives each dataset's own `required_fields` from the dataset name; `daily` and
 `daily_basic` have separate builders because each carries its own column projection.
 
-`V2-P3-016`'s `index_daily` is the seventh row and the third to take a calendar, which is what
-`_CALENDAR_SCOPED_REQUIREMENTS` says beside it: an index is quoted on every open session, so its
-requirement can state `required_dates` and a factor whose window silently skipped one would pair
-a security's return on day t with the market's on day t-1 for the rest of the window.
+`V2-P3-016`'s `index_daily` is the first of the calendar-scoped rows and
+`V2-P7-028`'s `stk_limit` is the second, which is what `_CALENDAR_SCOPED_REQUIREMENTS` says beside
+this table: both are quoted on every open session, so their requirements can state `required_dates`
+and a factor whose window silently skipped one would classify a session against another session's
+band or pair a security's return with the market's from the wrong day.
 """
 
 CADENCE_WAIVED_READS: Final[frozenset[str]] = frozenset({STOCK_BASIC_DATASET})
@@ -2883,14 +2886,17 @@ def _event_clock_bound(dataset: str, requested: timedelta | None) -> timedelta |
 
 
 _CALENDAR_SCOPED_REQUIREMENTS: Final[frozenset[str]] = frozenset(
-    {DAILY_DATASET, DAILY_BASIC_DATASET, INDEX_DAILY_DATASET}
+    {DAILY_DATASET, DAILY_BASIC_DATASET, INDEX_DAILY_DATASET, PRICE_LIMIT_DATASET}
 )
 """Which of `REQUIREMENT_BUILDERS`' rows take a `TradingCalendar` as their first argument.
 
 A named set rather than a tuple literal inside the loop, because it grew: the condition used to
 be `name in (DAILY_DATASET, DAILY_BASIC_DATASET)` and the signature difference it encodes is
 "this dataset publishes on every open session, so its requirement can state a date census". The
-four statement builders take a `dataset=` keyword instead, because a filing has no calendar.
+four statement builders take a `dataset=` keyword instead, because a filing has no calendar;
+`stk_limit` joined as the fourth calendar-scoped row with `V2-P7-028`, on the same ground -- an
+open session publishes a band for every security, so a window that skipped one session would
+classify a bar against the wrong session's limit.
 """
 
 MAX_BUILD_YEAR: Final[int] = 2999

@@ -103,6 +103,7 @@ from openalpha_cn.domain.industry_classification import (
     INDUSTRY_THROUGH_COLUMN,
 )
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.domain.stock_universe import (
     DELISTING_EVENT,
     LIFECYCLE_DATE_COLUMN,
@@ -824,14 +825,38 @@ def test_a_store_with_nothing_beneath_the_named_years_reads_what_it_holds(
 def both_builds(
     corpus: Path, truncated: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> tuple[PanelStore, PanelStore]:
-    """All 21 factors x three tiers x five instants, once over each corpus."""
+    """Every factor this corpus can serve, three tiers, five instants, once over each corpus.
+
+    "Every" is narrowed by one family and the narrowing is the corpus's, not the differential's:
+    `V2-P7-028`'s two limit-event factors read `stk_limit`, and this corpus carries no band
+    partition because its subject is the statement axis. Including them would make the fixture
+    fail at `partition_missing` for a reason that says nothing about statement reach; excluding
+    them keeps the differential over the same twenty-one factors it was written for. A factor
+    added later that reads a dataset this corpus does not carry must be named here for the same
+    reason rather than silently breaking the fixture.
+    """
     root = tmp_path_factory.mktemp("differential")
     full = _copy(corpus, root / "full")
     before = _copy(truncated, root / "before")
-    keys = FACTOR_DEFINITIONS.qualified_keys
-    _build(full, keys, INSTANTS)
-    _build(before, keys, INSTANTS)
+    _build(full, CORPUS_SERVED_FACTORS, INSTANTS)
+    _build(before, CORPUS_SERVED_FACTORS, INSTANTS)
     return full, before
+
+
+CORPUS_SERVED_FACTORS: Final[tuple[str, ...]] = tuple(
+    key
+    for key in FACTOR_DEFINITIONS.qualified_keys
+    if PRICE_LIMIT_DATASET not in FACTOR_DEFINITIONS.get(key).datasets
+)
+"""The factors this corpus can build: the ones that read no `stk_limit` partition.
+
+`V2-P7-028`'s two limit-event factors read the published bands, and this corpus carries no band
+partition because its subject is the statement axis. The fixture and the differential below both
+iterate this set, so the comparison covers the same twenty-one factors it was written for and a
+factor added later that needs a dataset this corpus does not carry fails the count assertion
+rather than half-building a store.
+"""
+assert len(CORPUS_SERVED_FACTORS) == 21
 
 
 MOVED: Final[frozenset[tuple[str, datetime]]] = frozenset(
@@ -860,7 +885,7 @@ def test_every_answer_outside_a_cut_short_window_is_unchanged(
     held every window. Where it did not, see the next test."""
     full, before = both_builds
     read = {"raw": _raw, "processed": _processed, "neutralized": _neutralized}[tier]
-    for key in FACTOR_DEFINITIONS.qualified_keys:
+    for key in CORPUS_SERVED_FACTORS:
         now, then = read(full, key), read(before, key)
         assert set(now) == set(INSTANTS), key
         for instant in INSTANTS:

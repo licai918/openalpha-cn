@@ -2,7 +2,11 @@
 
 `register [--dry-run]` writes the reading's registration: the adopted stop rule (one number per
 named constant) and `expected_periods`, the exact number of non-overlapping periods the plan
-expects the window's calendar to hold. `--dry-run` computes them and writes nothing. `read` checks
+expects the window's calendar to hold. `--ab-tests` adds the optional, versioned A/B section
+(`p7_reading.adopted_ab_tests`): one merged `second_use` read that also decides plan A's veto and
+plan B's two factor tests (`V2-P7-027`, `V2-P7-028`). Without the flag no section is written,
+and the registration is the `v2-p7-024` shape unchanged. `--dry-run` computes them and writes
+nothing. `read` checks
 the same count first -- reading the calendar, never outcome data, and claiming nothing -- and then
 calls `p7_reading.read_once`, the only library path into the window. Every flag is required except
 `--reading`, `--issue` and `--dry-run`; `--exchange` must be the calendar the diagnostics read
@@ -114,6 +118,14 @@ def _parser() -> argparse.ArgumentParser:
     register.add_argument("--min-coverage", type=float, required=True)
     register.add_argument("--max-carry-sessions", type=int, required=True)
     register.add_argument("--exchange", required=True)
+    register.add_argument(
+        "--ab-tests",
+        action="store_true",
+        help=(
+            "write the pre-registered A/B section (plan A's veto, plan B's two factors; R-R1's "
+            "frozen window, h20, stride 20, q and observation floor) into the registration"
+        ),
+    )
     register.add_argument("--dry-run", action="store_true", help="compute and print; write nothing")
     read = commands.add_parser("read", help="check the expected count, then read the window once")
     read.add_argument("--repo", type=Path, required=True)
@@ -186,6 +198,7 @@ def _register(arguments: argparse.Namespace) -> int:
         said = resolved.stderr.decode(errors="replace").strip()
         raise p7_reading.ReadingError(f"{arguments.repo} is not a git repository: {said}")
     code_commit = resolved.stdout.decode().strip()
+    ab_tests = p7_reading.adopted_ab_tests() if arguments.ab_tests else None
     body = p7_reading._body_of(
         reading=reading,
         issue=arguments.issue,
@@ -197,6 +210,7 @@ def _register(arguments: argparse.Namespace) -> int:
         expected_periods=expected,
         code_commit=code_commit,
         as_of_reason=arguments.as_of_reason,
+        ab_tests=ab_tests,
     )
     # Every path validates the whole body, the dry run included: a secondary reading has no stop
     # rule, so nothing else would read its request and configuration, and a dry run must refuse
@@ -225,6 +239,11 @@ def _register(arguments: argparse.Namespace) -> int:
         # different count must still stop the command (exit 4) before anything else happens.
         if problem is not None:
             raise p7_reading.ExpectedPeriodsMismatch(problem)
+    if ab_tests is not None:
+        print(
+            "the registration carries the pre-registered A/B tests "
+            f"({', '.join(p7_reading.ab_test_ids(ab_tests))})"
+        )
     if arguments.dry_run:
         print(f"the registration that would be written is {path}")
         print("dry run: nothing was written and nothing was claimed")
@@ -242,6 +261,7 @@ def _register(arguments: argparse.Namespace) -> int:
         code_commit=code_commit,
         as_of_reason=arguments.as_of_reason,
         runtime_dir=arguments.runtime_dir,
+        ab_tests=ab_tests,
     )
     print(f"the registration is {path}")
     print(f"its sha256 is {digest}")

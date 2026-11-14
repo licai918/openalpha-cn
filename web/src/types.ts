@@ -403,7 +403,7 @@ export type FactorExperimentEnvelope = {
              * model constrains this to the five below. The same fixture-versus-reality gap
              * that made `required_fields` render `[object Object]`, one field over and not yet
              * visible. As a union, `tsc` refuses an invented value, and
-             * `tests/unit/test_web_factor_definition_mirror.py` keeps the five in step with
+             * `tests/unit/test_web_factor_definition_mirror.py` keeps the six in step with
              * the model.
              */
             family:
@@ -411,7 +411,8 @@ export type FactorExperimentEnvelope = {
               | "quality"
               | "growth"
               | "momentum_reversal"
-              | "volatility_liquidity";
+              | "volatility_liquidity"
+              | "limit_events";
             direction: "higher_is_better" | "lower_is_better";
             /**
              * The panel columns this factor reads, one object per column (`V2-P5-042`).

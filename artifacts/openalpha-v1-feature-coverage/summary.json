@@ -7,7 +7,7 @@
     "decision": 9,
     "evaluation": 2,
     "evidence": 10,
-    "factor": 28,
+    "factor": 29,
     "interface": 9,
     "model": 6,
     "operations": 57,
@@ -32,13 +32,13 @@
     "DEFERRED": 1,
     "ENHANCED_REPLACEMENT": 20,
     "EXCLUDED": 4,
-    "NATIVE_COMPLETE": 218
+    "NATIVE_COMPLETE": 219
   },
   "totals": {
-    "all_features": 244,
+    "all_features": 245,
     "legacy_acceptance_rows": 26,
-    "true_completed_features": 239,
-    "true_completion_rate_pct": 97.95,
+    "true_completed_features": 240,
+    "true_completion_rate_pct": 97.96,
     "unknown": 0,
     "unreviewed": 0
   }

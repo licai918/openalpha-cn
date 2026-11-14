@@ -874,6 +874,7 @@ from openalpha_cn.domain.daily_prices import (
     DAILY_BASIC_DATASET,
     DAILY_DATASET,
     PRE_CLOSE_COLUMN,
+    DailyBar,
     RecordedReturnPath,
 )
 from openalpha_cn.domain.factor import (
@@ -933,6 +934,13 @@ from openalpha_cn.domain.panel_batch import (
     PanelColumn,
     PanelColumnKind,
     TimelineColumns,
+)
+from openalpha_cn.domain.price_limits import (
+    DOWN_LIMIT_COLUMN,
+    PRICE_LIMIT_DATASET,
+    UP_LIMIT_COLUMN,
+    PriceLimit,
+    limit_touch,
 )
 from openalpha_cn.domain.upstream_defects import UpstreamDefectError
 from openalpha_cn.panel.catalog import (
@@ -1310,6 +1318,52 @@ test_the_market_series_is_read_at_the_securitys_own_sessions_and_does_not_widen_
 drives a halted security through both halves.
 """
 
+PUBLISHED_ABSENCE_DATASETS: Final[frozenset[str]] = frozenset({PRICE_LIMIT_DATASET})
+"""Session datasets whose **missing row on a session is a published fact**, not a short read.
+
+`V2-P7-028`, and the first member is `stk_limit`. The distinction it draws is the one between
+"this session is not classifiable" and "this build did not get the row": a missing `stk_limit` row
+is the first. `domain/price_limits.py` measures it twice -- the endpoint has a horizon (0 rows on
+2005-01-04 and 2006-01-04, its first row 2007-01-04) and it reached the Beijing board late, so
+`daily` is a subset of `stk_limit` only from 2023-01-03 and a historical partition legitimately
+carries bars with no band. A **limit-free** session is a different thing again and is not this
+case: the exchange publishes a sentinel band for it, the row exists, and `limit_touch` already
+reports it as no touch. What this table is for is the row that is not there at all.
+
+## What it changes, and the domain precedent that makes it the right rule
+
+`_points_held` forms the window from the securities' own points. Without this table the window is
+the **union** of every declared session dataset's points, so a security with a bar and no band on
+one session contributes that session, `_complete_series` then finds the band missing, and the whole
+observation becomes `input_missing` -- the *loud* code for a fact the exchange published. With
+this table the union is intersected with the published-absence datasets' own points, so the window
+holds exactly the sessions a factor can classify. A halt works the same way from the other side:
+its band exists but its bar does not, so it is not a window point either.
+
+That is not a new rule invented here. `domain/limit_events.py::session_state` builds its touches
+only for securities holding **both** a bar and a published band -- the domain's own join is this
+intersection -- and `V2-P7-028` reuses `limit_touch`, so the engine must hand the evaluator the
+same classifiable sessions the producer classifies. A skipped session is not a silent hole: it
+stretches the window, and `max_window_sessions` is the declaration that prices the stretch, exactly
+as it does for a halt inside a momentum window.
+
+**Only the union-with-intersection path changes, and no shipped answer moves.** `stk_limit` is read
+by the two limit-event factors alone. A factor reading one session dataset still takes the
+single-reading shortcut, `daily_basic`'s coverage still has to match `daily`'s because the daily
+writer refuses to store them apart, and the period axis is untouched -- the union there is
+deliberate and is what the quality family's two-statement windows are built on.
+
+## Why a table and not a field, and the price of that choice stated
+
+`SHARED_SUBJECT_DATASETS`' argument applies word for word: a new field on `FactorDefinition` (or a
+flag on `FactorField`) moves every already-shipped `factor_id`, because the whole model is the
+content address. So the declaration is made out of the vocabulary a definition already has -- the
+dataset name -- and this table is what gives `stk_limit` its second meaning. The price is that the
+tolerance is fixed per dataset rather than declared per factor: a future factor that wanted a
+missing band to be `input_missing` could not say so, and would have to stop reading `stk_limit` or
+argue for a new row here. There is no such factor, and the two that read it want the opposite.
+"""
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FactorWindow:
@@ -1353,7 +1407,7 @@ class FactorWindow:
     finding it has taken. Reading one is spelled `shared_series` for the same reason: the call
     site says which of the two it means.
 
-    Empty for nineteen of the twenty shipped factors and for every factor that declares no
+    Empty for twenty-two of the twenty-three shipped factors and for every factor that declares no
     dataset in `SHARED_SUBJECT_DATASETS`, which is a stronger statement than "usually empty":
     `_classify` splits the completed series on that table alone, so a factor that declares no
     such dataset cannot receive a non-empty `shared` and a factor that declares one cannot
@@ -4357,6 +4411,256 @@ def _revenue_yoy_acceleration(window: FactorWindow) -> float | None:
     return recent - earlier
 
 
+# --- the limit-event family (`V2-P7-028`) -----------------------------------------------------
+
+
+LIMIT_EVENT_LOOKBACK_SESSIONS: Final[int] = 20
+"""How many of a security's own **classifiable** sessions the two counts read.
+
+Twenty, one A-share trading month: long enough that a count is not one session's accident, and the
+same horizon `V2-P7-028`'s pre-registered reading measures against (`h20`), so the window and the
+return horizon are the same month rather than two numbers chosen apart.
+
+It counts the sessions this family can classify, and that is a narrower set than the panel's
+session axis. `domain/limit_events.py::session_state` builds its touches from the securities holding
+BOTH a bar and a published band, so a session with no `stk_limit` row is one the exchange published
+nothing to classify against, and a session with a band but no bar is a halt. Both are skipped rather
+than counted as "did not touch": the security did not get a fair chance to touch, and a zero would
+be the same number a genuine ordinary session produces. See `PUBLISHED_ABSENCE_DATASETS` for the
+engine rule and `LIMIT_EVENT_MAX_WINDOW_SESSIONS` for what a skipped session costs.
+"""
+
+LIMIT_EVENT_MAX_WINDOW_SESSIONS: Final[int] = (
+    LIMIT_EVENT_LOOKBACK_SESSIONS + LIMIT_EVENT_LOOKBACK_SESSIONS * MAX_HALTED_SESSIONS_IN_FIVE // 5
+)
+"""How far the twenty counted sessions may reach on the panel's session axis: `20 + 20 // 5` = 24.
+
+`MAX_HALTED_SESSIONS_IN_FIVE`'s rule, applied to this family for that constant's own reason: a
+security halted (or bandless) inside the window has its own twenty classifiable sessions further
+back than a continuously quoted one, and `max_window_sessions` is where the engine prices that
+stretch rather than reporting a twenty-session count over a longer interval.
+
+One in five, which is the momentum family's tolerance and deliberately **not** the strict
+`max_window_sessions == lookback_sessions` setting a five-session reversal uses. A monthly event
+count is not a path: a name halted for a single session inside the last twenty has 19 classifiable
+sessions in 21 panel sessions, and refusing it would lose a real share of the cross section for no
+research reason. What the strict alternative would buy is "no session inside the window was
+missed", and that is not what this factor's note claims; what it costs is the same requirement the
+reading then has to state.
+"""
+
+HIGH_COLUMN: Final[str] = "high"
+LOW_COLUMN: Final[str] = "low"
+"""`daily`'s two session extremes, the columns `limit_touch` classifies a touch with.
+
+`high` is the up-side comparison (`at_up` is `high >= up_limit`); `low` is `limit_touch`'s
+down-side comparison, declared so that the touch this family reads is the session's own verdict on
+both sides rather than a bar this module assembled from one number. `CLOSE_COLUMN` is imported from
+`domain/daily_prices.py`; these two have no scalar there, so they are spelled here and
+`tests/unit/test_factor_limit_events_rules.py` holds both to `DAILY_DATA_COLUMNS`.
+"""
+
+LIMIT_EVENT_REQUIRED_FIELDS: Final[tuple[FactorField, ...]] = (
+    FactorField(dataset=DAILY_DATASET, column=HIGH_COLUMN),
+    FactorField(dataset=DAILY_DATASET, column=LOW_COLUMN),
+    FactorField(dataset=DAILY_DATASET, column=CLOSE_COLUMN),
+    FactorField(dataset=PRICE_LIMIT_DATASET, column=UP_LIMIT_COLUMN),
+    FactorField(dataset=PRICE_LIMIT_DATASET, column=DOWN_LIMIT_COLUMN),
+)
+"""The five columns both factors read: the bar's three price points and the published band's two.
+
+`stk_limit`'s column names are imported from `domain/price_limits.py` rather than restated, because
+that module owns them and its readers unpack the projection positionally.
+
+**Both sides of the band are declared even though only the upper side decides a touch**, and the
+reason is the one the plan gives for reusing `limit_touch` at all. `limit_touch` takes a `DailyBar`
+and a `PriceLimit` and returns the whole six-part verdict; feeding it a bar whose `low` and a band
+whose `down_limit` this module invented would make four of those six fields a fiction, and the two
+this family reads (`at_up`, `closed_at_up`) truthful only because nothing happened to look at the
+other four. Declaring the columns makes the shared function's stated contract the one that runs:
+one bar against one published band. The cost is two columns that are never null (the price writer
+refuses both), so no observation is lost to them.
+"""
+
+LIMIT_UP_COUNT_20: Final[FactorDefinition] = FactorDefinition(
+    key="limit_up_count_20",
+    version=1,
+    family="limit_events",
+    direction="lower_is_better",
+    required_fields=LIMIT_EVENT_REQUIRED_FIELDS,
+    lookback_sessions=LIMIT_EVENT_LOOKBACK_SESSIONS,
+    max_window_sessions=LIMIT_EVENT_MAX_WINDOW_SESSIONS,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""How many of the last twenty classifiable sessions closed at the published upper limit.
+
+"A session closed at the upper limit" is `limit_touch`'s `closed_at_up`, which is `daily.close >=
+stk_limit.up_limit` -- the exchange's own two-decimal price against the bar's own close, so the
+`>=` that matters on the sessions whose published band differs from the board rule is the same one
+`V2-P7-011` uses. `consecutive_board` and `limit_up` are one fact per session for this count: both
+are `closed_at_up` sessions, and the streak is what `domain/limit_events.py` adds for its own
+producer rather than a second thing to count here.
+
+**The declared direction is a prior, not a result.** More closed-at-limit sessions in a month is
+the family's stated short-horizon overreaction / crowding signal, so the declaration is
+`lower_is_better`. Nothing in this repository has measured that on this factor; `V2-P7-028`'s
+reading tests it one-sided, and the note carries the disclosure the whole registry has to.
+"""
+
+BROKEN_BOARD_COUNT_20: Final[FactorDefinition] = FactorDefinition(
+    key="broken_board_count_20",
+    version=1,
+    family="limit_events",
+    direction="lower_is_better",
+    required_fields=LIMIT_EVENT_REQUIRED_FIELDS,
+    lookback_sessions=LIMIT_EVENT_LOOKBACK_SESSIONS,
+    max_window_sessions=LIMIT_EVENT_MAX_WINDOW_SESSIONS,
+    lookback_periods=None,
+    max_window_periods=None,
+)
+"""How many of the last twenty classifiable sessions touched the upper limit and closed below it.
+
+`at_up and not closed_at_up`, the same pair `domain/limit_events.py::session_limit_events` turns
+into a `broken_board` event. A session that closed exactly at the band is **not** a break: it is a
+`limit_up`/`consecutive_board` session and `limit_up_count_20` is the factor that counts it, so the
+two factors partition the touched sessions rather than overlapping -- the property
+`tests/unit/test_factor_limit_events_rules.py` drives on one window.
+
+"Touched" is `high >= up_limit`, so a bar that printed through its published band on a session
+where the band is not what the board rule would produce counts as a touch. That is deliberate and
+is `limit_touch`'s own documented direction; the alternative reports such a session as "did not
+touch", which is the wrong side of the measurement for an intraday event.
+"""
+
+_LIMIT_EVENT_DIRECTION_PROSE: Final[str] = (
+    " The declared direction is `lower_is_better` -- the family's stated prior is short-horizon "
+    "overreaction, so a name with more of these events is taken to be the worse one -- and this "
+    "repository has measured nothing whatever about it, on this factor or on any other. "
+    "`V2-P7-028`'s pre-registered reading tests it one-sided against the declared direction, "
+    "and no outcome may flip the declaration afterwards."
+)
+"""The direction sentence both limit-event notes share, held to `REVERSAL_1D_NOTE`'s standard.
+
+A plain string concatenated into each note rather than a note of its own, for the reason the
+three other shared `_*_DIRECTION_PROSE` constants are: this is one claim about two factors, and
+`tests/unit/test_factor_engine_rules.py` requires every shipped factor's note to carry the phrase
+"declared direction is" and the phrase "measured nothing".
+"""
+
+LIMIT_UP_COUNT_20_NOTE: Final[FactorNote] = FactorNote(
+    subject=LIMIT_UP_COUNT_20.qualified_key,
+    summary=(
+        "The number of the security's last twenty classifiable sessions on which it closed at its "
+        "published upper price limit -- `limit_up` and `consecutive_board` together, because both "
+        "are sessions whose close is the band. Every session is classified by "
+        "`domain/price_limits.py::limit_touch`, the same function `V2-P7-011`'s "
+        "`session_limit_events` uses, so this count agrees with that producer's events by "
+        "construction rather than by a second implementation of the same comparison. A session "
+        "with no published band is skipped, and a session the security did not trade is skipped; "
+        "a limit-free sentinel is a **published** band, so its session stays in the window and "
+        "`limit_touch` reports it as no touch. A skipped session stretches the window, and "
+        "`max_window_sessions` allows up to four skipped sessions in a twenty-four-session span "
+        "before the answer is `insufficient_history`. The factor reads `stk_limit`, so the "
+        "exchange's published band is the limit it uses rather than a board ratio reconstructed "
+        "here." + _LIMIT_EVENT_DIRECTION_PROSE
+    ),
+)
+
+BROKEN_BOARD_COUNT_20_NOTE: Final[FactorNote] = FactorNote(
+    subject=BROKEN_BOARD_COUNT_20.qualified_key,
+    summary=(
+        "The number of the security's last twenty classifiable sessions on which it touched its "
+        "published upper price limit intraday and closed below it -- `limit_touch`'s `at_up` and "
+        "not its `closed_at_up`, which is the pair `domain/limit_events.py`'s "
+        "`session_limit_events` emits as a `broken_board` event. It is not "
+        "`limit_up_count_20`'s residual over a different window: the two read the same twenty "
+        "classifiable sessions off the same bar and band, and a "
+        "session closed exactly at the band counts in `limit_up_count_20` and not here, so the "
+        "two factors partition the touched sessions. A session with no published band and a "
+        "session the security did not trade are skipped, exactly as `limit_up_count_20` skips "
+        "them, with the same twenty-four-session span bound." + _LIMIT_EVENT_DIRECTION_PROSE
+    ),
+)
+
+
+def _limit_event_count(
+    window: FactorWindow, *, kind: Literal["closed_at_up", "broken_board"]
+) -> float | None:
+    """The evaluator both factors are bound to: count the window's sessions of one kind.
+
+    **One function for two keys, and it is the same statement `_momentum_sessions` makes.** The
+    two definitions differ in exactly one thing -- which half of `limit_touch`'s verdict they
+    count -- and both read the same five columns over the same reach. Two one-line copies would
+    have implied a difference the arithmetic does not have. `FACTOR_EVALUATORS` binds both keys
+    here; `_refuse_table_drift` compares key sets and is indifferent to how many distinct callables
+    the table holds.
+
+    **Every session is classified by `domain/price_limits.py::limit_touch`, not by a comparison
+    written out here.** That is the whole "agree by construction" claim in this family's notes: the
+    factor and `V2-P7-011`'s event producer read the same function, so a session is a touch for
+    both or for neither, and a change to where a bar sits against its band cannot reach one of them
+    without reaching the other.
+
+    The sessions this evaluator is handed are complete by the engine's own contract: the bar's
+    three price columns and the band's two are present and non-null on every one of them, and a
+    session with no published band never became a window point (see
+    `PUBLISHED_ABSENCE_DATASETS`). So `limit_touch` cannot raise here, and the count is always
+    defined -- there is no `None` branch, which is why this family declares no coverage code of
+    its own.
+
+    `DailyBar` is a plain carrier and `limit_touch` reads `high`, `low`, `close` and the band's two
+    published prices from it; the five carrier fields it does not read (`open`, `pre_close`,
+    `pct_chg`, `vol`, `amount`) are filled with this session's close, because the carrier has them
+    and the evaluator has no truthful value for a column the factor did not declare.
+    """
+    highs = window.series(DAILY_DATASET, HIGH_COLUMN)
+    lows = window.series(DAILY_DATASET, LOW_COLUMN)
+    closes = window.series(DAILY_DATASET, CLOSE_COLUMN)
+    up_limits = window.series(PRICE_LIMIT_DATASET, UP_LIMIT_COLUMN)
+    down_limits = window.series(PRICE_LIMIT_DATASET, DOWN_LIMIT_COLUMN)
+    count = 0
+    for session, high, low, close, up_limit, down_limit in zip(
+        window.sessions, highs, lows, closes, up_limits, down_limits, strict=True
+    ):
+        touch = limit_touch(
+            DailyBar(
+                ts_code=window.subject,
+                trade_date=session,
+                open=close,
+                high=high,
+                low=low,
+                close=close,
+                pre_close=close,
+                pct_chg=0.0,
+                vol=0.0,
+                amount=0.0,
+            ),
+            PriceLimit(
+                ts_code=window.subject,
+                trade_date=session,
+                up_limit=up_limit,
+                down_limit=down_limit,
+            ),
+        )
+        if touch.closed_at_up:
+            if kind == "closed_at_up":
+                count += 1
+        elif kind == "broken_board" and touch.at_up:
+            count += 1
+    return float(count)
+
+
+def _limit_up_count_20(window: FactorWindow) -> float | None:
+    """`LIMIT_UP_COUNT_20`: the sessions whose close is the published upper limit."""
+    return _limit_event_count(window, kind="closed_at_up")
+
+
+def _broken_board_count_20(window: FactorWindow) -> float | None:
+    """`BROKEN_BOARD_COUNT_20`: the sessions that touched the upper limit and closed below it."""
+    return _limit_event_count(window, kind="broken_board")
+
+
 FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
     (
         REVERSAL_1D,
@@ -4380,6 +4684,8 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         REVENUE_YOY,
         NET_PROFIT_YOY,
         REVENUE_YOY_ACCELERATION,
+        LIMIT_UP_COUNT_20,
+        BROKEN_BOARD_COUNT_20,
     ),
     notes=(
         REVERSAL_1D_NOTE,
@@ -4403,9 +4709,11 @@ FACTOR_DEFINITIONS: Final[FactorRegistry] = FactorRegistry(
         REVENUE_YOY_NOTE,
         NET_PROFIT_YOY_NOTE,
         REVENUE_YOY_ACCELERATION_NOTE,
+        LIMIT_UP_COUNT_20_NOTE,
+        BROKEN_BOARD_COUNT_20_NOTE,
     ),
 )
-"""Every factor this build declares, and the prose about it. All five families are in it."""
+"""Every factor this build declares, and the prose about it. All six families are in it."""
 
 FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
     {
@@ -4430,6 +4738,8 @@ FACTOR_EVALUATORS: Final[Mapping[str, FactorEvaluator]] = MappingProxyType(
         REVENUE_YOY.qualified_key: _revenue_yoy,
         NET_PROFIT_YOY.qualified_key: _net_profit_yoy,
         REVENUE_YOY_ACCELERATION.qualified_key: _revenue_yoy_acceleration,
+        LIMIT_UP_COUNT_20.qualified_key: _limit_up_count_20,
+        BROKEN_BOARD_COUNT_20.qualified_key: _broken_board_count_20,
     }
 )
 """Every factor this build can actually compute, keyed by `key/vN`.
@@ -6220,7 +6530,21 @@ def session_return_links(definition: FactorDefinition) -> ReturnLinks | None:
 
     Structural rather than a list of factor keys, so a factor added later that reads `pre_close`
     follows the recorded decisions without anyone remembering to add it. A factor that reads a
-    close as a price level over one session (a valuation ratio) has no return to decide."""
+    close as a price level over one session (a valuation ratio) has no return to decide.
+
+    **A factor that reads a published band and no `pre_close` has no return to decide either**
+    (`V2-P7-028`), which is the second shape this rule had to learn. `close_to_close` was written
+    for `reversal_1d` -- one close column over two or more sessions, where the only thing the
+    series can be is a chain of returns -- and the limit-event family is the case it did not
+    anticipate: a close read over twenty sessions to compare against `stk_limit.up_limit`. A
+    recorded `V2-P6-020` return-path decision is about a close/pre_close disagreement, and a
+    session whose *return* is undecidable can still be a session whose close sat at its band; the
+    band is the level the close is compared to and it is published, not derived from a return.
+    Treating the factor as a return path would load those records and abstain on the sessions they
+    mark, which would make the factor disagree with `V2-P7-011`'s events on a panel that producer
+    still answers. A factor that reads both a band and `pre_close` is still `own_row`, because it
+    has declared the return it reads."""
+
     if DAILY_DATASET not in definition.datasets:
         return None
     columns = set(definition.columns_of(DAILY_DATASET))
@@ -6228,6 +6552,8 @@ def session_return_links(definition: FactorDefinition) -> ReturnLinks | None:
         return None
     if PRE_CLOSE_COLUMN in columns:
         return "own_row"
+    if PRICE_LIMIT_DATASET in definition.datasets:
+        return None
     return "close_to_close" if (definition.lookback_sessions or 0) >= 2 else None
 
 
@@ -6318,7 +6644,7 @@ def _decided_series(
 def _points_held(
     subject: str, *, readings: Mapping[str, _DatasetReading], axis: FactorAxis
 ) -> tuple[date, ...]:
-    """Every point on one axis this security has a row on, ascending and de-duplicated.
+    """Every point on one axis this security can be classified on, ascending and de-duplicated.
 
     A security held by one reading on the axis -- every session-axis factor but the one that
     also reads the shared index, and every single-statement one -- is answered with that
@@ -6326,21 +6652,96 @@ def _points_held(
     (`V2-P6-005`). The union is only formed when two readings both hold the security, and it is
     the same set either way; what the shortcut saves is re-sorting a security's whole history at
     every instant of a carried build.
+
+    **A dataset in `PUBLISHED_ABSENCE_DATASETS` contributes by intersection rather than by
+    union** (`V2-P7-028`), and the difference is a coverage code rather than a set. A session
+    where the exchange published no band is one the factor cannot classify, and the domain's own
+    join (`domain/limit_events.py::session_state`) already drops it; unioning it in would instead
+    hand `_complete_series` a session whose band is missing and code the whole observation
+    `input_missing` for a fact the exchange published. A security with no band rows at all
+    therefore has no classifiable session and answers `insufficient_history`, which is the honest
+    code -- it has no history *near as_of* this factor can use. A halt arrives the same way from
+    the other side: its band exists but its bar does not, so it is not in the daily points and
+    the union-with-intersection drops it too.
+
+    **A security no ordinary dataset holds has no classifiable session, and `()` is the answer.**
+    `required` is the non-absence datasets that hold the subject; when it is empty there is
+    nothing to classify against, and the window must not fall back to the absence dataset's own
+    points. Falling back is what a first draft did, and it coded a security halted over the whole
+    read `input_missing` -- the code the notes above say is reserved for a short read -- because
+    the band-only window then had no bar on any of its sessions. `()` is `insufficient_history`,
+    which is the honest answer: this security has no history *near `as_of`* this factor can use.
+    The same rule covers a factor that declares only a published-absence dataset, which has
+    nothing to classify a touch against at all.
+
+    The result is still ascending, because both inputs are and the merge walks them in step. A
+    dataset outside that table keeps the union, which is what `daily`+`daily_basic` (coverage
+    equal by the daily writer's own cross-check) and the period axis's two-statement windows
+    (`V2-P3-010`'s quality family) are built on.
     """
-    found: list[tuple[date, ...]] = []
-    for reading in readings.values():
-        if reading.axis == axis:
-            own = reading.points_by_subject.get(subject, ())
-            if own:
-                found.append(own)
-    if not found:
+    own: list[tuple[str, tuple[date, ...]]] = [
+        (dataset, reading.points_by_subject.get(subject, ()))
+        for dataset, reading in readings.items()
+        if reading.axis == axis
+    ]
+    present = [(dataset, points) for dataset, points in own if points]
+    if not present:
         return ()
-    if len(found) == 1:
-        return found[0]
+    required = [
+        (dataset, points)
+        for dataset, points in present
+        if dataset not in PUBLISHED_ABSENCE_DATASETS
+    ]
+    published = [
+        (dataset, points) for dataset, points in own if dataset in PUBLISHED_ABSENCE_DATASETS
+    ]
+    if not published:
+        if len(required) == 1:
+            return required[0][1]
+        held = set().union(*(set(points) for _, points in required))
+        return tuple(sorted(held))
+    if not required:
+        # No ordinary dataset holds this subject: nothing here can be classified against a band,
+        # and the absence dataset's own points must not become the window (see the docstring).
+        return ()
+    base = _union_of(sorted_points for _, sorted_points in required)
+    for _dataset, points in published:
+        base = _intersection_of(base, points)
+        if not base:
+            return ()
+    return base
+
+
+def _union_of(sorted_points: Iterable[tuple[date, ...]]) -> tuple[date, ...]:
+    """The union of ascending tuples, ascending. `_points_held`'s ordinary multi-dataset answer."""
     held: set[date] = set()
-    for own in found:
-        held.update(own)
+    for points in sorted_points:
+        held.update(points)
     return tuple(sorted(held))
+
+
+def _intersection_of(left: tuple[date, ...], right: tuple[date, ...]) -> tuple[date, ...]:
+    """The intersection of two ascending tuples, ascending, in one walk of each.
+
+    A merge rather than `set(left) & set(right)`: the inputs are already ordered, the result stays
+    ordered without a second sort, and `_points_held` runs once per security per axis per build --
+    5,534 times for a whole-market cross section at every instant of a carried build.
+    """
+    if left is right:
+        return left
+    common: list[date] = []
+    left_index = 0
+    right_index = 0
+    while left_index < len(left) and right_index < len(right):
+        if left[left_index] == right[right_index]:
+            common.append(left[left_index])
+            left_index += 1
+            right_index += 1
+        elif left[left_index] < right[right_index]:
+            left_index += 1
+        else:
+            right_index += 1
+    return tuple(common)
 
 
 def _ambiguous_points(subject: str, *, readings: Mapping[str, _DatasetReading]) -> frozenset[date]:

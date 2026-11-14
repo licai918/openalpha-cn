@@ -803,9 +803,17 @@ def test_the_shared_input_table_over_every_shipped_definition() -> None:
     -- which is exactly what happened when `V2-P3-017` shipped the twentieth: 171 pairs became
     190 and every count below moved with it.
 
-    The two totals are asserted together on purpose: 53 pairs share a **column** and 84 share a
-    **dataset**, so a dataset-granularity reading would report 58% more overlap than there is and
+    The two totals are asserted together on purpose: 72 pairs share a **column** and 103 share a
+    **dataset**, so a dataset-granularity reading would report 43% more overlap than there is and
     would call the value family and the quality family related by construction.
+
+    **`V2-P7-028` is the latest occasion and it arrives as a pair.** The two limit-event factors
+    declare one identical five-column input each -- so `identical_inputs` moves 16 to 17 on the
+    pair itself while `shared_dataset_only` stays at 31 -- and they share `daily.close` with the
+    nine factors that read a close, which is 18 `overlapping_inputs` pairs and takes that count
+    from 53 to 55. Both are the expected shape rather than a finding: the two factors are two
+    halves of one verdict on the same window, and the close they share is the price the band is
+    compared to.
 
     `identical_inputs` did **not** move, and that is the interesting half of the twentieth
     factor's arrival: EPcut shares `daily_basic.total_mv` with the other three value factors and
@@ -829,11 +837,11 @@ def test_the_shared_input_table_over_every_shipped_definition() -> None:
     codes = [shared_inputs(left, right).code for left, right in pairs]
     counted = {code: codes.count(code) for code in SHARED_INPUT_ORDER}
 
-    assert len(definitions) == 21 and len(pairs) == 210
-    assert counted["identical_inputs"] == 16
-    assert counted["identical_inputs"] + counted["overlapping_inputs"] == 53
-    assert 210 - counted["disjoint_inputs"] == 84
-    assert sum(counted.values()) == 210
+    assert len(definitions) == 23 and len(pairs) == 253
+    assert counted["identical_inputs"] == 17
+    assert counted["identical_inputs"] + counted["overlapping_inputs"] == 72
+    assert 253 - counted["disjoint_inputs"] == 103
+    assert sum(counted.values()) == 253
     assert all(count > 0 for count in counted.values())
 
 

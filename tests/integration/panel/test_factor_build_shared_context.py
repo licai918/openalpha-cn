@@ -1026,18 +1026,40 @@ the 42 of the 7 statement-only factors did not, as on Linux and Windows before t
 """
 
 
+def _pinned_factors() -> tuple[str, ...]:
+    """The registry's factors that the 8a18532 pin table holds partitions for.
+
+    Derived from the table's own dataset names rather than from a second list, so a pin added or
+    removed moves the set; a factor registered after the pin has no `factor_manifest_<key>` entry
+    and therefore does not enter this build.
+    """
+    return tuple(
+        key
+        for key in FACTOR_DEFINITIONS.qualified_keys
+        if any(
+            name.startswith(f"factor_manifest_{key.replace('/', '_')}@")
+            for name in STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532
+        )
+    )
+
+
 def test_every_partition_a_shared_build_writes_is_the_one_its_single_factor_build_writes(
     corpus: Path, tmp_path: Path
 ) -> None:
-    """All 21 factors x 3 tiers x 3 instants, by `content_hash`, against 21 separate builds.
+    """Every pinned factor x 3 tiers x 3 instants, compared against separate single builds.
 
     Held to the partitions the single-factor build stored before this change
     (`STORED_BY_SINGLE_FACTOR_BUILDS_AT_8A18532`), and to today's single-factor builds, each in a
-    fresh copy of the corpus -- the arrangement the shared build replaces; the shared one runs all
-    21 in one call over one copy. Every report is equal too, so the universe sizes and coverage
-    censuses the faces print did not move either.
+    fresh copy of the corpus -- the arrangement the shared build replaces; the shared one runs
+    every pinned factor in one call over one copy. Every report is equal too, so the universe
+    sizes and coverage censuses the faces print did not move either.
+
+    **The factor set is the pinned table's, not the registry's** (`V2-P7-028`). The table records
+    what a commit stored, and a factor registered after it has no pin to be equal to; it also
+    needs a `stk_limit` partition this corpus does not carry, so the limit-event family is
+    excluded by the same rule the table is built on rather than by a list of names.
     """
-    keys = FACTOR_DEFINITIONS.qualified_keys
+    keys = _pinned_factors()
     alone: dict[str, str] = {}
     single_reports: list[FactorBuildReport] = []
     for position, key in enumerate(keys):

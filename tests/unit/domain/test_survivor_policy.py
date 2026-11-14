@@ -9,6 +9,7 @@ order over the entrants", so the two files cannot drift apart silently.
 
 import random
 from decimal import Decimal
+from typing import Final
 
 import pytest
 from pydantic import ValidationError
@@ -21,6 +22,7 @@ from openalpha_cn.domain.survivor_book import (
 )
 from openalpha_cn.domain.survivor_policy import BookState, Cooldown, Holding, decide_book
 from openalpha_cn.domain.survivor_selection import SeededHashRule
+from openalpha_cn.domain.survivor_veto import VETO_RULE_ID
 
 SESSION = 100
 
@@ -523,3 +525,106 @@ def test_a_halted_holding_the_screen_also_calls_illiquid_is_not_frozen() -> None
 
     assert [(e.ts_code, e.reason) for e in decision.exits] == [(name(3), "EXIT_ELIGIBILITY_LOST")]
     assert decision.frozen == ()
+
+
+# --- `V2-P7-027` plan A: the entry veto is entry-only (R-A1) -----------------------------------
+
+
+VETO_CONFIG: Final[dict[str, object]] = {
+    "schema_version": "survivor-book-config/v2",
+    "entry_veto": VETO_RULE_ID,
+}
+"""The configuration a veto-capable book is registered under: v2 names the rule explicitly."""
+
+
+def test_a_vetoed_top_ranked_survivor_is_skipped_and_the_next_entrant_enters() -> None:
+    """The rule's whole point: a bearish survivor cannot be bought, and the book moves on.
+
+    The vetoed name is the **first** the selection rule would draw, so the test would fail if
+    the veto were applied after the draw-and-cut rather than as an entrant filter: the next name
+    in the rule's own order fills the vacancy, and the vetoed name appears nowhere -- not in
+    `entries`, not in the watch list.
+    """
+    cfg = config(**VETO_CONFIG)
+    drawn = rule_order(list(range(8)), cfg)
+    vetoed = frozenset({drawn[0]})
+    decision = decide_book(
+        config=cfg,
+        screen=screen_of(list(range(8))),
+        state=state(initialized=False),
+        vetoed=vetoed,
+    )
+
+    assert [entry.ts_code for entry in decision.entries] == drawn[1:5]
+    assert drawn[0] not in decision.watch_list
+    assert decision.watch_list == tuple(drawn[5:8])
+
+
+def test_a_vetoed_code_that_is_not_a_survivor_changes_nothing() -> None:
+    """The veto is a filter on entrants, not a new status a name can have."""
+    cfg = config(**VETO_CONFIG)
+    plain = decide_book(config=cfg, screen=screen_of(list(range(6))), state=state())
+    with_unknown = decide_book(
+        config=cfg,
+        screen=screen_of(list(range(6))),
+        state=state(),
+        vetoed=frozenset({name(99)}),
+    )
+
+    assert with_unknown == plain
+
+
+def test_a_held_vetoed_name_stays_held_and_no_report_moves() -> None:
+    """R-A1: the veto blocks entry only. A held name is never sold, frozen or re-reported.
+
+    The book holds three of five survivors and has one vacancy. Name 0 is held **and** vetoed;
+    the first name the rule draws for the vacancy is vetoed too. What changes is only *who fills
+    the vacancy*: name 0 stays held (same exits, frozen, near-exit and deferred lists as a run
+    with no veto at all), the first draw is skipped and the other entrant enters. A veto
+    implemented as an `EligibilityReason` would instead sell name 0 with `EXIT_ELIGIBILITY_LOST`
+    and fail the equality of the reports.
+    """
+    cfg = config(**VETO_CONFIG)
+    screen = screen_of([0, 1, 2, 3, 4])
+    held = state(held=(0, 1, 2))
+    first_drawn, other_entrant = rule_order([3, 4], cfg)
+
+    without = decide_book(config=cfg, screen=screen, state=held)
+    with_veto = decide_book(
+        config=cfg, screen=screen, state=held, vetoed=frozenset({name(0), first_drawn})
+    )
+
+    assert (with_veto.exits, with_veto.frozen, with_veto.near_exit, with_veto.deferred_exits) == (
+        without.exits,
+        without.frozen,
+        without.near_exit,
+        without.deferred_exits,
+    )
+    assert name(0) in with_veto.target_holdings
+    assert [entry.ts_code for entry in without.entries] == [first_drawn]
+    assert [entry.ts_code for entry in with_veto.entries] == [other_entrant]
+
+
+def test_a_vetoed_set_is_refused_when_the_configuration_names_no_veto() -> None:
+    """A caller cannot hand a registered `none` book a veto it never said it applies.
+
+    The refusal names the field the caller has to change (`entry_veto`), because the alternative
+    is a daily run whose entry rule silently differs from the registration that admitted it.
+    """
+    with pytest.raises(ValueError, match="entry_veto"):
+        decide_book(
+            config=config(),
+            screen=screen_of(list(range(6))),
+            state=state(),
+            vetoed=frozenset({name(0)}),
+        )
+
+
+def test_an_empty_vetoed_set_is_the_same_decision_whatever_the_rule() -> None:
+    """`none` and a named rule agree exactly when there is nothing to veto."""
+    plain = decide_book(config=config(), screen=screen_of(list(range(6))), state=state())
+    veto_capable = decide_book(
+        config=config(**VETO_CONFIG), screen=screen_of(list(range(6))), state=state()
+    )
+
+    assert veto_capable == plain
