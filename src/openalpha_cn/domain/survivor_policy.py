@@ -19,6 +19,20 @@ evidence): it keeps the loser tail out and the cost low
 (`docs/superpowers/specs/2026-10-13-p7-step0-survivor-book-design.md` section 3).
 The function is pure -- state and screen in, decision out -- so the whole policy is testable with
 hand-written fixtures and no panel.
+
+## The entry veto (`V2-P7-027`, plan A) blocks entry and nothing else
+
+`decide_book` takes an optional `vetoed` set -- the codes `domain/survivor_veto.py`'s
+`market_bearish_5/v1` rule names for this signal day. Those codes join `blocked`, the set an
+entrant must not be drawn from; a vacancy is then filled from the next name the selection rule
+draws. That is the *whole* effect, by ruling R-A1 of
+`docs/superpowers/plans/2026-11-14-p7-plans-a-b.md`: the veto is **not** an `EligibilityReason`.
+A held name the rule names is not sold, not frozen, not moved into or out of `near_exit`, and
+nothing about its report changes -- a forced exit for a bearish reading would be uncapped and
+would move the liquidity and loser-decile populations the P7 measurements rest on. A caller that
+passes a non-empty set to a book whose `entry_veto` is `"none"` is refused: the registration that
+admitted the book says it applies no veto, and acting on one anyway would make the day's entry
+rule differ from the frozen configuration.
 """
 
 from decimal import Decimal
@@ -137,8 +151,27 @@ class BookDecision(BaseModel):
 
 
 def decide_book(
-    *, config: SurvivorBookConfig, screen: ScreenResult, state: BookState
+    *,
+    config: SurvivorBookConfig,
+    screen: ScreenResult,
+    state: BookState,
+    vetoed: frozenset[str] = frozenset(),
 ) -> BookDecision:
+    """Decide today's exits and entries; `vetoed` blocks entry only (`V2-P7-027`).
+
+    `vetoed` is the rule's answer for the signal day (`domain/survivor_veto.py`), or the empty
+    set when the book applies no veto. It is applied after the screen, by joining `blocked`: a
+    held name it names is untouched (R-A1), and only the entrant draw sees it. A non-empty set on
+    a configuration whose `entry_veto` is `"none"` is refused -- the book was registered without
+    a veto and its caller cannot add one.
+    """
+    if vetoed and config.entry_veto == "none":
+        raise ValueError(
+            f"decide_book was given {len(vetoed)} vetoed code(s) but the configuration's "
+            "entry_veto is 'none': a book registered without an entry veto cannot be handed one "
+            "by its caller, and acting on it would make the day's entry rule differ from the "
+            "registration that admitted the book"
+        )
     held = sorted(holding.ts_code for holding in state.holdings)
     active = [code for code in held if code not in set(state.pending_sells)]
     if len(active) + len(state.pending_buys) > config.holding_count:
@@ -190,7 +223,9 @@ def decide_book(
         for cooldown in state.cooldowns
         if state.session - cooldown.since_session < config.cooldown_sessions
     }
-    blocked = set(held) | set(state.pending_buys) | cooling
+    # `vetoed` (V2-P7-027) joins the entrant filter only: the lists above are what sells, freezes
+    # and reports a holding, and none of them reads `blocked` (R-A1: the veto blocks entry only).
+    blocked = set(held) | set(state.pending_buys) | cooling | vetoed
     ranked = screen.survivors
     entrant_count = len(ranked) - floor_share(len(ranked), config.entry_floor_fraction)
     entrants = [name for name in ranked[:entrant_count] if name.ts_code not in blocked]

@@ -15,9 +15,17 @@ default below is a **pre-registration candidate** there, frozen only by `V2-P7-0
 
 from decimal import Decimal
 from hashlib import sha256
-from typing import Annotated, Final, Literal, Self, get_args
+from typing import Annotated, Any, Final, Literal, Self, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    computed_field,
+    model_serializer,
+    model_validator,
+)
 
 from openalpha_cn.domain._identity import stable_model_id
 from openalpha_cn.domain.json_value import canonical_json_bytes
@@ -83,11 +91,27 @@ class SurvivorBookConfig(BaseModel):
     which fails safe, and is why a registration stores this model's own JSON and reads it back.
     `composite_factors` keeps its order for a different reason: it pairs by position with
     `SecurityFacts.oriented_values`.
+
+    ## Two versions, and why v1 must stay byte-identical (`V2-P7-027`)
+
+    `survivor-book-config/v2` carries plan A's rule-based entry veto: `entry_veto` names
+    `market_bearish_5/v1` (or `none`, explicitly). A v2 must name it -- the version exists to say
+    which veto a book was frozen with, so leaning on the default would not say it. A v1 config
+    can only carry `none`, and the field is **excluded from v1's stored form** (the model
+    serializer below): `survivor-book-config/v1`'s JSON, its `config_id` and
+    `survivor_config_digest` are byte-identical to the base commit `539bd06`, so every stored v1
+    registration, journal key and paper-book snapshot stays readable and matched. `AGENTS.md`
+    hard rule 3 states that rule; `tests/unit/domain/test_survivor_book.py` pins the base bytes as
+    literals measured there. The exclusion is one-directional on purpose: a v1 model that is
+    handed `entry_veto: "none"` is accepted, re-dumps without it, and is therefore refused by the
+    registration's stored-form fixed point -- one book keeps one registered spelling.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["survivor-book-config/v1"] = "survivor-book-config/v1"
+    schema_version: Literal["survivor-book-config/v1", "survivor-book-config/v2"] = (
+        "survivor-book-config/v1"
+    )
     holding_count: int = Field(default=10, ge=1, le=50)
     capital: Decimal = Field(default=Decimal("350000"), gt=0)
     boards: tuple[Board, ...] = ("main",)
@@ -105,9 +129,59 @@ class SurvivorBookConfig(BaseModel):
     """Held back from every buy's budget so fees and slippage cannot push the last buy past the
     cash that is left: ten buys of exactly `capital / 10` would otherwise overspend by the costs."""
     selection_rule: Literal["seeded_hash/v1"] = "seeded_hash/v1"
+    entry_veto: Literal["none", "market_bearish_5/v1"] = "none"
+    """Which rule may veto a **new entry** (`V2-P7-027`, plan A). `none` means the book ignores
+    vetoes entirely. The rule blocks entry only: a held name it names is never sold, frozen or
+    reported differently (R-A1), because forcing an exit would be uncapped and would move the
+    liquidity and loser-decile populations the P7 measurements rest on. v2 requires the field to
+    be named; v1 may not name anything but `none`; neither v1's stored form nor its identity
+    carries the field. `domain/survivor_veto.py` is the rule; `test_survivor_book.py` pins the
+    two literals to `VETO_RULE_ID` and to the schema versions."""
     seed: int = Field(ge=0)
     """No default on purpose: a registration has to name the seed it was frozen with."""
     composite_factors: tuple[str, ...] = DEFAULT_COMPOSITE_FACTORS
+
+    @model_validator(mode="before")
+    @classmethod
+    def _the_entry_veto_matches_the_version(cls, data: Any) -> Any:
+        """Refuse a v2 that hides behind the default, and a v1 that claims a live rule.
+
+        Runs before field validation so a missing `entry_veto` is caught by **name** -- a v2
+        registration that forgot it is refused saying `entry_veto`, rather than by a diff on the
+        stored form later. The version is read defensively: an unknown version is left to the
+        `Literal` so the reader is told the version is wrong, not the veto.
+        """
+        if not isinstance(data, dict):
+            return data
+        version = data.get("schema_version", "survivor-book-config/v1")
+        if version == "survivor-book-config/v2" and "entry_veto" not in data:
+            raise ValueError(
+                "a survivor-book-config/v2 configuration must name entry_veto explicitly: the "
+                "version is what says which entry veto the book was frozen with, so leaning on "
+                "the default would not say it"
+            )
+        if version == "survivor-book-config/v1" and data.get("entry_veto", "none") != "none":
+            raise ValueError(
+                "a survivor-book-config/v1 configuration can only carry entry_veto 'none': the "
+                "v1 contract predates the entry veto, so naming a rule under it would claim a "
+                "behaviour v1 registrations do not have"
+            )
+        return data
+
+    @model_serializer(mode="wrap")
+    def _v1_does_not_carry_the_field(self, handler: SerializerFunctionWrapHandler) -> Any:
+        """Drop `entry_veto` from a v1 stored form, so v1's bytes do not move (`V2-P7-027`).
+
+        `model_dump`, `model_dump_json`, `stable_model_id` and `survivor_config_digest` all go
+        through the model serializer, so this is the one place that decides it: a v1 config
+        dumps exactly the fields the base commit had, and a v2 config dumps `entry_veto` too.
+        The computed `config_id` is untouched: pydantic applies `exclude_computed_fields` and
+        the caller's `exclude` on `handler`, and popping one key cannot reorder the rest.
+        """
+        data = handler(self)
+        if self.schema_version == "survivor-book-config/v1":
+            data.pop("entry_veto", None)
+        return data
 
     @model_validator(mode="after")
     def _lists_are_nonempty_and_unique(self) -> Self:
