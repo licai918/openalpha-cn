@@ -3063,14 +3063,45 @@ def test_a_vetoing_books_paper_section_files_the_rule_and_the_survivors_it_block
     }
 
 
-def test_a_vetoing_books_summary_prints_the_entry_veto_line(s3: WrittenOff) -> None:
-    """`summary_lines` reads the document alone, so the condition is the `entry_veto` key the paper
-    section files: present for a vetoing book, absent (and so unprinted) for a v1 one."""
-    result = dataclasses.replace(s3.result, vetoed=frozenset({C, B, "699999.SH"}))
+def test_a_vetoing_books_summary_prints_only_the_entries_the_veto_kept_out(
+    s3: WrittenOff,
+) -> None:
+    """Finding 3, fix round 1: the printed line says what the veto actually did -- it kept an
+    entry out. `summary_lines` reads the document alone, so it subtracts what the paper section
+    says the book holds (`positions`) and the buys it still has pending (`open_orders` with
+    `carried`); the journal's `vetoed` keeps the whole survivor intersection, entry-vetoed or
+    already held."""
+    result = dataclasses.replace(s3.result, vetoed=frozenset({H}))
 
-    lines = summary_lines(document_of(s3, evening=result, book=VETO_BOOK))
+    document = document_of(s3, evening=result, book=VETO_BOOK)
 
-    assert line_with(lines, "entry veto") == row("entry veto", f"{VETO_RULE_ID} blocked: {B}, {C}")
+    assert document["paper"]["entry_veto"] == {"rule": VETO_RULE_ID, "vetoed": [H]}
+    lines = summary_lines(document)
+    assert line_with(lines, "entry veto") == row(
+        "entry veto",
+        f"{VETO_RULE_ID} (entry only) -- vetoed survivors not bought tonight: {H}",
+    )
+
+
+def test_a_held_vetoed_survivor_is_journalled_but_not_printed_as_blocked(
+    s3: WrittenOff,
+) -> None:
+    """R-A1 on the line: 600020.SH is held through S3 and 600050.SH is a pending buy, so the veto
+    took no entry from either -- they stay out of the printed blocked list (nothing was blocked)
+    while the journal still files them, because the rule did name the survivors."""
+    result = dataclasses.replace(s3.result, vetoed=frozenset({B, E}))
+
+    document = document_of(s3, evening=result, book=VETO_BOOK)
+
+    assert document["paper"]["entry_veto"] == {
+        "rule": VETO_RULE_ID,
+        "vetoed": [B, E],
+    }
+    printed = line_with(summary_lines(document), "entry veto")
+    assert printed == row(
+        "entry veto", f"{VETO_RULE_ID} (entry only) -- vetoed survivors not bought tonight: none"
+    )
+    assert B not in printed and E not in printed
 
 
 def test_a_vetoing_book_with_nothing_blocked_prints_none(s3: WrittenOff) -> None:
@@ -3080,7 +3111,9 @@ def test_a_vetoing_book_with_nothing_blocked_prints_none(s3: WrittenOff) -> None
 
     lines = summary_lines(document_of(s3, evening=result, book=VETO_BOOK))
 
-    assert line_with(lines, "entry veto") == row("entry veto", f"{VETO_RULE_ID} blocked: none")
+    assert line_with(lines, "entry veto") == row(
+        "entry veto", f"{VETO_RULE_ID} (entry only) -- vetoed survivors not bought tonight: none"
+    )
 
 
 def test_the_base_books_paper_section_and_summary_carry_no_entry_veto(s3: WrittenOff) -> None:

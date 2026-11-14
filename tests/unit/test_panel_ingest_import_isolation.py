@@ -611,6 +611,12 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # rule. It reaches `daily`, `stk_limit` and `trade_cal`, which the two adapters'
             # reads above already reach, so the dataset row below does not grow.
             "panel_limit_events.vetoed_on",
+            # ... and, for that read only (fix round 1, review finding 1), the calendar it walks:
+            # the session's year and the one before it, at the session's publication instant,
+            # because the evening's own calendar stops at the epoch's year. Reaches `trade_cal`,
+            # already in the row; `session_publication_instant` is a clock and reaches none.
+            "panel_ingest.load_trading_calendar",
+            "panel_ingest.session_publication_instant",
         }
     ),
     "openalpha_cn.strategy_survivor_check": frozenset(

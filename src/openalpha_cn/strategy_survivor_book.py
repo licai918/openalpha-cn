@@ -167,7 +167,7 @@ from openalpha_cn.backtest.paper_state import (
 from openalpha_cn.domain.factor_transform import FactorTransformSpec
 from openalpha_cn.domain.survivor_book import ScreenResult
 from openalpha_cn.domain.survivor_screen import screen as survivor_screen
-from openalpha_cn.domain.trading_calendar import TradingCalendar
+from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
 
 # `_try_lock` and `_unlock` are the panel catalog's two lock primitives, shared rather than
 # restated: an exclusive `flock(2)` (`msvcrt.locking` on Windows) through one open file
@@ -175,6 +175,7 @@ from openalpha_cn.domain.trading_calendar import TradingCalendar
 # the kernel drops with its holder.
 from openalpha_cn.panel.store import PanelStorageError, PanelStore, _try_lock, _unlock
 from openalpha_cn.panel_factors import FACTOR_TRANSFORMS
+from openalpha_cn.panel_ingest import load_trading_calendar, session_publication_instant
 from openalpha_cn.panel_limit_events import vetoed_on
 from openalpha_cn.storage.paper_state import PaperStateStoreError
 from openalpha_cn.strategy_survivor import SurvivorRegistration
@@ -1336,18 +1337,57 @@ def _vetoed_for(
     session inside it restated after its publication has no earlier version to read and the panel
     refuses by name; `_refusals` names that refusal `paper book`'s, naming the session, rather than
     letting the evening decide on a different vetoed set (R-N3a).
+
+    **The window is counted on a calendar that holds the year before the session's**
+    (`_veto_calendar`). The evening's own calendar reaches back only to the registered epoch's
+    year, so on the first four sessions of a year -- where the window crosses New Year -- walking
+    it back would raise `CalendarHorizonError` and the evening would refuse. Only a v2 book pays
+    this read; the base book returns above without touching the panel (R-N4).
     """
     if registration.book.entry_veto == "none":
         return frozenset()
+    veto_calendar = _veto_calendar(panel, registration, session=session, calendar=calendar)
     with _refusals(
         "paper book", f"the entry veto's window of {session.isoformat()}", restatement=True
     ):
         return vetoed_on(
             panel,
             session=session,
-            calendar=calendar,
+            calendar=veto_calendar,
             exchange=registration.adapter.exchange,
         )
+
+
+def _veto_calendar(
+    panel: PanelStore,
+    registration: SurvivorRegistration,
+    *,
+    session: date,
+    calendar: TradingCalendar,
+) -> TradingCalendar:
+    """The calendar the entry veto's window is counted on: the session's year and the one before.
+
+    Read from the panel at the session's own publication instant -- the instant the target
+    session's events are read at -- so the calendar and the events it names are one reading. The
+    evening's calendar (`daily_selection._survivor_calendar`) covers `range(epoch.year,
+    session.year + 1)` and so cannot hold a January session's New Year predecessors; widening it
+    would move `SessionOrdinals` and the base book, so only this read widens.
+
+    A year before the session's the panel does not store is not an error in itself: the evening's
+    calendar is used and `veto_sessions` refuses by name if the window still runs past its start
+    -- never a shorter window and never a different vetoed set.
+    """
+    if session.year == date.min.year:  # pragma: no cover - no calendar reaches that year
+        return calendar
+    try:
+        return load_trading_calendar(
+            panel,
+            exchange=registration.adapter.exchange,
+            years=(session.year - 1, session.year),
+            as_of=session_publication_instant(session),
+        )
+    except (TradingCalendarError, PanelStorageError):
+        return calendar
 
 
 @contextmanager
@@ -1360,7 +1400,11 @@ def _refusals(step: str, what: str, *, restatement: bool = False) -> Iterator[No
     `restatement` is for the entry veto's window: its block reads panel sessions at their own
     publication instants, where a session restated after its instant has no earlier version to
     read, so the block refuses by name instead of answering from another version. Every other
-    block leaves the panel's own `RuntimeError`s to the panel.
+    block leaves the panel's own `RuntimeError`s to the panel. The refusal names the restatement
+    as the *likely* cause rather than the established one -- a missing or damaged partition, or a
+    row not yet knowable there, refuses the same way -- and the panel's own error text follows;
+    `PartitionNotYetKnowableError` stays on the cause chain, so a caller's later-read rule sees
+    it and reads once more, and the veto's fixed per-session instants refuse again by name.
     """
     try:
         yield
@@ -1371,10 +1415,12 @@ def _refusals(step: str, what: str, *, restatement: bool = False) -> Iterator[No
             raise
         raise SurvivorDayError(
             step,
-            f"{what} was refused (PanelStorageError): {error}. The panel keeps no earlier version "
-            "of a restated row, so a session restated after its own 16:30 cannot be read at its "
-            "own publication instant and the vetoed set cannot be reproduced: refusing is the "
-            "guarantee -- never a different set -- and nothing was written",
+            f"{what} was refused (PanelStorageError): {error}. The most likely cause is a session "
+            "restated after its own 16:30: the panel keeps no earlier version of a restated row, "
+            "so the session cannot be read at its own publication instant and the vetoed set "
+            "cannot be reproduced. A missing or damaged partition, or a row not yet knowable "
+            "there, refuses the same way -- refusing is the guarantee, never a different set. "
+            "Nothing was written",
         ) from error
     except PaperStateStoreError as error:
         raise SurvivorDayError(

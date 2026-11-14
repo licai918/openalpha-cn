@@ -83,7 +83,8 @@ or a clock before the day's 16:30 publication -- M5); the ORDERS FOR THE OPEN OF
 09:15); the carried orders' count; what the draw left out (unfunded, unaffordable, deferred exits,
 near exit, frozen -- each of the last three saying in one clause what it means for the account,
 M6 -- watch list); illiquid exits; positions; book; the entry veto when the book applies one
-(`V2-P7-027`; its blocked survivors, or `none`); settled; catch-up; then `diagnostics`: the
+(`V2-P7-027`; the survivors it kept out of tonight's draw -- held and pending ones are not
+listed, R-A1 -- or `none`); settled; catch-up; then `diagnostics`: the
 ids (the session's ordinal, the trade list, the paper snapshot), facts, screen, prediction, the
 panel and factor catch-ups, Tushare requests, units; the wording last. A list with nothing in it
 prints as `none`, so a missing line never reads as "nothing to do". A day with no evening prints
@@ -941,7 +942,7 @@ def summary_lines(result: Mapping[str, Any]) -> list[str]:
         lines += _position_lines(paper["book"]["holdings"])
     lines.append(_row("book", _book_text(paper, skipped)))
     if paper is not None and "entry_veto" in paper:
-        lines.append(_entry_veto_line(paper["entry_veto"]))
+        lines.append(_entry_veto_line(paper["entry_veto"], paper))
     if paper is not None:
         lines += _settled_lines(paper["settled"])
     days = (paper["catch_ups"] if paper is not None else skipped.get("catch_ups")) or []
@@ -1021,13 +1022,29 @@ def _book_text(paper: Mapping[str, Any] | None, skipped: Mapping[str, Any]) -> s
     )
 
 
-def _entry_veto_line(block: Mapping[str, Any]) -> str:
-    """The entry veto's line (`V2-P7-027`): the rule and the survivors it blocked tonight, `none`
-    when it blocked none of them -- a book that applies the rule says so every session, so a
-    missing line never reads as `nothing was blocked`."""
-    blocked = block["vetoed"]
+def _entry_veto_line(block: Mapping[str, Any], paper: Mapping[str, Any]) -> str:
+    """The entry veto's line (`V2-P7-027`): the rule is an **entry** rule, so the line names the
+    survivors it kept *out of tonight's draw*, not every survivor it named.
+
+    The journal's `entry_veto.vetoed` is the whole survivor intersection -- the rule did name
+    them -- but a held survivor stays held (R-A1: no exit, no sale) and a survivor whose buy is
+    already pending is already entering, so neither is "not bought tonight". Subtracting the
+    paper section's own `positions` and its `carried` buys is what makes the printer say what
+    happened; a book that applies the rule always prints the line, `none` included, so a missing
+    line never reads as `nothing kept out`.
+    """
+    named = set(block["vetoed"])
+    held = {item["ts_code"] for item in paper["book"]["holdings"]}
+    pending = {
+        order["ts_code"]
+        for order in paper["open_orders"]
+        if order["side"] == "buy" and order["carried"]
+    }
+    kept_out = sorted(named - held - pending)
     return _row(
-        "entry veto", f"{block['rule']} blocked: {', '.join(blocked) if blocked else 'none'}"
+        "entry veto",
+        f"{block['rule']} (entry only) -- vetoed survivors not bought tonight: "
+        f"{', '.join(kept_out) if kept_out else 'none'}",
     )
 
 
