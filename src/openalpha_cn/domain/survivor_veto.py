@@ -36,17 +36,28 @@ set an entrant must not be drawn from, and a held name the veto names is not sol
 reported differently. This module names codes and nothing else; it has no book, no orders and no
 report.
 
+## `veto_details` is the same answer with the arithmetic shown
+
+The daily annotation (`V2-P7-027`, Task 2) prints *why* a name is vetoed beside the name: the
+event count and the mean weight the threshold was compared against. `veto_details` is that
+reading, and it shares `vetoed_codes`' window refusal and its arithmetic rather than restating
+them, so the two answers cannot drift: every name `veto_details` marks `vetoed` is a name
+`vetoed_codes` returns. A name with no event in the window is absent from the mapping -- there
+is no reading to print -- which is also why the equality below is over `detail.vetoed` rather
+than over every key.
+
 ## Layering
 
-Pure `Sequence`/`dict`/`math.fsum` plus `domain/limit_events.py`'s vocabulary. No panel read, no
-store, no clock, no numeric stack, and no import of `agents/` -- the agent imports the constants
-from `domain/`, never the reverse (`AGENTS.md` hard rule 2).
+Pure `Sequence`/`Mapping`/`dict`/`math.fsum`/`dataclass` plus `domain/limit_events.py`'s
+vocabulary. No panel read, no store, no clock, no numeric stack, and no import of `agents/` --
+the agent imports the constants from `domain/`, never the reverse (`AGENTS.md` hard rule 2).
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Final
 
 from openalpha_cn.domain.limit_events import (
@@ -66,6 +77,40 @@ class SurvivorVetoError(ValueError):
     """Raised when the veto is asked to read more sessions than its rule defines."""
 
 
+@dataclass(frozen=True, slots=True)
+class VetoDetail:
+    """One security's reading: how many events it had, their mean weight, and the answer.
+
+    `event_count` and `mean_weight` are the two numbers the rule is made of, so an annotation
+    that prints them prints the arithmetic rather than a second explanation of it; `vetoed` is
+    the same comparison `vetoed_codes` makes. Frozen because the answer is evidence once taken.
+    """
+
+    ts_code: str
+    event_count: int
+    mean_weight: float
+    vetoed: bool
+
+
+def _event_weights(events_by_session: Sequence[Sequence[LimitEvent]]) -> dict[str, list[float]]:
+    """Every name's event weights over the window, after the window's own refusal.
+
+    Shared by `vetoed_codes` and `veto_details` so the two cannot disagree about what a legal
+    window is -- the refusal is the rule's, not one function's.
+    """
+    if len(events_by_session) > VETO_LOOKBACK_SESSIONS:
+        raise SurvivorVetoError(
+            f"the veto reads at most {VETO_LOOKBACK_SESSIONS} sessions, newest first; got "
+            f"{len(events_by_session)} -- the caller's window is longer than the rule's, and "
+            "cutting one end here would make the answer depend on which end was cut"
+        )
+    weights: dict[str, list[float]] = {}
+    for session_events in events_by_session:
+        for event in session_events:
+            weights.setdefault(event.ts_code, []).append(MARKET_EVENT_WEIGHTS[event.kind])
+    return weights
+
+
 def vetoed_codes(events_by_session: Sequence[Sequence[LimitEvent]]) -> frozenset[str]:
     """Every security the rule vetoes, given the five sessions ending at `t` newest first.
 
@@ -74,18 +119,31 @@ def vetoed_codes(events_by_session: Sequence[Sequence[LimitEvent]]) -> frozenset
     `VETO_LOOKBACK_SESSIONS` sessions are passed, rather than cutting the window for the caller.
     The answer is a `frozenset` so a decision cannot be mutated after it is taken.
     """
-    if len(events_by_session) > VETO_LOOKBACK_SESSIONS:
-        raise SurvivorVetoError(
-            f"vetoed_codes reads at most {VETO_LOOKBACK_SESSIONS} sessions, newest first; got "
-            f"{len(events_by_session)} -- the caller's window is longer than the rule's, and "
-            "cutting one end here would make the answer depend on which end was cut"
-        )
-    weights: dict[str, list[float]] = {}
-    for session_events in events_by_session:
-        for event in session_events:
-            weights.setdefault(event.ts_code, []).append(MARKET_EVENT_WEIGHTS[event.kind])
     return frozenset(
         ts_code
-        for ts_code, values in weights.items()
+        for ts_code, values in _event_weights(events_by_session).items()
         if math.fsum(values) / len(values) < MARKET_BEARISH_THRESHOLD
     )
+
+
+def veto_details(events_by_session: Sequence[Sequence[LimitEvent]]) -> Mapping[str, VetoDetail]:
+    """Every security with at least one event in the window, newest first as the caller passed it.
+
+    The mapping is the rule's own arithmetic per name: `event_count` events, their `mean_weight`
+    (a `math.fsum` over the event weights, as `vetoed_codes` computes it), and `vetoed` the same
+    `mean_weight < MARKET_BEARISH_THRESHOLD` comparison. A name with no event is absent rather
+    than present with a zero mean, and a window longer than the rule's raises
+    `SurvivorVetoError` through the shared refusal -- so
+    `{detail.ts_code for detail in veto_details(x).values() if detail.vetoed} == vetoed_codes(x)`
+    holds for every legal window.
+    """
+    details: dict[str, VetoDetail] = {}
+    for ts_code, values in _event_weights(events_by_session).items():
+        mean_weight = math.fsum(values) / len(values)
+        details[ts_code] = VetoDetail(
+            ts_code=ts_code,
+            event_count=len(values),
+            mean_weight=mean_weight,
+            vetoed=mean_weight < MARKET_BEARISH_THRESHOLD,
+        )
+    return details
