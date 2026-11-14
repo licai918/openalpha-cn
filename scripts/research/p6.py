@@ -207,7 +207,46 @@ STAGE_STARTS: Final[Mapping[str, date]] = {
 
 # --- section 4 ---------------------------------------------------------------------------------
 
-PROTOCOL_FACTOR_COUNT: Final[int] = 21
+PROTOCOL_FACTOR_KEYS: Final[tuple[str, ...]] = (
+    "reversal_1d/v1",
+    "momentum_20_sessions/v1",
+    "momentum_60_sessions/v1",
+    "momentum_120_sessions/v1",
+    "reversal_5_sessions/v1",
+    "return_vol_60/v1",
+    "downside_vol_60/v1",
+    "turnover_60/v1",
+    "amihud_60/v1",
+    "residual_vol_60/v1",
+    "earnings_yield_ttm/v1",
+    "book_to_price/v1",
+    "sales_yield_ttm/v1",
+    "deducted_earnings_yield_ttm/v1",
+    "return_on_equity_ttm/v1",
+    "return_on_capital_ttm/v1",
+    "gross_margin_stability/v1",
+    "accruals_ttm/v1",
+    "revenue_yoy/v1",
+    "net_profit_yoy/v1",
+    "revenue_yoy_acceleration/v1",
+)
+"""The pre-registered discovery grid's factors, **frozen rather than read off the registry**.
+
+`V2-P7-028` is why the distinction had to be written down. This list used to be
+`FACTOR_DEFINITIONS.qualified_keys` behind a count guard, so the day a later issue registered two
+more factors the pre-registered P6 grid stopped being reproducible at all -- `protocol_factor_keys`
+refused the build by name, which is the loud half of the right instinct. The quiet half would have
+been worse: a version that dropped the guard would have silently grown the grid from 189
+configurations to 207 and put two factors nobody pre-registered into P6's multiple-testing family.
+
+The frozen tuple is exactly the twenty-one keys in the declaration order the grid was registered
+with, so `discovery_configs` still produces the same 189 configurations. Registration is not
+pre-registration: a factor joins a pre-registered family only by a new protocol that says so, and
+`protocol_factor_keys` checks every key here is still declared rather than that the registry holds
+nothing more.
+"""
+
+PROTOCOL_FACTOR_COUNT: Final[int] = len(PROTOCOL_FACTOR_KEYS)
 TIERS: Final[tuple[str, ...]] = ("raw", "processed", "neutralized")
 TRANSFORM: Final[str] = "cross_section_standard/v1"
 NEUTRALIZATION: Final[str] = "industry_and_size/v1"
@@ -501,14 +540,21 @@ def discovery_label_sessions(config: Config) -> int:
 
 
 def protocol_factor_keys() -> tuple[str, ...]:
-    """The build's declared factors, in declaration order, provided there are the protocol's 21."""
-    keys = tuple(FACTOR_DEFINITIONS.qualified_keys)
-    if len(keys) != PROTOCOL_FACTOR_COUNT:
+    """The protocol's frozen twenty-one factors, each checked to still be declared by this build.
+
+    `PROTOCOL_FACTOR_KEYS` states why the set is frozen rather than derived. What this function
+    still guards is the other direction: a key the pre-registered grid names and the build can no
+    longer compute would make the protocol unreproducible for a real reason, and it is named here
+    rather than surfacing later as a missing feature column.
+    """
+    declared = set(FACTOR_DEFINITIONS.qualified_keys)
+    missing = [key for key in PROTOCOL_FACTOR_KEYS if key not in declared]
+    if missing:
         raise ProtocolMismatchError(
-            f"the protocol's grid is {PROTOCOL_FACTOR_COUNT} factors and this build declares "
-            f"{len(keys)}; a grid over another factor set is not the pre-registered one"
+            f"the pre-registered P6 grid names {missing}, which this build no longer declares; a "
+            "grid over another factor set is not the pre-registered one"
         )
-    return keys
+    return PROTOCOL_FACTOR_KEYS
 
 
 def tier_declarations(tiers: Sequence[str]) -> tuple[str | None, str | None]:

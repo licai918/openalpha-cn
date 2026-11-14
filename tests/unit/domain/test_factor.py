@@ -213,6 +213,7 @@ def test_the_family_and_direction_vocabularies_are_closed_and_match_their_litera
         "growth",
         "momentum_reversal",
         "volatility_liquidity",
+        "limit_events",
     } == FACTOR_FAMILIES
 
 

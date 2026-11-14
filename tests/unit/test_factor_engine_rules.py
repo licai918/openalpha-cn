@@ -116,8 +116,8 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
     regresses on and the window gained a channel that could reach one), the next four are the
     value family (three from `V2-P3-009` and `deducted_earnings_yield_ttm` from `V2-P3-017`, which
     is where the projection gained the column it reads), the next four are `V2-P3-010`'s quality
-    family and the last three are `V2-P3-011`'s growth family, each family's own declarations being
-    audited in
+    family, the next three are `V2-P3-011`'s growth family and the last two are `V2-P7-028`'s
+    limit-event family, each family's own declarations being audited in
     `tests/unit/test_factor_momentum_reversal_rules.py`,
     `tests/unit/test_factor_volatility_liquidity.py`,
     `tests/unit/test_factor_value_family.py`,
@@ -147,6 +147,8 @@ def test_the_shipped_registry_and_evaluator_table_name_exactly_the_same_factors(
         "revenue_yoy/v1",
         "net_profit_yoy/v1",
         "revenue_yoy_acceleration/v1",
+        "limit_up_count_20/v1",
+        "broken_board_count_20/v1",
     )
 
 
@@ -841,7 +843,7 @@ second place for one sentence to drift from.
 def test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is_unmeasured() -> (
     None
 ):
-    """`direction` is a required *field* on all twenty and a *sentence* on all twenty too.
+    """`direction` is a required *field* on all twenty-three and a *sentence* on all of them too.
 
     `FactorDefinition.direction` is mandatory, so the field cannot go missing -- but the field is
     a `Literal`, and what makes it readable is the note saying that it is a conventional prior
@@ -858,7 +860,7 @@ def test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is
     sentence through `_VALUE_DIRECTION_PROSE`, and the only thing this loop needed was the count
     below.
 
-    Eleven of the twenty-one carry the sentence through a shared `_*_DIRECTION_PROSE` constant
+    Thirteen of the twenty-three carry the sentence through a shared `_*_DIRECTION_PROSE` constant
     and ten write it inline, so the assertion is on the assembled note rather than on any
     constant: a family that stops concatenating its shared prose is exactly the regression
     this catches. `V2-P3-016`'s `residual_vol_60` is one of the ten, because the volatility
@@ -875,7 +877,7 @@ def test_every_shipped_factor_discloses_the_direction_it_declares_and_that_it_is
         and any(phrase not in note for phrase in DIRECTION_DISCLOSURE)
     }
 
-    assert len(FACTOR_DEFINITIONS.qualified_keys) == 21
+    assert len(FACTOR_DEFINITIONS.qualified_keys) == 23
     assert missing == {}, "a shipped factor's note no longer discloses its declared direction"
 
 

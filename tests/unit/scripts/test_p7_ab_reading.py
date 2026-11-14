@@ -1230,17 +1230,9 @@ def test_register_writes_the_adopted_section_only_when_asked(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`register --ab-tests` is the one way the merged read's section is written; without the
-    flag the command writes a registration with no section, exactly as it did before. On this
-    branch the adopted section's factor keys are replaced by the two shipped factors whose
-    directions are the frozen ones, because B's definitions arrive on its own branch."""
-    monkeypatch.setattr(
-        p7_reading,
-        "AB_LIMIT_EVENT_FACTORS",
-        (
-            ("momentum_20_sessions/v1", "higher_is_better"),
-            ("reversal_1d/v1", "lower_is_better"),
-        ),
-    )
+    flag the command writes a registration with no section, exactly as it did before. Unpatched:
+    since B (`V2-P7-028`) and this reading are merged, the adopted section's two limit-event
+    factor keys are the registry's own (review I4 -- no registration before this is green)."""
     common = [
         "register",
         "--repo",
@@ -1610,6 +1602,21 @@ def test_the_preflight_datasets_include_each_ab_factors_raw_observations() -> No
 
     assert "factor_obs_momentum_20_sessions_v1" in datasets
     assert "factor_obs_reversal_1d_v1" in datasets
+
+
+def test_the_adopted_section_validates_against_bs_real_factor_definitions() -> None:
+    """Review I4: the frozen section names B's two real factors, and it parses unpatched.
+
+    `adopted_ab_tests()` is what `register --ab-tests` writes; parsing it checks each key against
+    `FACTOR_DEFINITIONS` and each registered direction against the definition's own. The
+    preflight must then list both factors' raw observation datasets."""
+    form = p7_reading.adopted_ab_tests()
+    built = p7_reading._ab_tests_of(form, settings(), SECOND_USE)
+    for key in ("limit_up_count_20/v1", "broken_board_count_20/v1"):
+        assert FACTOR_DEFINITIONS.get(key).direction == "lower_is_better"
+    datasets = p7_reading._preflight_datasets(SurvivorBookConfig(seed=0), built)
+    assert "factor_obs_limit_up_count_20_v1" in datasets
+    assert "factor_obs_broken_board_count_20_v1" in datasets
 
 
 # --- refusals in the A/B section may not cost G-0 its document -----------------------------------

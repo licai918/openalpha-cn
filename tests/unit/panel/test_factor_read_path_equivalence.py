@@ -69,6 +69,7 @@ from openalpha_cn.domain.financial_statements import ANNOUNCEMENT_DATE_COLUMN, R
 from openalpha_cn.domain.index_prices import INDEX_DAILY_DATASET, MARKET_INDEX_CODE
 from openalpha_cn.domain.industry_classification import INDUSTRY_MEMBERSHIP_TAXONOMY
 from openalpha_cn.domain.panel_batch import ColumnarPanelBatch, PanelColumn, TimelineColumns
+from openalpha_cn.domain.price_limits import PRICE_LIMIT_DATASET
 from openalpha_cn.panel.catalog import PanelVisibleReadOutcome, ReadinessRequirement
 from openalpha_cn.panel.store import PanelStorageError, PanelStore
 from openalpha_cn.panel_factors import (
@@ -550,18 +551,31 @@ is that code agreeing with itself; these are what the old read path wrote.
 `_stored_digest` run against its `src` with a fresh read at every instant (it has no
 `FactorReadCarry`). The same run over the previous corpus reproduced all 21 previous pins before
 the new ones were taken; the 9 factors that read `daily` moved and the 12 that do not are unchanged.
+
+**The table is a historical record and is no longer the whole registry** (`V2-P7-028`). A factor
+registered after `cf7ba05` has no "before this change" partitions to pin, and inventing one would
+make the pin a measurement of the current code rather than of the old one. So the parametrization
+below comes from this table and the equality became a containment -- every pinned factor is still
+declared, and a factor added since is deliberately absent from it.
 """
 
 
-@pytest.mark.parametrize("key", FACTOR_DEFINITIONS.qualified_keys)
+@pytest.mark.parametrize("key", STORED_BEFORE_THIS_CHANGE)
 def test_every_factor_stores_the_partitions_it_stored_before_the_read_path_changed(
     key: str, scratch: Path
 ) -> None:
     assert _stored_digest(scratch, FACTOR_DEFINITIONS.get(key)) == STORED_BEFORE_THIS_CHANGE[key]
 
 
-def test_the_pinned_table_names_every_declared_factor_and_nothing_else() -> None:
-    assert set(STORED_BEFORE_THIS_CHANGE) == set(FACTOR_DEFINITIONS.qualified_keys)
+def test_the_pinned_table_names_factors_this_build_still_declares_and_no_others() -> None:
+    pinned = set(STORED_BEFORE_THIS_CHANGE)
+    declared = set(FACTOR_DEFINITIONS.qualified_keys)
+
+    assert pinned <= declared, "a factor pinned at cf7ba05 is no longer declared"
+    assert {"limit_up_count_20/v1", "broken_board_count_20/v1"} == declared - pinned, (
+        "the pins must stay at the cf7ba05 set: a factor registered later has no earlier "
+        "partitions to measure, so a pin for it would be a measurement of the current code"
+    )
 
 
 LIBM: Final[tuple[str, ...]] = (
@@ -655,7 +669,22 @@ def test_a_carry_is_not_resumed_over_a_partition_rewritten_between_two_instants(
     assert carried.observations == fresh.observations
 
 
-@pytest.mark.parametrize("key", FACTOR_DEFINITIONS.qualified_keys)
+CORPUS_SERVED_FACTORS: Final[tuple[str, ...]] = tuple(
+    key
+    for key in FACTOR_DEFINITIONS.qualified_keys
+    if PRICE_LIMIT_DATASET not in FACTOR_DEFINITIONS.get(key).datasets
+)
+"""The factors this corpus can answer for: the ones that read no `stk_limit` partition.
+
+`V2-P7-028`'s limit-event family reads the published bands, and this corpus is the read-path
+corpus -- daily, daily_basic, index_daily and the statements -- so a band partition would be a
+new input written for a family whose subject is neither the read path nor the statement axis.
+The exclusion is named rather than silent: a factor added later that reads a dataset this corpus
+does not carry fails the `len` assertion below instead of skipping itself.
+"""
+
+
+@pytest.mark.parametrize("key", CORPUS_SERVED_FACTORS)
 def test_a_carried_read_computes_the_cross_section_a_fresh_read_computes(
     key: str, corpus: Path
 ) -> None:
@@ -665,6 +694,7 @@ def test_a_carried_read_computes_the_cross_section_a_fresh_read_computes(
     that moves both paths together, and it fails on any that moves one. The corpus is read and
     not written here, so the module's copy serves both builds.
     """
+    assert len(CORPUS_SERVED_FACTORS) == 21
     store = PanelStore(corpus)
     definition = FACTOR_DEFINITIONS.get(key)
 

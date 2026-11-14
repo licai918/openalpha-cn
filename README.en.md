@@ -58,7 +58,7 @@ Evidence building reads user-owned CSV, JSON, JSONL, and Parquet files, and pane
 
 ## The factor plane
 
-Above the point-in-time panel sits a factor library — 21 declared factors (5 momentum/reversal, 5 volatility/liquidity, 4 value, 4 quality, 3 growth), one cross-sectional transform, one industry-and-size neutralisation — and a three-tier experiment that scores all three tiers and seals the result into an immutable, content-addressed record. Four commands, in the order you meet them:
+Above the point-in-time panel sits a factor library — 23 declared factors (5 momentum/reversal, 5 volatility/liquidity, 4 value, 4 quality, 3 growth, 2 limit events), one cross-sectional transform, one industry-and-size neutralisation — and a three-tier experiment that scores all three tiers and seals the result into an immutable, content-addressed record. Four commands, in the order you meet them:
 
 ```bash
 uv run openalpha factor list                              # what this build declares
@@ -223,7 +223,7 @@ command added without updating that table is red and names itself; prose about a
 
 ## The selection workflow (P6)
 
-P6 joins the whole chain: a multi-year whole-market panel, 21 factors in three tiers, a
+P6 joins the whole chain: a multi-year whole-market panel, 23 factors in three tiers, a
 pre-registered three-stage study, one holdout, a daily command that prints a candidate list and
 registers its scores, and a weekly forward report. **The wording is always "candidate"**: nothing
 here places an order or forecasts a return.

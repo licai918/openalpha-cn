@@ -140,9 +140,9 @@ directions rather than raising, so a declared dataset a module cannot name is as
 undeclared one it can -- and both directions are driven, on mutated copies of the real sources,
 by `test_a_dataset_declared_for_a_module_that_cannot_name_it_turns_this_audit_red` and
 `test_a_seam_name_declared_that_nobody_imports_turns_this_audit_red`. The separating question --
-can it tell a module that reads seven datasets from one that reads nine -- is
-`test_the_dataset_instrument_separates_seven_datasets_from_nine`, which adds two loaders for two
-datasets the factor engine does not read and reads the answer back.
+can it tell a module that reads one more dataset from one that reads two more -- is
+`test_the_dataset_instrument_separates_the_row_from_two_more_datasets`, which adds two loaders
+for two datasets the factor engine does not read and reads the answer back.
 """
 
 from __future__ import annotations
@@ -495,6 +495,8 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             "panel_ingest.daily_requirement",
             "panel_ingest.financial_statement_requirement",
             "panel_ingest.index_price_requirement",
+            # `V2-P7-028`: the limit-event factors' `stk_limit` readiness question.
+            "panel_ingest.price_limit_requirement",
             "panel_ingest.load_adjustment_histories",
             "panel_ingest.load_daily_bars",
             "panel_ingest.load_name_histories",
@@ -1044,6 +1046,8 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "fina_indicator",
                 "income",
                 "index_daily",
+                # `V2-P7-028`: the two limit-event factors read the published band.
+                "stk_limit",
             }
         ),
         reached=frozenset(
@@ -1055,6 +1059,7 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "fina_indicator",
                 "income",
                 "index_daily",
+                "stk_limit",
             }
         ),
     ),
@@ -1078,6 +1083,8 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "income",
                 "index_daily",
                 "namechange",
+                # `V2-P7-028`: the requirement-builder table names the published band's builder.
+                "stk_limit",
                 "stock_basic",
                 # `V2-P6-020`, review round 2 (N1): the stale-build detector lists the calendar
                 # years the store registered, to read the sessions a window can span.
@@ -1138,9 +1145,10 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
     "openalpha_cn.strategy_survivor": DatasetReach(
         # V2-P7-008. It names no dataset: it reads a registration, not the panel. What it
         # reaches it reaches through `FACTOR_DEFINITIONS`, whose factors declare the datasets
-        # they are built from (`index_daily` for `residual_vol_60`'s market index); it asks the
-        # registry only which factor ids exist. The other three names it takes are the
-        # transforms and the protocol's costs and slippage rate, which reach none.
+        # they are built from (`index_daily` for `residual_vol_60`'s market index and, since
+        # `V2-P7-028`, `stk_limit` for the two limit-event factors); it asks the registry only
+        # which factor ids exist. The other three names it takes are the transforms and the
+        # protocol's costs and slippage rate, which reach none.
         named=frozenset(),
         reached=frozenset(
             {
@@ -1151,6 +1159,7 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
                 "fina_indicator",
                 "income",
                 "index_daily",
+                "stk_limit",
             }
         ),
     ),
@@ -2448,35 +2457,37 @@ def test_a_loader_added_to_the_neutralisation_turns_both_tables_red() -> None:
     ]
 
 
-def test_the_dataset_instrument_separates_seven_datasets_from_nine() -> None:
-    """The separating question, asked directly: can it tell seven datasets from nine?
+def test_the_dataset_instrument_separates_the_row_from_two_more_datasets() -> None:
+    """The separating question, asked directly: can it tell one more dataset from two more?
 
     An assertion that holds on the tree as it stands has not been shown to distinguish two
     answers. So two loaders for two datasets the factor engine does not read are added to it,
-    and the measured reach is read back rather than only the verdict -- the count moves from
-    seven to nine and names which two arrived.
+    and the measured reach is read back rather than only the verdict -- the count moves by two
+    and names which two arrived.
 
-    `load_index_membership` and `load_price_limits` are chosen because their datasets
-    (`index_weight`, `stk_limit`) are in no factor's `required_fields` and in no other name
+    `load_index_membership` and `load_name_histories` are chosen because their datasets
+    (`index_weight`, `namechange`) are in no factor's `required_fields` and in no other name
     `panel_factors` imports, so the two new entries can only have come from the mutation.
+    (`stk_limit` used to be one of the pair; `V2-P7-028`'s limit-event factors read it, so the
+    mutation moved to a dataset the engine still does not read.)
     """
     widened = _with_one_more_loader(
-        "openalpha_cn.panel_factors", "load_index_membership", "load_price_limits"
+        "openalpha_cn.panel_factors", "load_index_membership", "load_name_histories"
     )
 
     before = _research_plane_dataset_reach(_research_plane_sources())["openalpha_cn.panel_factors"]
     after = _research_plane_dataset_reach(widened)["openalpha_cn.panel_factors"]
 
-    assert len(before.reached) == 7
-    assert len(after.reached) == 9
-    assert after.reached - before.reached == {"index_weight", "stk_limit"}
+    assert len(before.reached) == 8
+    assert len(after.reached) == 10
+    assert after.reached - before.reached == {"index_weight", "namechange"}
     assert after.named == before.named, (
         "the two loaders are imported, not inlined, so what widened is the reach across the "
         "seam and not what this module names for itself"
     )
     assert sorted(_dataset_reach_violations(RESEARCH_PLANE_DATASETS, widened)) == [
         "openalpha_cn.panel_factors can reach 'index_weight' and its row does not say so",
-        "openalpha_cn.panel_factors can reach 'stk_limit' and its row does not say so",
+        "openalpha_cn.panel_factors can reach 'namechange' and its row does not say so",
     ]
 
 
@@ -2608,6 +2619,12 @@ def test_the_shipped_factors_declare_every_dataset_the_engine_can_name() -> None
     inverting the set assertion: a name that says "twenty" is a name that has to be edited every
     time a factor ships, which makes the edit routine, and the routine edit is how a table stops
     being read. The number is still asserted below, where a diff shows it.
+
+    `V2-P7-028` is the third occasion and the first that widened `required_fields` rather than
+    the vocabulary the engine could already name: the two limit-event factors read
+    `stk_limit.up_limit` and `stk_limit.down_limit`, so the declared set moves from seven to
+    eight. The module's `named` moved with it in the same change, which is what the equality
+    below is for.
     """
     declared = frozenset(
         field.dataset
@@ -2616,7 +2633,7 @@ def test_the_shipped_factors_declare_every_dataset_the_engine_can_name() -> None
     )
     engine = RESEARCH_PLANE_DATASETS["openalpha_cn.panel_factors"]
 
-    assert len(FACTOR_DEFINITIONS.definitions) == 21
+    assert len(FACTOR_DEFINITIONS.definitions) == 23
     assert declared == {
         "balancesheet",
         "cashflow",
@@ -2625,6 +2642,7 @@ def test_the_shipped_factors_declare_every_dataset_the_engine_can_name() -> None
         "fina_indicator",
         "income",
         "index_daily",
+        "stk_limit",
     }
     assert declared == engine.named, "the module names exactly what its factors declare"
     assert declared <= UPSTREAM_PANEL_DATASETS

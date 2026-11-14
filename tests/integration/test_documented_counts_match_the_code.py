@@ -223,6 +223,9 @@ def _factor_families() -> dict[str, int]:
         "value": counted["value"],
         "quality": counted["quality"],
         "growth": counted["growth"],
+        # `V2-P7-028`'s family, optional in the patterns so a document that names only the five
+        # `V2-P3-009`..013 families still states them correctly.
+        "limit_events": counted["limit_events"],
     }
 
 
@@ -280,16 +283,18 @@ DOCUMENTED_COUNTS: Final[tuple[DocumentedCount, ...]] = (
                 rf"动量反转\s*(?P<momentum>{DIGITS})\s*/\s*波动流动性\s*(?P<volatility>{DIGITS})"
                 rf"\s*/\s*价值\s*(?P<value>{DIGITS})\s*/\s*质量\s*(?P<quality>{DIGITS})"
                 rf"\s*/\s*成长\s*(?P<growth>{DIGITS})"
+                rf"(?:\s*/\s*涨停事件\s*(?P<limit_events>{DIGITS}))?"
             ),
             re.compile(
                 rf"(?P<momentum>{DIGITS})\s+momentum/reversal,\s*"
                 rf"(?P<volatility>{DIGITS})\s+volatility/liquidity,\s*(?P<value>{DIGITS})\s+value,"
                 rf"\s*(?P<quality>{DIGITS})\s+quality,\s*(?P<growth>{DIGITS})\s+growth"
+                rf"(?:,\s*(?P<limit_events>{DIGITS})\s+limit\s+events?)?"
             ),
         ),
         example=(
             "（动量反转 {momentum} / 波动流动性 {volatility} / 价值 {value} / 质量 {quality} / "
-            "成长 {growth}）"
+            "成长 {growth} / 涨停事件 {limit_events}）"
         ),
         stated={README: 1, README_EN: 1},
     ),

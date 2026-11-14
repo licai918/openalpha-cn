@@ -512,6 +512,13 @@ def test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_w
     moved, and every stored `factor_obs_*` partition would have been re-identified, for a field
     nineteen definitions would leave at its default. `FactorWindow` is hashed by nothing. The
     equality below is where that stops being an argument.
+
+    **`V2-P7-028` added two factors in one family and neither touches this contract.** They join
+    the difference set beside the other two, their own digests are not pinned here (a factor
+    registered now has no pre-change digest to be equal to), and the nineteen literals compare
+    unchanged -- which is the same substantive claim for a different change: widening
+    `FactorFamily`'s `Literal` and adding `required_fields` entries moves no stored address,
+    because neither is a field of the model whose canonical JSON is hashed.
     """
     current = {
         key: FACTOR_DEFINITIONS.get(key).factor_id for key in FACTOR_DEFINITIONS.qualified_keys
@@ -522,10 +529,12 @@ def test_the_coverage_vocabulary_moves_transform_id_and_leaves_every_factor_id_w
     assert set(current) - set(PRE_V2_P3_018_FACTOR_IDS) == {
         "deducted_earnings_yield_ttm/v1",
         "residual_vol_60/v1",
+        "limit_up_count_20/v1",
+        "broken_board_count_20/v1",
     }
     assert current["deducted_earnings_yield_ttm/v1"] == DEDUCTED_EARNINGS_YIELD_FACTOR_ID
     assert current["residual_vol_60/v1"] == RESIDUAL_VOL_FACTOR_ID
-    assert len(set(current.values())) == len(current) == 21
+    assert len(set(current.values())) == len(current) == 23
     assert CROSS_SECTION_STANDARD.transform_id != PRE_V2_P3_018_TRANSFORM_ID
     assert set(FactorDefinition.model_fields) & FACTOR_COVERAGE_CODES == set()
     assert set(MissingValuePolicy.model_fields) == FACTOR_COVERAGE_CODES - {"computed"}
