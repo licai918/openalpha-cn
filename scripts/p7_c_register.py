@@ -64,8 +64,9 @@ constructor is
 
 ## What the writer refuses, each by name and with nothing written
 
-- an unverified vendor endpoint: `DEEPSEEK_V4_1_FLASH.verified_on` is `None` until gated step L2,
-  so C is not registered against a model a human has not verified;
+- an unverified vendor endpoint: the writer refuses an endpoint whose `verified_on` is `None`,
+  so C is not registered against a model a human has not verified (the shipped
+  `DEEPSEEK_V4_1_FLASH` was verified at gated step L2);
 - a salt that is, or carries, Step 0's registered seed
   (`domain.agent_forward.refuse_a_salt_tied_to_the_book`), re-checked at read-back;
 - Step 0's registration absent, uncommitted, edited after its commit, or of another `config.kind`;
@@ -240,7 +241,7 @@ class AnchorRefusedError(RegistrationWriterError):
 
 
 class EndpointRefusedError(RegistrationWriterError):
-    """The vendor endpoint a human must verify (L2) is still a placeholder."""
+    """The vendor endpoint a human must verify (L2) is still unverified."""
 
 
 class SaltRefusedError(RegistrationWriterError):
@@ -388,9 +389,11 @@ CRITERIA: Final[dict[str, str]] = {
         "scripts/forward_report.py 的字节不变、不被修改。"
     ),
     "model": (
-        "模型身份（L2 未做）：deepseek-flash 是移动别名。每次模型交换记录 response.model 与 "
-        "system_fingerprint，别名变化只报告、不重登记。thinking 关闭、temperature 0、错峰运行。"
-        "DEEPSEEK_V4_1_FLASH.verified_on 仍为 None，L2 之前 live 调用被拒绝。"
+        "模型身份（L2 已完成，2026-11-13 记录，值来自 2026-11-12 的官方文档阅读）："
+        "deepseek-flash 是移动别名（阅读时为 DeepSeek-V4.1-Flash-1017）。每次模型交换记录 "
+        "response.model 与 system_fingerprint，别名变化只报告、不重登记。thinking 关闭、"
+        "temperature 0、错峰运行。DEEPSEEK_V4_1_FLASH.verified_on = 2026-11-12，L3 live 探针"
+        "仍未运行。"
     ),
     "forward_only": (
         "只前向（V2-P7-015）：只有本登记提交之后的 C 前向记录进入样本。不重放历史、"
@@ -1195,9 +1198,10 @@ def _checked_protocol_document(repo: Path, block: AgentForwardProtocolDocument) 
 def _refuse_an_unverified_endpoint() -> None:
     if DEEPSEEK_V4_1_FLASH.verified_on is None:
         raise EndpointRefusedError(
-            f"the vendor endpoint {DEEPSEEK_V4_1_FLASH.name} has verified_on None: gated step L2 "
-            "-- a human's reading of https://api-docs.deepseek.com/ -- has not filled the "
-            "endpoint in, and the writer refuses to register C against a model nobody verified"
+            f"the vendor endpoint {DEEPSEEK_V4_1_FLASH.name} has verified_on None: the gated "
+            "step L2 reading -- a human's reading of https://api-docs.deepseek.com/ -- has not "
+            "filled the endpoint in, and the writer refuses to register C against a model nobody "
+            "verified"
         )
 
 

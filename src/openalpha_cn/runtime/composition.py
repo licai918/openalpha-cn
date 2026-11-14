@@ -365,8 +365,8 @@ def llm_provider(
       so a replayed run needs no key; the value is read from the process environment by the
       provider and never stored (`models/recording.py` excludes headers from the request digest).
     - **An unverified endpoint cannot spend a real request.** When `verified_on` is `None` and
-      the caller supplied no transport, the shipped placeholder would otherwise call the
-      vendor's endpoint with an invented model id. That is a `ModelConfigurationError` naming the
+      the caller supplied no transport, an unverified endpoint would otherwise call the vendor's
+      endpoint with an unconfirmed model id. That is a `ModelConfigurationError` naming the
       endpoint and its documentation URL; an injected transport (tests) and replay are allowed,
       because neither reaches the vendor.
 
@@ -378,7 +378,7 @@ def llm_provider(
     real request is the default transport (`transport=None` becomes `UrllibJsonTransport`) or
     one the caller passes explicitly, and both are refused while `verified_on is None`. Writing
     `transport=UrllibJsonTransport()` used to bypass the gate, which is exactly how a future
-    probe script would spend a request against the placeholder model id.
+    probe script would spend a request against an unconfirmed model id.
 
     The gate is decided on the **undecorated** caller transport, before `wrap_transport` runs: a
     decorator is not a way to smuggle a real transport past an unverified endpoint.
