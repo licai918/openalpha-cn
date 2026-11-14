@@ -1802,3 +1802,263 @@ def test_a_refused_ab_block_leaks_no_store_path_or_credential_into_the_result_fi
         assert leaked not in payload, (leaked, payload)
     assert "<redacted>" in text
     assert "<path>" in text or "<repo>" in text
+
+
+# --- the forward window: the same frozen section, re-tested (V2-P7-027, V2-P7-028) --------------
+
+FORWARD: Final = p7_windows.WINDOWS["forward_ab_1"]
+FORWARD_OPEN: Final[datetime] = datetime(2026, 11, 16, 9, 30, tzinfo=SHANGHAI)
+"""`forward_ab_1`'s first session open (R-F3): a registration's clock -- or its commit's
+committer time -- must be before it."""
+FORWARD_AS_OF: Final[str] = "2027-07-30T22:00:00+08:00"
+"""The planned read instant: about 21 sessions after the window's last signal day, so the h20
+labels are published (the controller's F3 registration uses it)."""
+
+
+def forward_settings() -> Any:
+    """The read settings a forward `ab_tests` form is validated against: the same book, the
+    forward window's request."""
+    base = settings()
+    return dataclasses.replace(
+        base, explore=dataclasses.replace(base.explore, first=FORWARD.first, last=FORWARD.last)
+    )
+
+
+def forward_form(**changes: Any) -> dict[str, Any]:
+    """The registration's `ab_tests` section on the forward window, this branch's stand-ins."""
+    return ab_form(window=FORWARD.name, **changes)
+
+
+def forward_spec(**changes: Any) -> Any:
+    return p7_reading._ab_tests_of(forward_form(**changes), forward_settings(), FORWARD)
+
+
+def forward_body(*, ab_tests: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """A secondary `forward_ab_1` registration body, with or without the A/B section."""
+    request = {
+        "first": FORWARD.first.isoformat(),
+        "last": FORWARD.last.isoformat(),
+        "stride": 20,
+        "horizons": [20],
+        "scores": ["composite"],
+        "tails": [1, 2, 3],
+        "loser_decile_count": 2,
+    }
+    return {
+        "schema": p7_reading.READING_SCHEMA,
+        "reading": "v2-p7-027-028-forward-ab-1",
+        "issue": "V2-P7-027",
+        "role": "secondary",
+        "window": FORWARD.name,
+        "request": request,
+        "config": {
+            "book": {"seed": 0},
+            "transform": "cross_section_standard/v1",
+            "exchange": "SSE",
+            "min_coverage": 0.5,
+            "max_carry_sessions": 250,
+            "as_of": FORWARD_AS_OF,
+        },
+        "stop_rule": None,
+        "expected_periods": None,
+        "code_commit": "a" * 40,
+        "as_of_reason": AS_OF_REASON,
+        **({} if ab_tests is None else {"ab_tests": dict(ab_tests)}),
+    }
+
+
+def forward_document() -> dict[str, Any]:
+    """A stand-in read-once document whose `ab_tests` block is this forward section's."""
+    built = forward_spec()
+    values: Mapping[str, Sequence[float]] = {
+        p7_reading.VETO_TEST_ID: (-0.01, -0.02, -0.03, -0.04, -0.05, -0.06),
+        built.factor_tests[0].factor: (0.01, 0.02, 0.03, 0.04, 0.05, 0.06),
+        built.factor_tests[1].factor: (0.01, 0.02, 0.03, 0.04, 0.05, 0.06),
+    }
+    series = [
+        p7_reading.AbTestSeries(
+            test_id=entry.test_id,
+            kind=entry.kind,
+            factor=entry.factor,
+            sampled_sessions=len(values[entry.test_id]),
+            values=tuple(zip(days(len(values[entry.test_id])), values[entry.test_id], strict=True)),
+            vetoed_observations=60 if entry.kind == "veto_difference" else None,
+        )
+        for entry in built.entries
+    ]
+    return {
+        "kind": p7_diagnostics.READ_ONCE_KIND,
+        "summary": {},
+        "ab_tests": p7_reading.evaluate_ab_tests(built, series),
+    }
+
+
+def registered_forward(repo: Path, *, at: datetime, body: Mapping[str, Any] | None = None) -> Path:
+    """Write a forward registration body into the throwaway repository and commit it at `at`."""
+    form = (
+        forward_body(ab_tests=p7_reading.adopted_ab_tests(window=FORWARD.name))
+        if body is None
+        else dict(body)
+    )
+    form = {**form, "code_commit": head(repo)}
+    path = repo / p7_reading.READING_DIRECTORY / f"{form['reading']}.registration.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(p7_reading._json_bytes(form))
+    commit_file(repo, path, "register the forward reading", at=at)
+    return path
+
+
+def write_second_use_window_claim(repo: Path, *, commit: bool = True) -> Path:
+    path = repo / p7_reading.READING_DIRECTORY / "second_use.window-claim.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"reading": "v2-p7-027-028-second-use", "window": "second_use"}) + "\n",
+        encoding="utf-8",
+    )
+    if commit:
+        commit_file(
+            repo,
+            path,
+            "the second_use window's claim",
+            at=datetime(2026, 11, 2, 13, 30, tzinfo=UTC),
+        )
+    return path
+
+
+def test_the_adopted_section_round_trips_on_the_forward_window_with_r_r1s_values() -> None:
+    """R-F2: `forward_ab_1` carries the same `p7-ab-tests/v1` section with every R-R1 value
+    unchanged -- only the window on its face moves."""
+    forward = p7_reading.adopted_ab_tests(window=FORWARD.name)
+    second = p7_reading.adopted_ab_tests()
+
+    assert forward["window"] == "forward_ab_1"
+    assert {key: value for key, value in forward.items() if key != "window"} == {
+        key: value for key, value in second.items() if key != "window"
+    }
+    assert p7_reading._ab_tests_of(forward, forward_settings(), FORWARD).window == "forward_ab_1"
+
+    written = json.loads(p7_reading._json_bytes(forward_body(ab_tests=forward)))
+    registered = p7_reading._registration_of(written)
+
+    assert registered.window.name == "forward_ab_1"
+    assert registered.ab_tests is not None
+    assert registered.ab_tests.window == "forward_ab_1"
+    assert registered.ab_tests.horizon == 20
+    assert registered.ab_tests.stride == 20
+    assert registered.ab_tests.false_discovery_rate == 0.10
+    assert registered.ab_tests.veto.minimum_observations == 60
+    assert registered.ab_tests.ids == (
+        p7_reading.VETO_TEST_ID,
+        "limit_up_count_20/v1",
+        "broken_board_count_20/v1",
+    )
+
+
+def test_a_hand_written_section_naming_another_window_is_refused() -> None:
+    """The section's window is frozen against the registration's: a second_use section on a
+    forward registration, and the reverse, are both refused."""
+    with pytest.raises(p7_reading.ReadingError, match="forward_ab_1"):
+        p7_reading._registration_of(forward_body(ab_tests=ab_form(window=SECOND_USE.name)))
+
+    with pytest.raises(p7_reading.ReadingError, match="second_use"):
+        p7_reading._registration_of(
+            second_use_body(ab_tests=p7_reading.adopted_ab_tests(window=FORWARD.name))
+        )
+
+
+def test_a_forward_registration_at_or_after_the_first_session_open_is_refused(
+    tmp_path: Path,
+) -> None:
+    """R-F3: registering after `forward_ab_1`'s first session has opened cannot be a registration
+    written before the window, so it is refused (and nothing is written); one second earlier is
+    accepted, and a second_use registration is not subject to this clock."""
+    path = tmp_path / "v2-p7-027-028-forward-ab-1.registration.json"
+    form = forward_body(ab_tests=p7_reading.adopted_ab_tests(window=FORWARD.name))
+    arguments: dict[str, Any] = {
+        "path": path,
+        "reading": form["reading"],
+        "issue": "V2-P7-027",
+        "role": "secondary",
+        "window": FORWARD.name,
+        "request": form["request"],
+        "config": form["config"],
+        "stop_rule": None,
+        "code_commit": "a" * 40,
+        "as_of_reason": AS_OF_REASON,
+        "ab_tests": form["ab_tests"],
+    }
+
+    for clock in (lambda: FORWARD_OPEN, lambda: FORWARD_OPEN + timedelta(hours=1)):
+        with pytest.raises(p7_reading.ReadingError, match="first session"):
+            p7_reading.register_reading(**{**arguments, "clock": clock})
+        assert not path.exists()
+
+    p7_reading.register_reading(
+        **{**arguments, "clock": lambda: FORWARD_OPEN - timedelta(seconds=1)}
+    )
+    assert path.exists()
+
+    second_use = tmp_path / "v2-p7-024-second-use.registration.json"
+    p7_reading.register_reading(
+        **{
+            **arguments,
+            "path": second_use,
+            "reading": "v2-p7-024-second-use",
+            "window": "second_use",
+            "request": {
+                **form["request"],
+                "first": SECOND_USE.first.isoformat(),
+                "last": SECOND_USE.last.isoformat(),
+            },
+            "ab_tests": None,
+            "clock": lambda: FORWARD_OPEN + timedelta(days=1),
+        }
+    )
+    assert second_use.exists()
+
+
+def test_a_forward_read_whose_registration_commit_is_not_before_the_open_is_refused(
+    repo: Path,
+) -> None:
+    """R-F3's read-time half: the commit's committer time (from git) must be before the first
+    session open; at the instant itself it is not, so the read is refused before any claim."""
+    write_second_use_window_claim(repo)
+    registration = registered_forward(repo, at=FORWARD_OPEN)
+    measure = StubMeasure(forward_document())
+
+    with pytest.raises(p7_reading.ReadingConfigurationError, match="committer") as refused:
+        run_read(registration, repo, measure)
+
+    assert "2026-11-16T09:30:00+08:00" in str(refused.value)
+    assert measure.binding is None
+    assert not registration.with_name("v2-p7-027-028-forward-ab-1.claim.json").exists()
+    assert not (repo / p7_reading.READING_DIRECTORY / "forward_ab_1.window-claim.json").exists()
+
+
+def test_a_forward_read_before_the_second_use_windows_claim_is_refused_and_then_reads_once(
+    repo: Path,
+) -> None:
+    """R-F4: the forward window is read after the spent-holdout read the candidates came from;
+    once that window's claim is committed, the one forward read runs, writes its claims and its
+    result, and says in the result that the commit time is a self-reported record, not proof."""
+    registration = registered_forward(repo, at=datetime(2026, 11, 15, 20, 0, tzinfo=SHANGHAI))
+    measure = StubMeasure(forward_document())
+
+    with pytest.raises(p7_reading.SecondUseNotSpentError, match="second_use"):
+        run_read(registration, repo, measure)
+    assert measure.binding is None
+    assert not registration.with_name("v2-p7-027-028-forward-ab-1.claim.json").exists()
+
+    write_second_use_window_claim(repo)
+    measure = StubMeasure(forward_document())
+    result = run_read(registration, repo, measure, hours=2)
+
+    assert result["binding"] == measure.binding
+    assert result["ab_tests"]["window"] == "forward_ab_1"
+    assert (repo / p7_reading.READING_DIRECTORY / "forward_ab_1.window-claim.json").exists()
+    text = registration.with_name("v2-p7-027-028-forward-ab-1.result.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "self-reported record" in text and "not proof" in text
+    assert "exploratory candidate" in text
+    assert "confirmed" not in text.lower()

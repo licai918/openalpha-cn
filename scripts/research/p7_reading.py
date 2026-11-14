@@ -1,9 +1,10 @@
 """One named, logged, single-use read of a protected window (`V2-P7-004`, for `V2-P7-024`).
 
 `p7_diagnostics explore` opens the research window and nothing else. The validation window
-(2022-01-04..2023-12-29) and the second-use stretch (2024-01-02..2026-09-24, P6's spent holdout)
-are opened here: by name (`p7_windows.WINDOWS`), only after the reading's registration is committed
-and a claim of the read is written. It is `registry.run_holdout`'s procedure, for a P7 reading.
+(2022-01-04..2023-12-29), the second-use stretch (2024-01-02..2026-09-24, P6's spent holdout) and
+the forward window `forward_ab_1` (2026-11-16..2027-06-30) are opened here: by name
+(`p7_windows.WINDOWS`), only after the reading's registration is committed and a claim of the read
+is written. It is `registry.run_holdout`'s procedure, for a P7 reading.
 
 `register_reading` writes `<reading>.registration.json` once -- the same bytes again return the
 same digest, different bytes are refused: the reading's name, its issue, its role, its window, the
@@ -62,9 +63,9 @@ a failure after the claim spends the window:
    `openalpha_cn`, the `grid` and `registry`, or the `p7_windows`, `p7_diagnostics` and this module
    this process imported are not the repository's own. Then `ReadingConfigurationError`: the
    registration is not one `register_reading` would write (not this schema, a window other than
-   `validation` and `second_use`, a role and a stop rule that do not go together, a request or a
-   configuration the diagnostics cannot run), or it is not filed as `<reading>.registration.json`
-   in `READING_DIRECTORY`.
+   `validation`, `second_use` and `forward_ab_1`, a role and a stop rule that do not go together,
+   a request or a configuration the diagnostics cannot run), or it is not filed as
+   `<reading>.registration.json` in `READING_DIRECTORY`.
 4. `ReadingAlreadyClaimedError` -- the reading's claim, the **window's** claim
    (`<window>.window-claim.json` in `READING_DIRECTORY`) or one of the reading's results is on
    disk, or was ever committed on any ref (`git log --all`): a read that was claimed is the one
@@ -75,18 +76,28 @@ a failure after the claim spends the window:
    committed there on any ref; a claim file that cannot be read -- one naming no window in
    `WINDOWS`, a near miss such as "Validation" or "validation\\n" included -- and any git error
    refuse too. `registry._holdout_allowed` refuses any holdout row the same way, whatever
-   registration wrote it. The rule holds for every window a reading opens, `validation` and
-   `second_use` alike. Before any of it, a **shallow** repository is refused: its history stops
-   at the cut, so a claim committed before it is invisible. The remedy is `git fetch
-   --unshallow`, and it is an operational prerequisite of the real read: this repository's main
-   checkout was shallow when this was written (2026-11-02). So is a repository holding a grafts
-   file (`info/grafts`), which changes the parents git reports while the repository still says it
-   is not shallow; replacement refs are not refused but ignored (`--no-replace-objects`).
+   registration wrote it. The rule holds for every window a reading opens, `validation`,
+   `second_use` and `forward_ab_1` alike. Before any of it, a **shallow** repository is refused:
+   its history stops at the cut, so a claim committed before it is invisible. The remedy is
+   `git fetch --unshallow`, and it is an operational prerequisite of the real read: this
+   repository's main checkout was shallow when this was written (2026-11-02). So is a
+   repository holding a grafts file (`info/grafts`), which changes the parents git reports while
+   the repository still says it is not shallow; replacement refs are not refused but ignored
+   (`--no-replace-objects`).
 5. `ValidationNotSpentError` -- a `second_use` reading requires the validation window's claim,
    `<validation>.window-claim.json`, to be **committed** and reachable from some ref or unexpired
    reflog entry (the same `_LOG_EVERYTHING` scan step 4 uses). A claim on disk but never committed
    is not enough: it can be deleted, and the validation window read again after 2024-2026 was
    seen. The other order needs no check: a validation read never looks at the second-use stretch.
+5a. `SecondUseNotSpentError` -- a `forward_ab_1` reading requires the **second_use** window's
+   claim, `<second_use>.window-claim.json`, to be **committed** and reachable from some ref or
+   unexpired reflog entry (the same scan and the same reason, R-F4: the A/B candidates were
+   measured in that read). A `forward_ab_1` registration is also a forward property (R-F3): it is
+   written only before the window's first session opens (2026-11-16 09:30 Asia/Shanghai) --
+   `register_reading` refuses a later clock -- and a read refuses before any claim unless the
+   registration commit's committer time (from git) is before that instant. A commit time is what
+   the committer's clock said: the result text says it is a self-reported record, not a proof,
+   and that only a remote holding the commit before the read witnesses it.
 6. `ReadingPreflightError` -- the panel catalogue lacks a year the read opens of a dataset
    (`preflight_problems`: it asks each dataset's `registered_years`, and for the primary reading
    it also reads the window's years and the year before of `trade_cal` -- the calendar is not
@@ -134,7 +145,10 @@ A registration may carry `ab_tests` (`AB_TESTS_SCHEMA`), one frozen section that
 one read also decide plan A's entry veto and plan B's two limit-event factors. It is written only
 when asked for (`adopted_ab_tests`, `p7_read.py register --ab-tests`), so a registration without
 it has exactly the bytes and the behaviour it had before -- the one committed `v2-p7-024`
-registration is the test of that.
+registration is the test of that. The section is ruled for two windows: the spent holdout it was
+measured on (`second_use`) and the forward window that re-tests the same frozen candidates
+(`forward_ab_1`, R-F1 and R-F2). `adopted_ab_tests(window=...)` writes the same R-R1 numbers for
+either; the parser refuses a section whose window is not the registration's.
 
 `register_reading` and `read_once` validate the section through the one parser
 `_registration_of` -> `_ab_tests_of`, so a hand-written section is held to what the writer writes.
@@ -186,7 +200,10 @@ What this does not establish:
 
 * A commit time is what the committer's clock (or `GIT_COMMITTER_DATE`) said, and `claimed_at` is
   what this machine's clock said. Pushing the registration commit to a remote someone else holds,
-  before the read, is what makes its time witnessed; this module pushes nothing.
+  before the read, is what makes its time witnessed; this module pushes nothing. The forward
+  property (R-F3) reads exactly that record -- the registration commit's committer time must be
+  before `forward_ab_1`'s first session open -- and the result's text says it is a self-reported
+  record, not a proof.
 * The window rule is witnessed by the claim files naming the window and by nothing else. They
   are not in git until the caller commits them: deleting claims that were never committed gives
   the read back, and so does another worktree or clone of the repository, which does not hold
@@ -227,8 +244,9 @@ What this does not establish:
 * The preflight sees which years the catalogue lists and, for a primary reading, the calendar's
   rows; nothing more: a partition that is listed but incomplete, or a signal day without a factor
   build, is met by the measurement, after the claim -- and the read is spent on it.
-* The second-use store serves 2026 whole, rows after 2026-09-24 included; keeping them out is the
-  plan's label rule and the readers' (`p7_windows`), not the store's.
+* The second-use store serves 2026 whole, rows after 2026-09-24 included, and the forward store
+  serves 2027 whole, rows after 2027-06-30 included; keeping them out is the plan's label rule and
+  the readers' (`p7_windows`), not the store's.
 * The reading is taken under the knowledge at its registered `as_of`, not replayed at each
   session's publication instant: every partition is read as it stood at `as_of`, so a revision or
   a late name announcement published after a session -- or after the window -- enters that
@@ -240,8 +258,12 @@ A reading of the validation window is a first out-of-sample reading, not confirm
 (`p7_diagnostics.READ_ONCE_WORDING`). A reading of the second-use window is not even that: the
 window was P6's one-time holdout, already spent, and P7 was designed after seeing it, so its
 reading is a secondary, non-confirmatory reading of a spent holdout
-(`p7_diagnostics.SECOND_USE_READ_ONCE_WORDING`, and the result's first line says so). A stop rule
-that is not triggered permits `V2-P7-006` to proceed and is not evidence either.
+(`p7_diagnostics.SECOND_USE_READ_ONCE_WORDING`, and the result's first line says so). The forward
+read is the pre-registered out-of-sample re-test of the A/B candidates, registered before its
+window opens -- a forward record by its construction, which is what the protocol asks a forward
+test to be; it is not confirmatory evidence on its own either, and every A/B conclusion it prints
+is still an exploratory candidate (candidate / 探索性候选). A stop rule that is not triggered
+permits `V2-P7-006` to proceed and is not evidence either.
 """
 
 from __future__ import annotations
@@ -254,7 +276,7 @@ import re
 import statistics
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any, Final, Literal, get_args
 from zoneinfo import ZoneInfo
@@ -558,6 +580,17 @@ _EXCHANGE_ZONE: Final = ZoneInfo(DEFAULT_DATE_TIMEZONE)
 """The zone a factor observation's `as_of` is dated in for a session: `factor_view.FACTOR_DATE_ZONE`
 (`panel.catalog.DEFAULT_DATE_TIMEZONE`), which is what makes a 16:30 build belong to its session."""
 
+AB_TEST_WINDOWS: Final = (WINDOWS["second_use"].name, WINDOWS["forward_ab_1"].name)
+"""The windows the `ab_tests` section is ruled for: the spent holdout it was measured on, and the
+forward window that re-tests the same frozen candidates (`R-F1`, `R-F2`)."""
+
+FORWARD_AB_1: Final = WINDOWS["forward_ab_1"]
+"""The one forward window (`p7_windows.FORWARD_AB_1`): its registration is written before its
+first session opens, and its read re-tests the frozen A/B section (`R-F1`..`R-F4`)."""
+
+FORWARD_OPEN: Final = datetime.combine(FORWARD_AB_1.first, time(9, 30), tzinfo=_EXCHANGE_ZONE)
+"""The instant `forward_ab_1`'s first session opens -- 2026-11-16 09:30 Asia/Shanghai (`R-F3`)."""
+
 
 class ReadingError(ValueError):
     """A registration that cannot be written as asked."""
@@ -591,6 +624,10 @@ class ForeignP7ScriptsError(registry.HoldoutRefusedError):
 
 class ValidationNotSpentError(registry.HoldoutRefusedError):
     """A second-use read before the validation window's claim is committed."""
+
+
+class SecondUseNotSpentError(registry.HoldoutRefusedError):
+    """A forward_ab_1 read before the second_use window's claim is committed (R-F4)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -772,19 +809,26 @@ class AbTests:
         return tuple(entry.test_id for entry in self.entries)
 
 
-def adopted_ab_tests() -> dict[str, Any]:
-    """R-R1's frozen `ab_tests` section, for the one merged read of the second-use window.
+def adopted_ab_tests(*, window: str = WINDOWS["second_use"].name) -> dict[str, Any]:
+    """R-R1's frozen `ab_tests` section, for the one merged read of the second-use window -- or,
+    with `window="forward_ab_1"`, for the forward window that re-tests the same candidates.
 
     The window, `h20`, `stride` 20, `q = 0.10`, the 60-observation floor, the veto rule, and B's
-    two factor keys with their declared `lower_is_better` direction. This function writes a
-    registration; the reader takes every one of these numbers from the committed body, never
+    two factor keys with their declared `lower_is_better` direction. Every number is R-R1's and
+    is the same on either window (R-F2); only the section's `window` moves. This function writes
+    a registration; the reader takes every one of these numbers from the committed body, never
     from this function, so a registration written with other numbers would be read as it froze
     them. The `issues` list names both issues this one reading is for (`V2-P7-027`'s veto and
     `V2-P7-028`'s factors; the registration's own `issue` is one id because that field is one).
     """
+    if window not in AB_TEST_WINDOWS:
+        raise ReadingError(
+            f"the A/B section is written for {list(AB_TEST_WINDOWS)}, not {window!r}: the section "
+            "is the spent holdout's read and the forward window that re-tests it"
+        )
     return {
         "schema": AB_TESTS_SCHEMA,
-        "window": "second_use",
+        "window": window,
         "issues": ["V2-P7-027", "V2-P7-028"],
         "horizon": AB_HORIZON,
         "stride": AB_STRIDE,
@@ -830,11 +874,12 @@ def _ab_tests_of(form: object, settings: _Settings, window: DiagnosticWindow) ->
             f"{window.name!r} window: the window is frozen at registration and a read cannot "
             "move it"
         )
-    if window.name != WINDOWS["second_use"].name:
+    if window.name not in AB_TEST_WINDOWS:
         raise ReadingError(
-            f"{AB_TESTS_SCHEMA} is the second_use read: the A/B tests were ruled for the spent "
-            f"holdout window, not {window.name!r}; a hand-written section on another window is "
-            "not a shape this schema implements"
+            f"{AB_TESTS_SCHEMA} is the second_use and forward_ab_1 reads: the A/B tests were "
+            "ruled for the spent holdout window and the forward window that re-tests the same "
+            f"candidates (R-F1, R-F2), not {window.name!r}; a hand-written section on another "
+            "window is not a shape this schema implements"
         )
     issues = section["issues"]
     if (
@@ -981,6 +1026,29 @@ def _body_of(
     return body
 
 
+def refuse_a_late_forward_registration(
+    window: DiagnosticWindow, *, clock: Callable[[], datetime] | None = None
+) -> None:
+    """`R-F3`'s registration clock: a `forward_ab_1` registration is written before the window's
+    first session opens, or it would be a test written after some of its outcomes could be known.
+
+    Every other window is not subject to this clock: the validation and second-use registrations
+    are written whenever their runs are. `clock` defaults to the wall clock; a caller that knows
+    the instant it is acting at passes it, so the check does not depend on the day it runs.
+    """
+    if window.name != FORWARD_AB_1.name:
+        return
+    now = _utc_now() if clock is None else clock()
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError(f"the clock gave {now!r}, which carries no timezone")
+    if now >= FORWARD_OPEN:
+        raise ReadingError(
+            f"the {window.name} window's first session opened at {FORWARD_OPEN.isoformat()} and "
+            f"this registration's clock is {now.isoformat()}: a forward registration is written "
+            "before the window it is read on, so it cannot be written now; nothing was written"
+        )
+
+
 def register_reading(
     *,
     path: Path,
@@ -996,18 +1064,20 @@ def register_reading(
     expected_periods: int | None = None,
     runtime_dir: Path | None = None,
     ab_tests: Mapping[str, Any] | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> str:
     """Write the reading's registration to `path` and return the SHA-256 of its bytes.
 
     Refuses (`ReadingError`) anything `read_once` would refuse to read: a reading name outside
     `[a-z0-9][a-z0-9-]*`, a `path` not named `<reading>.registration.json`, a window other than
-    `validation` or `second_use` (the research window is `p7_diagnostics explore`'s), a primary
-    reading without a stop rule or a secondary one with one, a stop rule whose score or horizon the
-    request does not measure or whose `minimum_periods` the window cannot reach, a request that is
-    not the whole window or whose loser count is not the book's, a request or a configuration the
-    diagnostics cannot run, and a code commit that is not a full, clean commit id. Writing the
-    same registration again returns the same digest; a different one at an existing path is
-    refused. Committing it is the caller's step. Pass `code_commit` resolved once, before writing
+    `validation`, `second_use` or `forward_ab_1` (the research window is `p7_diagnostics
+    explore`'s), a primary reading without a stop rule or a secondary one with one, a stop rule
+    whose score or horizon the request does not measure or whose `minimum_periods` the window
+    cannot reach, a request that is not the whole window or whose loser count is not the book's,
+    a request or a configuration the diagnostics cannot run, and a code commit that is not a
+    full, clean commit id. Writing the same registration again returns the same digest; a
+    different one at an existing path is refused. Committing it is the caller's step. Pass
+    `code_commit` resolved once, before writing
     (`registry.register`'s reason).
 
     `minimum_periods` is bounded twice. With no `runtime_dir` (the default) only the data-free
@@ -1038,6 +1108,11 @@ def register_reading(
     `ab_tests` is the optional, versioned A/B section (`AB_TESTS_SCHEMA`); it is validated by the
     same `_registration_of` every other path uses, written only when given, and absent from a
     registration that does not ask for it -- so the old bytes are the old bytes.
+
+    A `forward_ab_1` registration is also refused once the window's first session has opened
+    (`refuse_a_late_forward_registration`, R-F3): it must be written before the window it tests,
+    and the clock is the one passed, defaulting to this machine's. The read-time half of that
+    property is `read_once`'s, against the registration commit's committer time.
     """
     body = _body_of(
         reading=reading,
@@ -1053,6 +1128,7 @@ def register_reading(
         ab_tests=ab_tests,
     )
     registered = _registration_of(body)
+    refuse_a_late_forward_registration(registered.window, clock=clock)
     expected = f"{reading}.registration.json"
     if path.name != expected:
         raise ReadingError(
@@ -1141,7 +1217,8 @@ def _registration_of(body: Mapping[str, Any]) -> _Registration:
     window = WINDOWS.get(name) if isinstance(name, str) else None
     if window is None:
         raise ReadingError(
-            f"the window {name!r} is not one a reading opens; it opens 'validation' or 'second_use'"
+            f"the window {name!r} is not one a reading opens; it opens 'validation', 'second_use' "
+            "or 'forward_ab_1'"
         )
     role = body["role"]
     if role not in get_args(Role):
@@ -2911,8 +2988,12 @@ def read_once(
         window_claim=window_claim,
         results=(result_json, result_txt),
     )
+    if window.name == FORWARD_AB_1.name:
+        _require_the_forward_registration_precedes_the_window(root, committed.commit)
     if window.name == WINDOWS["second_use"].name:
         _require_the_validation_window_spent(root)
+    elif window.name == FORWARD_AB_1.name:
+        _require_the_second_use_window_spent(root)
     check = _panel_preflight(runtime_dir, window) if preflight is None else preflight
     problems = tuple(check(committed.body))
     if problems:
@@ -3161,32 +3242,109 @@ def _refuse_a_second_read(
     _refuse_any_claim_of_the_window(root, window)
 
 
-def _require_the_validation_window_spent(root: Path) -> None:
-    """Refuse unless the validation window's claim is committed and reachable from some ref.
+def _committer_instant(root: Path, commit: str) -> datetime:
+    """The committer time git records for `commit`, timezone-aware, or a refusal.
 
-    The artifact is `<validation>.window-claim.json`, written unconditionally by the first
-    `read_once` of that window before its reading's claim, and named by window rather than by
-    reading. It must be committed: a claim only on disk can be deleted, and the validation window
-    read again after 2024-2026 was seen -- the order this check exists to prevent. The commit is
-    looked for exactly as `_refuse_a_second_read` looks for a spent claim (`_LOG_EVERYTHING`):
-    every ref, every unexpired reflog entry, every parent of every merge.
+    A commit time is what the committer's clock (or `GIT_COMMITTER_DATE`) said -- the module
+    docstring's caveat -- so this is the record, not a proof of when the commit was made. It is
+    read with the same history discipline as the claims (`--no-replace-objects`), and a git that
+    cannot report or parse it refuses: a forward property that cannot be shown is not assumed.
     """
-    _refuse_a_shaped_history(
-        root,
-        refusal=ValidationNotSpentError,
-        consequence=(
-            "the validation window cannot be shown read first and the second_use read is refused"
-        ),
-    )
-    relative = (READING_DIRECTORY / f"{WINDOWS['validation'].name}{WINDOW_CLAIM_SUFFIX}").as_posix()
+    log = registry._git(root, _NO_REPLACEMENTS, "log", "-1", "--format=%cI", commit)
+    if log.returncode != 0:
+        raise ReadingConfigurationError(
+            f"git cannot say when {commit} was committed "
+            f"({log.stderr.decode(errors='replace').strip()}); the forward registration's commit "
+            "time cannot be shown, so the forward read is refused"
+        )
+    said = log.stdout.decode().strip()
+    try:
+        instant = datetime.fromisoformat(said)
+    except ValueError as error:
+        raise ReadingConfigurationError(
+            f"the committer time git reports for {commit} is not an ISO instant ({said!r}); the "
+            "forward registration's commit time cannot be shown, so the forward read is refused"
+        ) from error
+    if instant.tzinfo is None or instant.utcoffset() is None:
+        raise ReadingConfigurationError(
+            f"the committer time git reports for {commit} carries no timezone ({said!r}); the "
+            "forward registration's commit time cannot be shown, so the forward read is refused"
+        )
+    return instant
+
+
+def _require_the_forward_registration_precedes_the_window(root: Path, commit: str) -> None:
+    """R-F3's read-time half: the registration's committer time must be before the window opens.
+
+    The registration is committed by the operator, and `git log -1 --format=%cI` is the record of
+    when. It is self-reported -- the result's text says so -- but it is the only ordering the
+    repository can show, and a commit at or after the first session open could have been written
+    after some of the window's outcomes were known, so the read is refused before any claim.
+    """
+    committed_at = _committer_instant(root, commit)
+    if committed_at >= FORWARD_OPEN:
+        raise ReadingConfigurationError(
+            f"the {FORWARD_AB_1.name} registration was committed at {committed_at.isoformat()} "
+            f"(its committer time), at or after the window's first session open "
+            f"{FORWARD_OPEN.isoformat()}: a forward registration must precede the window it is "
+            "read on; the committer time is a self-reported record, not proof -- nothing was "
+            "claimed"
+        )
+
+
+def _committed_window_claim(
+    root: Path,
+    window: DiagnosticWindow,
+    *,
+    refusal: type[registry.HoldoutRefusedError],
+    consequence: str,
+    ordering_refused: str,
+) -> tuple[str, tuple[str, ...]]:
+    """`<window>.window-claim.json`'s path and the commits that ever touched it, or a refusal.
+
+    The commit is looked for exactly as `_refuse_a_second_read` looks for a spent claim
+    (`_LOG_EVERYTHING`): every ref, every unexpired reflog entry, every parent of every merge. A
+    shallow repository, a grafts file, or a git that cannot answer refuses first: a history cut
+    before a committed claim hides it, and "the other window was read first" would then be
+    unprovable.
+    """
+    _refuse_a_shaped_history(root, refusal=refusal, consequence=consequence)
+    relative = (READING_DIRECTORY / f"{window.name}{WINDOW_CLAIM_SUFFIX}").as_posix()
     log = registry._git(root, *_LOG_EVERYTHING, "--format=%H", "--", relative)
     if log.returncode != 0:
-        raise ValidationNotSpentError(
+        raise refusal(
             f"git cannot tell whether {relative} was ever committed "
-            f"({log.stderr.decode(errors='replace').strip()}); whether the validation window was "
-            "read first cannot be shown, so the second_use read is refused"
+            f"({log.stderr.decode(errors='replace').strip()}); whether the {window.name} window "
+            f"was read first cannot be shown, so {ordering_refused}"
         )
-    commits = log.stdout.decode().split()
+    return relative, tuple(log.stdout.decode().split())
+
+
+def _require_a_window_claim(
+    root: Path,
+    prerequisite: DiagnosticWindow,
+    next_window: DiagnosticWindow,
+    *,
+    refusal: type[registry.HoldoutRefusedError],
+    consequence: str,
+    ordering_refused: str,
+    missing_reason: str,
+    on_disk_reason: str,
+) -> None:
+    """Refuse unless `prerequisite`'s window claim is committed and reachable from some ref.
+
+    The artifact is `<prerequisite>.window-claim.json`, written unconditionally by the first
+    `read_once` of that window before its reading's claim, and named by window rather than by
+    reading. It must be committed: a claim only on disk can be deleted, and the prerequisite
+    window read again after the next one was seen -- the order this check exists to prevent.
+    """
+    relative, commits = _committed_window_claim(
+        root,
+        prerequisite,
+        refusal=refusal,
+        consequence=consequence,
+        ordering_refused=ordering_refused,
+    )
     on_disk = root / relative
     if commits:
         shown = registry._git(root, _NO_REPLACEMENTS, "show", f"{commits[-1]}:{relative}")
@@ -3194,25 +3352,78 @@ def _require_the_validation_window_spent(root: Path) -> None:
             named = json.loads(shown.stdout).get("window")
         except (ValueError, AttributeError):
             named = None
-        if shown.returncode != 0 or named != WINDOWS["validation"].name:
-            raise ValidationNotSpentError(
+        if shown.returncode != 0 or named != prerequisite.name:
+            raise refusal(
                 f"{relative} was first committed at {commits[-1]} but does not read as a claim "
-                "naming the validation window; the ordering cannot be shown, so the second_use "
-                "read is refused"
+                f"naming the {prerequisite.name} window; the ordering cannot be shown, so the "
+                f"{next_window.name} read is refused"
             )
         return
     if on_disk.is_file():
-        raise ValidationNotSpentError(
-            f"{on_disk.relative_to(root).as_posix()} is on disk but was never committed: a "
-            "claim that is not committed can be deleted, and the validation window read again "
+        raise refusal(
+            f"{on_disk.relative_to(root).as_posix()} is on disk but was never committed: "
+            f"{on_disk_reason}"
+        )
+    raise refusal(
+        f"the {next_window.name} window is read only after the {prerequisite.name} window: no "
+        f"committed {relative} exists. {missing_reason}"
+    )
+
+
+def _require_the_validation_window_spent(root: Path) -> None:
+    """Refuse unless the validation window's claim is committed and reachable from some ref.
+
+    It must be committed: a claim only on disk can be deleted, and the validation window read
+    again after 2024-2026 was seen -- the order this check exists to prevent (`V2-P7-024`).
+    """
+    _require_a_window_claim(
+        root,
+        WINDOWS["validation"],
+        WINDOWS["second_use"],
+        refusal=ValidationNotSpentError,
+        consequence=(
+            "the validation window cannot be shown read first and the second_use read is refused"
+        ),
+        ordering_refused="the second_use read is refused",
+        missing_reason=(
+            "A 2024-2026 result seen first could still change the validation stop rule's numbers "
+            "written afterwards; read the validation window first (its registration and stop rule "
+            "committed before it), then commit its window claim"
+        ),
+        on_disk_reason=(
+            "a claim that is not committed can be deleted, and the validation window read again "
             "after 2024-2026 was seen; commit it and keep that commit in this repository's refs, "
             "then read the second_use window"
-        )
-    raise ValidationNotSpentError(
-        "the second_use window is read only after the validation window: no committed "
-        f"{relative} exists. A 2024-2026 result seen first could still change the validation "
-        "stop rule's numbers written afterwards; read the validation window first (its "
-        "registration and stop rule committed before it), then commit its window claim"
+        ),
+    )
+
+
+def _require_the_second_use_window_spent(root: Path) -> None:
+    """Refuse unless the second_use window's claim is committed and reachable from some ref.
+
+    R-F4: the forward window re-tests the A/B candidates the second_use read measured, so it is
+    read only after that read's window claim, and the claim must be committed -- a claim only on
+    disk can be deleted. The commit is looked for exactly as the validation order looks for its
+    prerequisite (`_LOG_EVERYTHING`).
+    """
+    _require_a_window_claim(
+        root,
+        WINDOWS["second_use"],
+        FORWARD_AB_1,
+        refusal=SecondUseNotSpentError,
+        consequence=(
+            "the second_use window cannot be shown read first and the forward_ab_1 read is refused"
+        ),
+        ordering_refused="the forward_ab_1 read is refused",
+        missing_reason=(
+            "The A/B candidates were measured in the second_use read (R-F4); read the second_use "
+            "window first (its registration committed before it), then commit its window claim"
+        ),
+        on_disk_reason=(
+            "a claim that is not committed can be deleted, and the second_use window read again; "
+            "commit it and keep that commit in this repository's refs, then read the forward_ab_1 "
+            "window"
+        ),
     )
 
 
@@ -3397,6 +3608,8 @@ def reading_lines(result: Mapping[str, Any], body: Mapping[str, Any]) -> list[st
     - the indented registration line, `the <role> reading registered for <issue>`, and the
       indented line naming the claim files that witness this window's one read and the refs to
       keep that commit in;
+    - for a `forward_ab_1` result, the forward-property line: the registration commit, the first
+      session open it is before, and that its committer time is a self-reported record, not proof;
     - the knowledge clock, `_KNOWLEDGE_LINE` -- the registered `as_of` and, verbatim, the
       registrant's `as_of_reason` for why that is the knowledge the reading is under -- only
       when the registration carries both;
@@ -3428,6 +3641,15 @@ def reading_lines(result: Mapping[str, Any], body: Mapping[str, Any]) -> list[st
         f"{window.name}{WINDOW_CLAIM_SUFFIX}, and keep that commit in this repository's refs, or "
         "another clone or worktree can read the window again",
     ]
+    if body["window"] == FORWARD_AB_1.name:
+        commit = result["binding"]["registration_commit"]
+        lines.append(
+            "  the forward property: the registration commit "
+            f"{commit} is before {FORWARD_OPEN.isoformat()}, the window's first session open, by "
+            "its committer time -- a self-reported record, not proof: a commit time is what the "
+            "committer's clock said, and only a remote that held the commit before the read "
+            "witnesses it"
+        )
     reason = body.get("as_of_reason")
     config_form = body.get("config")
     as_of = config_form.get("as_of") if isinstance(config_form, Mapping) else None
