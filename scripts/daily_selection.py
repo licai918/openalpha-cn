@@ -270,7 +270,7 @@ from openalpha_cn.panel_neutralization import (  # noqa: E402
     FACTOR_NEUTRALIZATIONS,
     load_factor_neutralization_manifests,
 )
-from openalpha_cn.panel_view import panel_store  # noqa: E402
+from openalpha_cn.panel_view import PANEL_SUBDIRECTORY, panel_store  # noqa: E402
 from openalpha_cn.providers.base import ProviderFailure  # noqa: E402
 from openalpha_cn.providers.tushare import (  # noqa: E402
     TRADING_CALENDAR_DEFAULT_EXCHANGE,
@@ -2257,6 +2257,39 @@ class DailyOptions:
     day's session. `None` looks for `<runtime>/paper/account-record/<session>.json` and treats an
     absent file as no record -- which is not agreement: the summary then says the book's
     assumption stands unverified."""
+    panel_runtime_dir: Path | None = None
+    """`--panel-runtime-dir`: whose `panel/` a parallel book reads -- the base book's runtime
+    directory (`V2-P7-027`, R-S2). Required by a parallel registration, refused by a base one,
+    which reads its own `--runtime-dir`'s panel. Operational, not registered content (R-S7)."""
+
+
+PANEL_MODE_READ_ONLY: Final[str] = "read_only"
+"""A read-only run's journal records this under `panel_mode` (`V2-P7-027`, R-S5): the panel was
+read, not updated. A base book's journal carries no such key, so its bytes are unchanged (R-N4)."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PanelRead:
+    """Where a run reads its panel, and whether it may write it (`V2-P7-027`, R-S1/R-S2).
+
+    Read-only is a property of the **registration**, not a switch: a survivor registration whose
+    `settings` carry `survivor_parallel_of` is the parallel book, and it always reads the base
+    book's `panel/` without writing it; a base registration's panel is its own `--runtime-dir`,
+    which its evening updates as it always has. The location is an operational argument
+    (`--panel-runtime-dir`), never registered content (R-S7).
+    """
+
+    runtime_dir: Path
+    """The runtime directory whose `panel/` this run reads."""
+    read_only: bool
+
+    @property
+    def journal_keys(self) -> dict[str, str]:
+        """What a read-only run's evening/morning journal records beside its stages (R-S5):
+        nothing for a base book, whose journal bytes must not move (R-N4)."""
+        if not self.read_only:
+            return {}
+        return {"panel_mode": PANEL_MODE_READ_ONLY, "panel_runtime_dir": str(self.runtime_dir)}
 
 
 def _stored_calendar(
@@ -4084,6 +4117,17 @@ def _refuse_survivor_only_options(options: DailyOptions) -> None:
             exit_code=DailyExit.no_registration,
             steps=STEPS,
         )
+    if options.panel_runtime_dir is not None:
+        raise StepFailedError(
+            "registration",
+            f"--panel-runtime-dir is the parallel book's option: a P6 day reads and updates its "
+            "own --runtime-dir's panel and has no other book's panel to read. It is accepted only "
+            "by a parallel registration (settings."
+            f"{SURVIVOR_PARALLEL_OF_KEY}), on the evening, the morning re-check and the launchd "
+            "printers. Nothing was run",
+            exit_code=DailyExit.no_registration,
+            steps=STEPS,
+        )
 
 
 def _refuse_p6_only_options(options: DailyOptions, survivor: SurvivorRegistration) -> None:
@@ -4124,12 +4168,209 @@ def _refuse_p6_only_options(options: DailyOptions, survivor: SurvivorRegistratio
             )
 
 
-def _survivor_session(runtime_dir: Path, store: PanelStore, exchange: str, as_of: datetime) -> date:
+def panel_read(options: DailyOptions, registration: Registration) -> PanelRead:
+    """Where this run reads its panel, and whether the registration makes it read-only
+    (`V2-P7-027`, R-S1/R-S2).
+
+    Read-only is the **registration's** property: one carrying `settings.survivor_parallel_of`
+    always reads the base book's panel and refuses to run without `--panel-runtime-dir`; a base
+    registration refuses that option, so its command line is exactly what it was (R-N4). Both
+    refusals are step 1's -- exit 2, before any request, write or directory -- and the two
+    directories must differ: the paper book, the journal and `state.sqlite3` stay in
+    `--runtime-dir` (R-S7).
+    """
+    given = options.panel_runtime_dir
+    if SURVIVOR_PARALLEL_OF_KEY in registration.settings:
+        if given is None:
+            raise StepFailedError(
+                "registration",
+                f"{registration.path} is a parallel registration "
+                f"(settings.{SURVIVOR_PARALLEL_OF_KEY}), so it reads the base book's panel and "
+                "never writes one: it requires --panel-runtime-dir, the base book's runtime "
+                "directory, whose panel/ the base book's evening completed. Nothing was run",
+                exit_code=DailyExit.no_registration,
+                steps=SURVIVOR_STEPS,
+            )
+        if given.resolve() == options.runtime_dir.resolve():
+            raise StepFailedError(
+                "registration",
+                f"--panel-runtime-dir {given} is this run's own --runtime-dir: a parallel book "
+                "keeps its paper book, its journals and its state in its own runtime directory "
+                "and reads the base book's panel from another; the two must be different "
+                "directories. Nothing was run",
+                exit_code=DailyExit.no_registration,
+                steps=SURVIVOR_STEPS,
+            )
+        return PanelRead(runtime_dir=given, read_only=True)
+    if given is not None:
+        raise StepFailedError(
+            "registration",
+            f"--panel-runtime-dir {given} is the parallel book's option: {registration.path} "
+            f"carries no settings.{SURVIVOR_PARALLEL_OF_KEY}, so it is the base book, whose panel "
+            "is its own --runtime-dir and is written by its own evening. Nothing was run",
+            exit_code=DailyExit.no_registration,
+            steps=SURVIVOR_STEPS,
+        )
+    return PanelRead(runtime_dir=options.runtime_dir, read_only=False)
+
+
+def _base_book_not_ready(read: PanelRead, session: date | None, detail: str) -> StepFailedError:
+    """A parallel book's step-2 refusal, by name: what the base book's panel lacks, and which base
+    runtime directory was read (`V2-P7-027`, R-S3). Exit 1: the base book's evening has not
+    completed for the session, and this book never fetches a panel of its own."""
+    where = "this session" if session is None else f"the session {session.isoformat()}"
+    return StepFailedError(
+        "panel update",
+        f"the base book's evening for {where} has not completed: {detail}. The base runtime "
+        f"directory this parallel book reads is {read.runtime_dir}, and a parallel book never "
+        "writes or fetches a panel (read-only, zero requests). Nothing was fetched or written",
+        steps=SURVIVOR_STEPS,
+    )
+
+
+def _refuse_unready_panel(
+    options: DailyOptions,
+    survivor: SurvivorRegistration,
+    read: PanelRead,
+    *,
+    as_of: datetime,
+) -> None:
+    """Step 2 for a read-only evening (`V2-P7-027`, R-S3): the base book's panel must already
+    hold everything this evening reads, as its own evening left it.
+
+    In place of the unfetching calendar build, the data update, the doctor and the factor builds,
+    each is a check against the stored panel at this run's pinned `as_of` -- every dataset the
+    evening reads covers the session (through the panel's own `panel doctor` and `data-check`,
+    which are read-only), the calendar reaches the session's outcome window, and every factor
+    tier the configuration reads is built at the session's 16:30. A missing item refuses by name,
+    exit 1, naming the missing dataset or instant and the base runtime directory; nothing is
+    fetched and nothing is written. Called before the paper book's writer lock is taken, so the
+    refusal leaves not even that file in the parallel runtime directory.
+    """
+    catalog = read.runtime_dir / PANEL_SUBDIRECTORY / "catalog.duckdb"
+    if not catalog.is_file():
+        raise _base_book_not_ready(
+            read,
+            None,
+            f"there is no panel there (no {PANEL_SUBDIRECTORY}/{catalog.name} under "
+            f"{read.runtime_dir})",
+        )
+    exchange = survivor.adapter.exchange
+    # The composition root, pointed at the panel directory: never a second store construction.
+    store = panel_store(read.runtime_dir)
+    session = _stored_session(store, exchange, as_of)
+    if session is None:
+        raise _base_book_not_ready(
+            read,
+            None,
+            f"its stored {exchange} calendar has no session published at {_shanghai(as_of)}",
+        )
+    builds = survivor_builds(survivor)
+    targets = options.targets or targets_for_survivor(builds)
+    try:
+        calendar = _survivor_calendar(
+            store,
+            exchange,
+            epoch=survivor.adapter.epoch_session,
+            session=session,
+            as_of=as_of,
+        )
+    except StepFailedError as error:
+        raise _base_book_not_ready(read, session, error.detail) from error
+    if next_year_calendar_needed(calendar, session=session, horizon=SURVIVOR_OUTCOME_SESSIONS):
+        year = session.year + 1
+        if year not in store.registered_years(TRADING_CALENDAR_DATASET):
+            raise _base_book_not_ready(
+                read,
+                session,
+                f"its stored {exchange} calendar does not reach {year}, which this session's "
+                f"{SURVIVOR_OUTCOME_SESSIONS}-session outcome window reaches into",
+            )
+    try:
+        # The panel's own read-only readiness check for the datasets the evening reads: the
+        # doctor and the dependency gate, exactly what step 3 would run, against the base panel.
+        check_panel(
+            read.runtime_dir,
+            datasets=doctor_datasets(targets),
+            session=session,
+            as_of=as_of,
+            exchange=exchange,
+            first_of_year=session
+            == min(day for day in calendar.trading_days if day.year == session.year),
+        )
+    except StepFailedError as error:
+        raise _base_book_not_ready(
+            read,
+            session,
+            f"its stored datasets do not cover the session ({error.detail})",
+        ) from error
+    instant = session_publication_instant(session)
+    missing = [
+        f"{build.factor}@{build.tier}"
+        for build in builds
+        if not _built_at_instant(store, build, instant=instant, as_of=as_of)
+    ]
+    if missing:
+        raise _base_book_not_ready(
+            read,
+            session,
+            f"the factor build(s) {', '.join(missing)} at {instant.isoformat()}, the session's "
+            "16:30 signal instant, are not built",
+        )
+
+
+def _read_only_panel_block(*, session: date, targets: Sequence[str]) -> dict[str, Any]:
+    """Step 2's journal block for a read-only evening (R-S3/R-S5): the targets the base book's
+    evening fetched, and no session, file or request -- this run read the base panel instead of
+    updating it."""
+    return {
+        "targets": list(targets),
+        "year": session.year,
+        "read_only": True,
+        "budget": [],
+        "industry_sweep": None,
+        "sessions": None,
+        "partitions": [],
+    }
+
+
+def _read_only_factor_block(builds: Sequence[TierBuild], *, session: date) -> dict[str, Any]:
+    """Step 4's journal block for a read-only evening (R-S3): every tier the configuration reads
+    is built at the session's 16:30 -- the readiness check proved it -- and this run built
+    nothing, so the request count of the block is empty."""
+    return {
+        "instant": session_publication_instant(session).isoformat(),
+        "built": [],
+        "already_built": [f"{build.factor}@{build.tier}" for build in builds],
+        "caught_up": [],
+        "partitions": [],
+    }
+
+
+def _survivor_session(
+    runtime_dir: Path,
+    store: PanelStore,
+    exchange: str,
+    as_of: datetime,
+    *,
+    read_only: bool = False,
+) -> date:
     """The day's session as the P6 day finds it: the newest published at `as_of` by the stored
-    calendar, which is built first (one request) when the store holds none to read it from."""
+    calendar, which is built first (one request) when the store holds none to read it from.
+
+    A read-only run (`V2-P7-027`, R-S3) never builds the calendar: the base book's panel either
+    has it or the stay is refused by name -- its evening has not completed."""
     session = _stored_session(store, exchange, as_of)
     if session is not None:
         return session
+    if read_only:
+        raise StepFailedError(
+            "panel update",
+            f"the base book's panel at {store.root.parent} holds no {exchange} calendar with a "
+            f"session published at {_shanghai(as_of)}: the base book's evening has not completed, "
+            "and a parallel book never fetches a panel. Nothing was fetched or written",
+            steps=SURVIVOR_STEPS,
+        )
     year = as_of.astimezone(SHANGHAI).year
     built = _panel_build(
         runtime_dir, year=year, as_of=as_of, exchange=exchange, targets=(TRADING_CALENDAR_DATASET,)
@@ -4476,6 +4717,10 @@ def _survivor_rerun_command(options: DailyOptions, *, as_of: datetime) -> str:
     runbook writes a manual run (one builder, so the two forms cannot drift)."""
     arguments = ["scripts/daily_selection.py", "--runtime-dir", str(options.runtime_dir)]
     arguments += ["--registration", str(options.registration), "--repo", str(options.repo)]
+    if options.panel_runtime_dir is not None:
+        # The parallel book's printed rerun names the panel it reads, or it would refuse as
+        # missing --panel-runtime-dir when run (R-S2).
+        arguments += ["--panel-runtime-dir", str(options.panel_runtime_dir)]
     arguments += ["--as-of", as_of.astimezone(SHANGHAI).isoformat()]
     return pinned_command(arguments)
 
@@ -5252,6 +5497,10 @@ def rerun_command(options: DailyOptions) -> str:
     I5, M3, M9)."""
     arguments = [THIS_SCRIPT, "--runtime-dir", str(options.runtime_dir)]
     arguments += ["--registration", str(options.registration)]
+    if options.panel_runtime_dir is not None:
+        # A parallel book's printed rerun is only runnable with the panel it reads (R-S2): the
+        # base book's runtime directory, never this book's own (R-N4: a base book has none).
+        arguments += ["--panel-runtime-dir", str(options.panel_runtime_dir)]
     if options.repo != REPOSITORY:
         arguments += ["--repo", str(options.repo)]
     if options.as_of is not None:
@@ -5272,11 +5521,14 @@ def _refusal_aftermath(
     *,
     lock: PaperBookLock,
     clock: Callable[[], datetime],
+    read: PanelRead,
 ) -> tuple[str, ...]:
     """The block a survivor day's refusal of steps 2 to 8 prints after its requests line (I5,
     `strategy_survivor_summary.refusal_lines`), read here under the day's lock and read-only: the
     session the day's clock finds, its registration cutoff, the paper book's head -- bound to this
     registration (`require_bound`) -- and the book's count of sessions, which dates its orders.
+    The calendar is read from `read`'s panel, never from `options.runtime_dir`'s: a parallel book
+    has no panel of its own, and opening one there would create it (R-S3).
 
     Advice about a refusal must never replace it, so each read that fails is left out of the block
     rather than raised -- a fault of any class, the panel's or the book's: the block then says what
@@ -5301,7 +5553,7 @@ def _refusal_aftermath(
     # Each read below is advice on a refusal already made: whatever it raises, the refusal above
     # is the fact, and the block says what it could not read instead of replacing it.
     try:
-        store = panel_store(options.runtime_dir)
+        store = panel_store(read.runtime_dir)
         session = _stored_session(store, adapter.exchange, as_of)
         if session is not None:
             cutoff = registration_cutoff(
@@ -5433,6 +5685,15 @@ def _run_survivor_day(
        prints after its requests line; a day that completed carries the printing run's note on why
        its session is the day (`_with_session_note`, M5).
 
+    **The parallel book (`V2-P7-027`).** A registration carrying `settings.survivor_parallel_of`
+    is the parallel book (`panel_read`): its paper book, journals and stores stay in
+    `--runtime-dir`, and it reads the base book's `panel/` from `--panel-runtime-dir`
+    read-only -- never updating it, never fetching, never building a factor. Steps 2 and 4 are
+    replaced by `_refuse_unready_panel`'s readiness check, run before the paper book's lock is
+    taken, so a base book whose evening has not completed refuses having written nothing at all
+    in the parallel runtime directory; its journal records `panel_mode: "read_only"` and the
+    panel directory it read (R-S3, R-S5).
+
     **The P6 day's options here.** `--full-update` and `--top` have no survivor meaning and are
     refused before anything is made (exit 2). `--dataset` replaces the targets as on the P6 day
     (`options.targets or targets_for_survivor(builds)`), but only by a superset of
@@ -5445,8 +5706,15 @@ def _run_survivor_day(
     """
     with _step("registration", steps=SURVIVOR_STEPS):
         _refuse_p6_only_options(options, survivor)
+        read = panel_read(options, registration)
         # Imported here, never for a P6 day: it loads `backtest/paper.py` and its audit hook.
         from openalpha_cn import strategy_survivor_book as paper_book
+    first_as_of = options.as_of or clock()
+    if read.read_only:
+        # Before the lock, so the refusal leaves nothing at all in the parallel runtime directory
+        # (R-S3): the base book's evening completed or the parallel book does not run.
+        with _step("panel update", steps=SURVIVOR_STEPS):
+            _refuse_unready_panel(options, survivor, read, as_of=first_as_of)
     with contextlib.ExitStack() as held:
         with _step("registration", steps=SURVIVOR_STEPS):
             try:
@@ -5459,16 +5727,23 @@ def _run_survivor_day(
                 raise StepFailedError("registration", str(error), steps=SURVIVOR_STEPS) from error
         try:
             result = _survivor_day(
-                options, registration, survivor, lock=lock, clock=clock, counts=counts
+                options,
+                registration,
+                survivor,
+                lock=lock,
+                clock=clock,
+                counts=counts,
+                first_as_of=first_as_of,
+                read=read,
             )
         except StepFailedError as error:
             # What the refusal means for the account (I5), read under the day's lock.
             if error.step in REFUSAL_BLOCK_STEPS and error.exit_code == DailyExit.step_failed:
                 error.aftermath = _refusal_aftermath(
-                    options, registration, survivor, lock=lock, clock=clock
+                    options, registration, survivor, lock=lock, clock=clock, read=read
                 )
             raise
-    return _with_session_note(result, options, survivor, clock=clock)
+    return _with_session_note(result, options, survivor, clock=clock, read=read)
 
 
 def _with_session_note(
@@ -5477,16 +5752,18 @@ def _with_session_note(
     survivor: SurvivorRegistration,
     *,
     clock: Callable[[], datetime],
+    read: PanelRead,
 ) -> dict[str, Any]:
     """`result` with the printing run's `session_note` in its `this_run` (M5) when the day's
     clock is the run's own -- no `--as-of`, which names the day itself -- and the day is not
     today's. Never filed. A note the stored calendar cannot give is left out, never a refusal of a
-    day that completed."""
+    day that completed. The calendar is read from `read`'s panel: a parallel book reads the base
+    book's, never its own runtime directory's (which holds no panel at all)."""
     if options.as_of is not None:
         return result
     try:
         note = session_note(
-            panel_store(options.runtime_dir),
+            panel_store(read.runtime_dir),
             survivor.adapter.exchange,
             session=date.fromisoformat(result["session"]),
             now=clock(),
@@ -5506,8 +5783,15 @@ def _survivor_day(
     lock: PaperBookLock,
     clock: Callable[[], datetime],
     counts: Counter[str],
+    first_as_of: datetime,
+    read: PanelRead,
 ) -> dict[str, Any]:
-    """Steps 1 to 7 of the survivor day under the paper book's lock (`_run_survivor_day`)."""
+    """Steps 1 to 7 of the survivor day under the paper book's lock (`_run_survivor_day`).
+
+    `read` is where its panel comes from (`panel_read`): its own `--runtime-dir` for the base
+    book, or the base book's `--panel-runtime-dir` read-only for a parallel one (`V2-P7-027`);
+    `first_as_of` is the clock `_run_survivor_day` read once, so the readiness check and this day
+    ask about the same instant."""
     from openalpha_cn import strategy_survivor_book as paper_book
     from openalpha_cn.domain import survivor_screen
     from openalpha_cn.strategy_survivor_market import SessionOrdinals
@@ -5516,8 +5800,7 @@ def _survivor_day(
     adapter = survivor.adapter
     exchange, epoch = adapter.exchange, adapter.epoch_session
     with _step("registration", steps=SURVIVOR_STEPS):
-        store = panel_store(runtime_dir)
-        first_as_of = options.as_of or clock()
+        store = panel_store(read.runtime_dir)
         builds = survivor_builds(survivor)
         targets = options.targets or targets_for_survivor(builds)
         # Resolved once, and the one object every reader of the processed tier is handed (D3
@@ -5525,7 +5808,9 @@ def _survivor_day(
         transform = FACTOR_TRANSFORMS.get(adapter.transform)
 
     with _step("panel update", steps=SURVIVOR_STEPS), counted_transport(counts):
-        session = _survivor_session(runtime_dir, store, exchange, first_as_of)
+        session = _survivor_session(
+            runtime_dir, store, exchange, first_as_of, read_only=read.read_only
+        )
         _admit_epoch(
             store,
             epoch=epoch,
@@ -5583,6 +5868,7 @@ def _survivor_day(
                     "commit": registration.commit,
                     "config_id": registration.config_id,
                 },
+                **read.journal_keys,
             }
         as_of = datetime.fromisoformat(journal["as_of"])
         held = tuple(journal["held"])
@@ -5627,17 +5913,22 @@ def _survivor_day(
         if pinning:
             write_journal(path, journal)
         if "panel" not in journal:
-            panel = update_panel(
-                runtime_dir,
-                session=session,
-                as_of=as_of,
-                exchange=exchange,
-                targets=targets,
-                next_year=next_year_calendar_needed(
-                    calendar, session=session, horizon=SURVIVOR_OUTCOME_SESSIONS
-                ),
-                survivor=survivor_panel_update(survivor),
-            )
+            if read.read_only:
+                # R-S3: the readiness check already proved the base book's panel complete; the
+                # base panel is not updated, and the block says so with no request (R-S5).
+                panel = _read_only_panel_block(session=session, targets=targets)
+            else:
+                panel = update_panel(
+                    runtime_dir,
+                    session=session,
+                    as_of=as_of,
+                    exchange=exchange,
+                    targets=targets,
+                    next_year=next_year_calendar_needed(
+                        calendar, session=session, horizon=SURVIVOR_OUTCOME_SESSIONS
+                    ),
+                    survivor=survivor_panel_update(survivor),
+                )
             journal = {**journal, "panel": {**panel, "requests": dict(sorted(counts.items()))}}
             write_journal(path, journal)
         # The session's registration cutoff, 09:15 of the next session, on the calendar this step
@@ -5661,6 +5952,14 @@ def _survivor_day(
         # The doctor and the factor build gate a decision already made, and read at the pinned
         # instant: a committed day's completion runs neither.
         factors: Mapping[str, Any] = journal.get("factors") or {}
+    elif read.read_only:
+        # Steps 3 and 4 for a parallel book (R-S3): the doctor's read-only checks and the factor
+        # instants were the readiness check's at step 2, before this day wrote anything, so
+        # neither runs again; the journal records the tiers the base book's panel already holds.
+        factors = _read_only_factor_block(builds, session=session)
+        if journal.get("factors") != factors:
+            journal = {**journal, "factors": factors}
+            write_journal(path, journal)
     else:
         with _step("panel doctor", steps=SURVIVOR_STEPS):
             if later is not None:
@@ -6996,6 +7295,16 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--runtime-dir", type=Path, default=None)
     parser.add_argument(
+        "--panel-runtime-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="The runtime directory whose panel/ a parallel registration reads: the base book's "
+        "runtime directory (its evening must have completed the session). Required by a parallel "
+        "registration (settings.survivor_parallel_of), refused by a base one, and read-only -- "
+        "this book never writes or fetches a panel. It must not equal --runtime-dir.",
+    )
+    parser.add_argument(
         "--registration",
         type=Path,
         help="The registration this run reads: required, with no default (the P6 book's "
@@ -7119,6 +7428,17 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             if given:
                 parser.error(f"--show-book cannot be combined with {flag}")
     _refuse_an_unread_account_record(arguments, parser)
+    if arguments.panel_runtime_dir is not None:
+        for given, flag in (
+            (arguments.pin_worktree, "--pin-worktree"),
+            (arguments.factor_gaps, "--factor-gaps"),
+        ):
+            if given is not None:
+                parser.error(
+                    f"--panel-runtime-dir is the parallel book's panel location, read by the "
+                    f"evening, the morning re-check and the launchd printers, and {flag} reads "
+                    "no panel of another book"
+                )
     uv = (arguments.uv or Path(shutil.which("uv") or "uv")).resolve()
     try:
         if arguments.pin_worktree is not None:
@@ -7227,6 +7547,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         json_output=arguments.json,
         top=arguments.top,
         account_record=arguments.account_record,
+        panel_runtime_dir=arguments.panel_runtime_dir,
     )
     banner = smoke_banner(arguments.registration)
     identity = parallel_book(arguments.registration)
