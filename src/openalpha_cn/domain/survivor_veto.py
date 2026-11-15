@@ -83,7 +83,7 @@ class VetoDetail:
 
     `event_count` and `mean_weight` are the two numbers the rule is made of, so an annotation
     that prints them prints the arithmetic rather than a second explanation of it; `vetoed` is
-    the same comparison `vetoed_codes` makes. Frozen because the answer is evidence once taken.
+    the same comparison `vetoed_codes` makes. Frozen because the answer is a record once taken.
     """
 
     ts_code: str

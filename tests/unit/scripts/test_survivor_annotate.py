@@ -64,6 +64,7 @@ from openalpha_cn.panel.store import PanelStore
 from openalpha_cn.panel_factors import (
     BROKEN_BOARD_COUNT_20,
     LIMIT_UP_COUNT_20,
+    FactorEngineError,
     FactorPanel,
     compute_factor,
     write_factor_panels,
@@ -131,6 +132,13 @@ PREVIOUS_UP_VALUE: Final[float] = 7.0
 NEXT_UP_VALUE: Final[float] = 8.0
 """A build stamped on the session after: it is not this session's answer either."""
 SMOKE_REGISTRATION: Final[dict[str, Any]] = {"settings": {"smoke_run": {"issue": "V2-P7-019"}}}
+VETO_RULE_ID: Final[str] = "market_bearish_5/v1"
+"""Plan A's rule id: the journal's `paper.entry_veto.rule`, and the rule the window is read by."""
+BASE_BOOK_NO_VETO_NOTE: Final[str] = (
+    "该账簿不执行否决；vetoed 只是参考标注 / this book does not apply the veto; "  # noqa: RUF001
+    "'vetoed' is a reference note"
+)
+"""The line a base (v1) journal prints directly under the header: it applies no veto (`Minor 3`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +336,18 @@ def _story_plan() -> dict[str, Any]:
         carried_buys=(CARRIED_BUY_CODE,),
         carried_sells=(CARRIED_SELL_CODE,),
     )
+
+
+def _veto_plan(*, vetoed: Sequence[str]) -> dict[str, Any]:
+    """`_story_plan` as a v2 book's paper block: it carries the `entry_veto` block it filed.
+
+    The block is the one `strategy_survivor_summary._paper_section` writes: the rule id and the
+    survivors the window vetoed, sorted. Only a v2 book files it; a v1 book's paper block has no
+    such key and prints the base-book note instead.
+    """
+    plan = _story_plan()
+    plan["entry_veto"] = {"rule": VETO_RULE_ID, "vetoed": list(vetoed)}
+    return plan
 
 
 def _write_journal(runtime: Path, config_id: str, journal: Mapping[str, Any]) -> Path:
@@ -609,15 +629,20 @@ def test_a_journal_whose_orders_contradict_its_decision_is_refused_by_name(
 def test_the_annotation_prints_the_header_every_role_and_the_journal_wording(
     capsys: pytest.CaptureFixture[str], story: World
 ) -> None:
-    """The printed form: the candidate-reference header, one line per row, the wording last."""
+    """The printed form: the candidate-reference header, one line per row, the wording last.
+
+    The story journal is a base (v1) book's -- it carries no `paper.entry_veto` -- so the base-book
+    note comes directly under the header (`Minor 3`); the rows follow it unchanged.
+    """
     code, out, err = _invoke(capsys, _arguments(story, session=story.session))
 
     assert code == 0, err
     assert err == ""
     lines = out.splitlines()
     assert lines[0] == annotate.HEADER
+    assert lines[1] == BASE_BOOK_NO_VETO_NOTE
     assert lines[-1] == SURVIVOR_WORDING
-    body = lines[1:-1]
+    body = lines[2:-1]
     assert len(body) == 7
     by_code = {line.split()[1]: line for line in body}
     assert by_code[ENTRY_CODE].startswith(f"ENTRY {ENTRY_CODE} | veto: none")
@@ -632,6 +657,83 @@ def test_the_annotation_prints_the_header_every_role_and_the_journal_wording(
     assert "limit_up_count_20: not in the build" in by_code[WATCH_CODE]
     assert "broken_board_count_20: not in the build" in by_code[WATCH_CODE]
     assert "limit_up_count_20: 0.0000 (pct 0.500 of 7)" in by_code[ENTRY_CODE]
+
+
+def test_a_base_v1_journal_says_the_book_applies_no_veto(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """A journal whose paper block has no `entry_veto` is a v1 book: it applies no veto.
+
+    The note is exactly one line directly under the header -- the header stays first -- and the
+    `--json` document carries the same fact as `book_applies_entry_veto: false`, so the printer
+    stays a pure function of the document.
+    """
+    config_id = "cfg-annotation-basebook1"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=_story_plan(),
+            registration_path=story.registration_path,
+        ),
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == annotate.HEADER
+    assert lines[1] == BASE_BOOK_NO_VETO_NOTE
+    assert lines.count(BASE_BOOK_NO_VETO_NOTE) == 1
+    assert lines[-1] == SURVIVOR_WORDING
+    assert lines[2].startswith("ENTRY ")
+    assert len(lines) == 10  # header, the note, seven rows, the wording
+
+    document = json.loads(
+        _invoke(
+            capsys,
+            _arguments(story, session=story.session, config_id=config_id, json_output=True),
+        )[1]
+    )
+    assert document["book_applies_entry_veto"] is False
+    assert annotate.BASE_BOOK_NO_VETO_NOTE == BASE_BOOK_NO_VETO_NOTE
+
+
+def test_a_v2_journal_prints_no_base_book_note_and_says_the_book_applies_the_veto(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """A journal that files `paper.entry_veto` is a v2 book: no base-book note is printed.
+
+    Its document says `book_applies_entry_veto: true`; the printed first line stays the header and
+    the first body line is a row, not a note.
+    """
+    config_id = "cfg-annotation-v2book001"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=_veto_plan(vetoed=[HOLD_VETOED_CODE]),
+            registration_path=story.registration_path,
+        ),
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == annotate.HEADER
+    assert BASE_BOOK_NO_VETO_NOTE not in out
+    assert lines[1].startswith("ENTRY ")
+    assert lines[-1] == SURVIVOR_WORDING
+
+    code, out, err = _invoke(
+        capsys,
+        _arguments(story, session=story.session, config_id=config_id, json_output=True),
+    )
+    assert code == 0, err
+    assert json.loads(out)["book_applies_entry_veto"] is True
 
 
 # --- plan A: the veto ----------------------------------------------------------------------------
@@ -659,6 +761,112 @@ def test_a_name_with_no_event_shows_a_null_veto(
 
     assert rows[HOLD_PLAIN_CODE]["veto"] is None
     assert rows[ENTRY_CODE]["veto"] is None
+
+
+# --- Minor 4: the journal's vetoed list against the window the annotation recomputes ------------
+
+
+def test_a_v2_journals_vetoed_list_agrees_with_the_window(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """A v2 journal's `paper.entry_veto.vetoed` names only names the window vetoes: it prints.
+
+    The story panel's scripted broken board vetoes exactly `HOLD_VETOED_CODE`, so a journal whose
+    list is that name is consistent with the read and the annotation prints normally.
+    """
+    config_id = "cfg-annotation-veto-agree1"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=_veto_plan(vetoed=[HOLD_VETOED_CODE]),
+            registration_path=story.registration_path,
+        ),
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+
+    assert code == 0, err
+    assert err == ""
+    lines = out.splitlines()
+    assert lines[0] == annotate.HEADER
+    assert BASE_BOOK_NO_VETO_NOTE not in out
+    assert any(HOLD_VETOED_CODE in line and "vetoed" in line for line in lines)
+
+
+def test_a_v2_journals_vetoed_list_the_window_does_not_veto_is_refused_by_name(
+    capsys: pytest.CaptureFixture[str], story: World
+) -> None:
+    """A name the journal records as vetoed that the window does not veto refuses (exit 2).
+
+    The journal does not store the survivor names, so the check is one-way: every name the journal
+    records as a vetoed survivor must be one the recomputation vetoes. `HOLD_PLAIN_CODE` is not
+    vetoed by the window (it has no event at all), so it is the difference the refusal lists; no
+    annotation is printed and the runtime and panel trees are byte-identical.
+    """
+    config_id = "cfg-annotation-veto-disagree1"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=_veto_plan(vetoed=[HOLD_VETOED_CODE, HOLD_PLAIN_CODE]),
+            registration_path=story.registration_path,
+        ),
+    )
+    runtime_before = _tree(story.runtime)
+    panel_before = _tree(story.panel_directory)
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+
+    assert code == 2
+    assert out == ""
+    assert HOLD_PLAIN_CODE in err
+    assert VETO_RULE_ID in err
+    assert "disagree" in err
+    assert HOLD_VETOED_CODE not in err  # only the difference names are listed
+    assert "nothing was written" in err
+    assert _tree(story.runtime) == runtime_before
+    assert _tree(story.panel_directory) == panel_before
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param({"vetoed": [HOLD_VETOED_CODE]}, id="no-rule"),
+        pytest.param({"rule": 7, "vetoed": [HOLD_VETOED_CODE]}, id="rule-not-a-string"),
+        pytest.param({"rule": VETO_RULE_ID, "vetoed": "600000.SH"}, id="vetoed-not-a-list"),
+    ],
+)
+def test_an_unreadable_entry_veto_block_is_refused_as_a_journal_fault(
+    capsys: pytest.CaptureFixture[str],
+    story: World,
+    request: pytest.FixtureRequest,
+    block: Mapping[str, Any],
+) -> None:
+    """A malformed block is an ordinary journal fault (exit 1), not a veto disagreement (exit 2)."""
+    config_id = f"cfg-annotation-veto-shape-{request.node.callspec.id}"
+    plan = _story_plan()
+    plan["entry_veto"] = block
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=plan,
+            registration_path=story.registration_path,
+        ),
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+
+    assert code == 1
+    assert out == ""
+    assert "entry_veto" in err
 
 
 def test_a_name_not_in_the_build_shows_a_null_factor_cell(
@@ -769,6 +977,76 @@ def test_a_missing_b_build_is_refused_with_the_build_command(
         "--max-staleness-days <days>"
     )
     assert _tree(bare.runtime) == before
+
+
+def test_a_registered_year_with_no_build_for_the_session_is_refused_with_the_build_command(
+    capsys: pytest.CaptureFixture[str], story: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Registered for the factor dataset, but no build answers this earlier session: build it.
+
+    The story panel has B's raw builds for the fixture's session only. An earlier session of the
+    same year passes the "year is registered" check and then finds no build stamped on its own day
+    at or after its 16:30, which is the second, distinct missing-build branch: exit 1 with the same
+    exact `openalpha factor build ...` line the bare fixture's first branch prints. The spy proves
+    the read happened -- the first branch (year not registered) would have refused before it.
+    """
+    session = story.panel.sessions[TARGET_INDEX - 3]
+    config_id = "cfg-annotation-nobuild-for-day"
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=session,
+            config_id=config_id,
+            paper=_story_plan(),
+            registration_path=story.registration_path,
+        ),
+    )
+    reads: list[str] = []
+    original = annotate.load_factor_observations
+
+    def _counting(store: Any, definition: FactorDefinition, **kwargs: Any) -> Any:
+        reads.append(definition.qualified_key)
+        return original(store, definition, **kwargs)
+
+    monkeypatch.setattr(annotate, "load_factor_observations", _counting)
+
+    code, out, err = _invoke(capsys, _arguments(story, session=session, config_id=config_id))
+
+    assert code == 1
+    assert out == ""
+    assert reads  # the year was registered and read; the refusal is the empty build set
+    assert "the panel holds no raw build" in err
+    assert err.splitlines()[-1] == (
+        "openalpha factor build --factor limit_up_count_20/v1 --tier raw "
+        f"--year {session.year} "
+        f"--as-of {_published(session).isoformat()} "
+        "--max-staleness-days <days>"
+    )
+
+
+def test_a_factor_partition_the_panel_cannot_read_is_not_reported_as_a_missing_build(
+    capsys: pytest.CaptureFixture[str],
+    story: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registered year whose partition cannot be read says so, and is not a missing build.
+
+    The category sentence is the assertion, not the engine's own text: the remedy for a damaged
+    partition is not `openalpha factor build`, so that line must not be printed.
+    """
+
+    def _unreadable(*args: Any, **kwargs: Any) -> Any:
+        raise FactorEngineError("a broken partition")
+
+    monkeypatch.setattr(annotate, "load_factor_observations", _unreadable)
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session))
+
+    assert code == 1
+    assert out == ""
+    assert "cannot read them at" in err
+    assert "openalpha factor build" not in err
 
 
 def test_an_epoch_day_journal_is_refused_by_name(
@@ -1158,6 +1436,171 @@ def test_an_unresolvable_registration_prints_the_not_verified_line(
     )
     assert code == 0, err
     assert json.loads(out)[daily.SMOKE_DOCUMENT_KEY] == annotate.UNVERIFIED_SMOKE_BANNER
+
+
+# --- parked: a relative recorded name resolved under the repository's docs/research --------
+
+
+def _lookup_journal(
+    story: World,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    config_id: str,
+    repository: Path,
+    recorded_sha256: str | None = None,
+) -> str:
+    """Write a journal recording only the bare registration name, resolved under `repository`.
+
+    `daily_selection` records the registration's `path.name`; the repository the annotation
+    resolves it from is monkeypatched here, so the real `docs/research/` is never touched.
+    """
+    monkeypatch.setattr(annotate, "REPOSITORY", repository)
+    _write_journal(
+        story.runtime,
+        config_id,
+        _journal(
+            session=story.session,
+            config_id=config_id,
+            paper=_story_plan(),
+            recorded_sha256=recorded_sha256,
+        ),
+    )
+    return config_id
+
+
+def test_a_recorded_name_found_once_with_a_matching_sha_verifies_the_registration(
+    capsys: pytest.CaptureFixture[str],
+    story: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exactly one file of the recorded name under docs/research, sha256 equal: no banner.
+
+    The registration is not a smoke one, so a verified run prints the header first and its wording
+    last -- not the "not verified" banner.
+    """
+    repository = tmp_path / "repo"
+    registration = repository / "docs" / "research" / "p7-registration.json"
+    registration.parent.mkdir(parents=True)
+    registration.write_text(json.dumps({"settings": {}}), encoding="utf-8")
+    config_id = _lookup_journal(
+        story,
+        monkeypatch,
+        config_id="cfg-annotation-found-once",
+        repository=repository,
+        recorded_sha256=hashlib.sha256(registration.read_bytes()).hexdigest(),
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == annotate.HEADER
+    assert lines[-1] == SURVIVOR_WORDING
+    assert annotate.UNVERIFIED_SMOKE_BANNER not in out
+    assert daily.SMOKE_BANNER not in out
+
+
+def test_a_recorded_name_found_once_as_a_smoke_file_prints_the_smoke_banner(
+    capsys: pytest.CaptureFixture[str],
+    story: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A found-and-verified smoke registration brackets the print, first and last."""
+    repository = tmp_path / "repo"
+    registration = repository / "docs" / "research" / "p7-registration.json"
+    registration.parent.mkdir(parents=True)
+    registration.write_text(json.dumps(SMOKE_REGISTRATION), encoding="utf-8")
+    config_id = _lookup_journal(
+        story,
+        monkeypatch,
+        config_id="cfg-annotation-found-smoke",
+        repository=repository,
+        recorded_sha256=hashlib.sha256(registration.read_bytes()).hexdigest(),
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == daily.SMOKE_BANNER
+    assert lines[-1] == daily.SMOKE_BANNER
+
+
+def test_a_recorded_name_found_nowhere_keeps_the_unverified_banner(
+    capsys: pytest.CaptureFixture[str],
+    story: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero matches: the smoke status stays unknown, with the existing banner unchanged."""
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    config_id = _lookup_journal(
+        story, monkeypatch, config_id="cfg-annotation-found-none", repository=repository
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == annotate.UNVERIFIED_SMOKE_BANNER
+    assert lines[-1] == annotate.UNVERIFIED_SMOKE_BANNER
+
+
+def test_a_recorded_name_found_more_than_once_keeps_the_unverified_banner(
+    capsys: pytest.CaptureFixture[str],
+    story: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two files of the recorded name in different subdirectories: ambiguous, so unknown."""
+    repository = tmp_path / "repo"
+    for subdirectory in ("first", "second"):
+        path = repository / "docs" / "research" / subdirectory / "p7-registration.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"settings": {}}), encoding="utf-8")
+    config_id = _lookup_journal(
+        story, monkeypatch, config_id="cfg-annotation-found-twice", repository=repository
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == annotate.UNVERIFIED_SMOKE_BANNER
+    assert lines[-1] == annotate.UNVERIFIED_SMOKE_BANNER
+
+
+def test_a_recorded_name_found_once_with_a_different_sha_says_why_it_is_unverified(
+    capsys: pytest.CaptureFixture[str],
+    story: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One match, sha256 different: the unverified banner stays but explains the mismatch."""
+    repository = tmp_path / "repo"
+    registration = repository / "docs" / "research" / "p7-registration.json"
+    registration.parent.mkdir(parents=True)
+    registration.write_text(json.dumps(SMOKE_REGISTRATION), encoding="utf-8")
+    config_id = _lookup_journal(
+        story,
+        monkeypatch,
+        config_id="cfg-annotation-found-mismatch",
+        repository=repository,
+        recorded_sha256="c" * 64,
+    )
+
+    code, out, err = _invoke(capsys, _arguments(story, session=story.session, config_id=config_id))
+
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[-1] == lines[0]
+    assert lines[0].startswith(annotate.UNVERIFIED_SMOKE_BANNER)
+    assert "sha256" in lines[0]
+    assert str(registration) in lines[0]
+    assert daily.SMOKE_BANNER not in out
 
 
 def test_the_registration_flag_verifies_a_recorded_path_that_cannot_be_resolved(

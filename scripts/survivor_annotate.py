@@ -42,6 +42,16 @@ that refusal into its own sentence and exits 1 (R-N3a): the guarantee is "never 
 set", not "always the same set", and printing the restated bytes would show a vetoed set the
 evening did not have.
 
+A v2 journal also **records** the vetoed survivor names in `paper.entry_veto.vetoed`; the
+annotation recomputes the window and refuses (exit 2) when the journal names a name the
+recomputation does not veto. The check is one-way by necessity: the journal stores the vetoed
+survivor names, not the survivor set, and the recomputation also reaches non-survivors (the
+window covers every name with an event, and a survivor is a subset), so only "every name the
+journal records as a vetoed survivor is one the window vetoes" is a claim the stored data can
+test; the other direction is not comparable and is not checked. A base (v1) journal has no
+`entry_veto` block at all, so its printed form gets one note under the header saying the book
+applies no veto and `vetoed` is only a reference annotation.
+
 ## B: the two factors, off the stored raw build
 
 `raw_cross_section` is `scripts/research/p7_reading.py::_FactorReads._read_year`'s rule for one
@@ -63,18 +73,21 @@ name in a cross section that is entirely tied sits at 0.5 -- the rank a display 
 Exit 1: no journal, an unfinished journal, an order/decision disagreement, the epoch or a
 settle-only day, no panel catalog, a restated session inside the veto window (or one whose
 partition/catalog cannot be read), a window that reaches the start of the panel's calendar, a
-panel whose calendar is missing or holds more than one exchange, and no raw B build for the
-session. Exit 2: usage, and a `--registration` override that is not the journal's registration.
+panel whose calendar is missing or holds more than one exchange, an unreadable `paper.entry_veto`
+block, and no raw B build for the session. Exit 2: usage, a `--registration` override that is not
+the journal's registration, and a v2 journal whose recorded vetoed list disagrees with the window
+the annotation recomputes.
 
 It writes nothing, creates nothing, sends no request and admits no registration -- a journal is
 read, never validated against the registration that wrote it. **The smoke banner fails on:** it
-is decided by the registration the journal records (resolved from the repository root) once its
-sha256 equals the journal's, so a smoke day is bracketed without any flag; when no registration
-can be resolved or verified the first and last lines say the smoke status is unknown.
-`--registration` is the override for the case the recorded name does not resolve (a pinned
-worktree's file), and it must be the same file the journal ran under. Every cell it prints is
-候选参考 / candidate reference: not the list, not the paper book, not the journal, and nothing
-here is evidence.
+is decided by the registration the journal records once its sha256 equals the journal's, so a
+smoke day is bracketed without any flag. A recorded bare file name is searched for under the
+repository's `docs/research/`; exactly one found file whose sha256 is the journal's verifies the
+registration, a found file whose sha256 is not the journal's keeps the banner on and says why, and
+zero or several matches (or no recorded sha256) leaves the smoke status unknown. `--registration`
+is the override for the case the recorded name does not resolve (a pinned worktree's file), and
+it must be the same file the journal ran under. Every cell it prints is 候选参考 / candidate
+reference: not the list, not the paper book, not the journal, and nothing here is evidence.
 """
 
 from __future__ import annotations
@@ -138,13 +151,26 @@ from openalpha_cn.strategy_survivor_morning import (  # noqa: E402
 )
 
 ANNOTATION_KIND: Final[str] = "survivor-annotation/v1"
-"""The `--json` document's schema: `session`, `config_id`, `rows`, `wording` (and `smoke`)."""
+"""The `--json` document's schema: `session`, `config_id`, `book_applies_entry_veto`, `rows`,
+`wording` (and `smoke`)."""
 
 HEADER: Final[str] = (
     "候选参考 / candidate reference only: not part of the list, the paper book or the journal; "
     "nothing was written and no request was sent"
 )
 """The first printed line: what this is, and what it did not touch (R-N2)."""
+
+BASE_BOOK_NO_VETO_NOTE: Final[str] = (
+    "该账簿不执行否决；vetoed 只是参考标注 / this book does not apply the veto; "  # noqa: RUF001
+    "'vetoed' is a reference note"
+)
+"""The one extra line a base (v1) journal prints directly under `HEADER` (`Minor 3`).
+
+A v1 book's `result.paper` block has no `entry_veto` key, so its `vetoed` cells are only the
+annotation's reference reading: the book it belongs to never applied the veto, and a user must not
+drop a name from the base list on the strength of it. A v2 journal files `paper.entry_veto` and
+prints no note; the fact is carried in the document as `book_applies_entry_veto`, so the printed
+form stays a pure function of the document."""
 
 ROLE_ORDER: Final[tuple[str, ...]] = ("ENTRY", "EXIT", "HOLD", "WATCH")
 """The plan's four roles, in the order the printed rows are grouped."""
@@ -161,6 +187,9 @@ _DAY_JOURNAL: Final[re.Pattern[str]] = re.compile(r"\d{4}-\d{2}-\d{2}\.json")
 REPOSITORY: Final[Path] = _SCRIPTS.parent
 """The checkout this script lives in: a journal records its registration's name relative to it."""
 
+_RESEARCH_DIRECTORY: Final[Path] = Path("docs") / "research"
+"""Where a committed registration lives relative to `REPOSITORY`: the search root for a name."""
+
 UNVERIFIED_SMOKE_BANNER: Final[str] = (
     "登记未核对，是否冒烟未知 / registration not verified; smoke status unknown"
 )
@@ -168,12 +197,41 @@ UNVERIFIED_SMOKE_BANNER: Final[str] = (
 
 The banner fails **on**, never off (`daily_selection.smoke_banner`'s house rule): a smoke day
 whose registration cannot be verified must not lose its banner just because the recorded name
-does not resolve from this runtime directory.
+does not resolve from this runtime directory. This exact string is kept for the zero-and-several
+matches case (and for an unreadable recorded path); a single found file whose sha256 is not the
+journal's uses `registration_sha256_mismatch_banner` so the reason is visible.
 """
+
+
+def registration_sha256_mismatch_banner(
+    *, found: Path, found_sha256: str, recorded_sha256: str
+) -> str:
+    """The unverified banner, plus why: the one found registration is not the journal's file.
+
+    A registration *was* found by the journal's recorded name, so "smoke status unknown" alone
+    would send the user looking for the wrong fault. The found path and both digests make the
+    mismatch the visible reason; the banner still fails on, because the smoke status is unknown.
+    """
+    return (
+        f"{UNVERIFIED_SMOKE_BANNER} -- {found} is the only registration named {found.name!r} "
+        f"under {_RESEARCH_DIRECTORY.as_posix()}, and its sha256 {found_sha256} is not the "
+        f"journal's recorded sha256 {recorded_sha256}"
+    )
 
 
 class AnnotationError(RuntimeError):
     """The annotation refuses, by name, and writes nothing."""
+
+
+class VetoDisagreement(AnnotationError):
+    """The journal's recorded vetoed list disagrees with the window the annotation recomputes.
+
+    This is the one refusal that exits 2: an ordinary annotation refusal means one input is
+    malformed and exits 1, while a disagreement means the journal and the panel are not the same
+    pairing (wrong panel clone, a restated window, a hand-edited journal), so the command says
+    "do not use this pairing" rather than "this input is malformed". The check itself is one-way
+    and is documented in `annotate`'s module docstring.
+    """
 
 
 class MissingFactorBuild(AnnotationError):
@@ -289,6 +347,15 @@ def annotate(
     and reduced by `veto_details` to the count, mean and answer per name. B: one raw cross
     section per factor, read once, and each name's value with its mid-rank percentile and the
     cross section's size. Every number is a copy of a stored one; nothing is recomputed here.
+
+    A v2 journal's `paper.entry_veto.vetoed` is the survivor intersection the evening filed; it
+    is cross-checked **one way** against the recomputed window: every name the journal records as
+    a vetoed survivor must be one `veto_details` vetoes, and a name that is not (or has no event
+    at all) is the difference a `VetoDisagreement` names (exit 2). The journal stores the vetoed
+    survivor names, not the survivor set, and the recomputation also reaches non-survivors by
+    construction, so the other direction is not a comparable claim and is not checked.
+    `book_applies_entry_veto` carries the book version the printed form needs: a v1 base journal
+    has no `entry_veto` block and says so under the header.
     """
     result = journal.get("result")
     if not isinstance(result, Mapping):
@@ -299,9 +366,13 @@ def annotate(
     config_id = _config_id_of(journal)
     session = _session_of(journal)
     plan = _plan_of(result)
-    decision_entries = _decision_names(result, "entries")
-    decision_exits = _decision_names(result, "exits")
+    paper = _paper_of(result)
+    decision_entries = _decision_names(paper, "entries")
+    decision_exits = _decision_names(paper, "exits")
+    veto_block = _entry_veto_block(paper)
     details = _veto_details(store, session=session, calendar=calendar, exchange=exchange)
+    if veto_block is not None:
+        _refuse_veto_disagreement(veto_block, details)
     cross_sections = {
         definition.key: raw_cross_section(store, definition, session=session)
         for definition in B_FACTORS
@@ -322,9 +393,76 @@ def annotate(
         "kind": ANNOTATION_KIND,
         "session": session.isoformat(),
         "config_id": config_id,
+        "book_applies_entry_veto": veto_block is not None,
         "rows": rows,
         "wording": wording,
     }
+
+
+def _paper_of(result: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The journal's `result.paper` block, refused by name when it is not there."""
+    paper = result.get("paper")
+    if not isinstance(paper, Mapping):
+        raise AnnotationError(
+            "the journal's result holds no paper block, so it has no decision to read entries "
+            "and exits from"
+        )
+    return paper
+
+
+def _entry_veto_block(paper: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The journal's `paper.entry_veto` block, validated; `None` for a v1 (base) book.
+
+    A v2 book files `{"rule": <rule id>, "vetoed": [<survivor ts_code>, ...]}` and a v1 book's
+    paper block has no such key at all. The block's shape is validated **before** the window is
+    read: an unreadable block is an ordinary journal fault (exit 1), and only a well-formed list
+    that disagrees with the window is the exit-2 `VetoDisagreement`.
+    """
+    if "entry_veto" not in paper:
+        return None
+    block = paper["entry_veto"]
+    if not isinstance(block, Mapping):
+        raise AnnotationError(
+            f"the journal's paper block carries an entry_veto that is not a mapping (got "
+            f"{block!r}): a v2 book files the rule and the vetoed names, and the annotation "
+            "reads neither past a block it cannot name"
+        )
+    rule = block.get("rule")
+    if not isinstance(rule, str):
+        raise AnnotationError(
+            f"the journal's entry_veto block names no rule string (got {rule!r}): the block is a "
+            "v2 book's record of the rule it applied, and the annotation cannot cross-check an "
+            "unnamed rule"
+        )
+    vetoed = block.get("vetoed")
+    if not isinstance(vetoed, list) or not all(isinstance(name, str) for name in vetoed):
+        raise AnnotationError(
+            f"the journal's entry_veto block holds no list of vetoed names (got {vetoed!r}): the "
+            "block records the vetoed survivors as a list of ts_codes"
+        )
+    return block
+
+
+def _refuse_veto_disagreement(block: Mapping[str, Any], details: Mapping[str, VetoDetail]) -> None:
+    """One-way cross-check: every name the journal records as a vetoed survivor must be vetoed.
+
+    The journal stores the vetoed survivor names, not the survivor set, so the annotation cannot
+    restrict the recomputation to survivors (the recomputed window also reaches non-survivors)
+    and does not compare that direction. What it can and does check is the direction the stored
+    data supports: a name in the journal's list that the window does not veto -- or holds no
+    event for -- is a disagreement, and its sorted names are listed by the refusal.
+    """
+    recomputed = {code for code, detail in details.items() if detail.vetoed}
+    difference = sorted(set(block["vetoed"]) - recomputed)
+    if not difference:
+        return
+    raise VetoDisagreement(
+        f"the journal's entry_veto rule {block['rule']} records {difference} as vetoed "
+        "survivor(s) the window this annotation recomputes does not veto (or holds no event "
+        "for). The journal and the panel disagree about the vetoed set, so the annotation "
+        "refuses rather than print a set the evening did not have; nothing was written and no "
+        "request was sent"
+    )
 
 
 def _veto_details(
@@ -382,14 +520,8 @@ def _plan_of(result: Mapping[str, Any]) -> PlanNames:
         raise AnnotationError(f"{label}: {error}") from error
 
 
-def _decision_names(result: Mapping[str, Any], key: str) -> tuple[str, ...]:
+def _decision_names(paper: Mapping[str, Any], key: str) -> tuple[str, ...]:
     """The decision's `entries`/`exits` codes, refused by name when the block is not that shape."""
-    paper = result.get("paper")
-    if not isinstance(paper, Mapping):
-        raise AnnotationError(
-            "the journal's result holds no paper block, so it has no decision to read entries "
-            "and exits from"
-        )
     decision = paper.get("decision")
     if not isinstance(decision, Mapping):
         raise AnnotationError("the journal's paper block holds no decision")
@@ -526,10 +658,14 @@ def _factor_cell(cross_section: Mapping[str, float], code: str) -> dict[str, Any
 def annotation_lines(document: Mapping[str, Any]) -> list[str]:
     """The printed annotation: the header, one line per row, the journal's wording as footer.
 
-    A smoke registration's banner brackets the whole thing, first and last, read off the
-    document's `smoke` key that `daily_selection.with_smoke` wrote there.
+    A base (v1) journal's document carries `book_applies_entry_veto: false`, and its printed form
+    gets exactly one note directly under the header -- out of the row format, so no row is
+    mistaken for it. A smoke registration's banner brackets the whole thing, first and last, read
+    off the document's `smoke` key that `daily_selection.with_smoke` wrote there.
     """
     lines = [HEADER]
+    if not document["book_applies_entry_veto"]:
+        lines.append(BASE_BOOK_NO_VETO_NOTE)
     for row in document["rows"]:
         lines.append(_row_line(row))
     lines.append(str(document["wording"]))
@@ -640,24 +776,36 @@ def _sha256(path: Path) -> str | None:
         return None
 
 
-def _recorded_registration(journal: Mapping[str, Any]) -> tuple[Path | None, str | None]:
-    """The registration path the journal records, resolved from the repository root, and its sha256.
+def _recorded_registration(journal: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """The registration path the journal records, verbatim, and the sha256 it records.
 
-    `daily_selection` records the registration's bare file name, so resolving it from a runtime
-    directory usually finds nothing; that is the case the caller reports as "not verified"
-    rather than silently deciding the run is not a smoke one. An absolute recorded path is used
-    as it is.
+    `daily_selection` records the registration's bare file name, so a relative recorded value is
+    a **name** to search for under the repository's `docs/research/`, not a path from the
+    repository root; an absolute recorded path is used as it is. Neither is resolved here --
+    `_smoke_banner` decides what a name or path means.
     """
     registration = journal.get("registration")
     if not isinstance(registration, Mapping):
         return None, None
     recorded = registration.get("path")
     digest = registration.get("sha256")
-    path = None
-    if isinstance(recorded, str) and recorded:
-        candidate = Path(recorded)
-        path = candidate if candidate.is_absolute() else REPOSITORY / candidate
-    return path, digest if isinstance(digest, str) and digest else None
+    return (
+        recorded if isinstance(recorded, str) and recorded else None,
+        digest if isinstance(digest, str) and digest else None,
+    )
+
+
+def _found_registrations(name: str) -> tuple[Path, ...]:
+    """Every regular file named `name` under the repository's `docs/research/`, recursively.
+
+    A registration is committed under `docs/research/`; the journal records only its file name, so
+    finding the one file the day ran under is a name lookup. Zero or several matches are both
+    "cannot tell which file this is", which the caller reports as the unverified banner.
+    """
+    root = REPOSITORY / _RESEARCH_DIRECTORY
+    if not root.is_dir():
+        return ()
+    return tuple(sorted(path for path in root.rglob("*") if path.is_file() and path.name == name))
 
 
 def _smoke_banner(
@@ -666,9 +814,13 @@ def _smoke_banner(
     """The banner the journal's registration says to print, verified against the journal's sha256.
 
     A **verified** registration decides: `SMOKE_BANNER` when its settings mark a smoke run, else
-    no banner. When it cannot be resolved or its sha256 does not equal the journal's, the answer
-    is `UNVERIFIED_SMOKE_BANNER` -- fail on -- unless `--registration` supplied the file, in
-    which case the override must match the journal exactly: a different file is a usage error
+    no banner. An absolute recorded path is used as it is; a relative recorded name is searched
+    for under the repository's `docs/research/`, and exactly one found file whose sha256 equals
+    the journal's verifies the registration. A found file whose sha256 differs keeps the banner
+    on -- fail on -- and says the mismatch in the banner (the found path and both digests), so the
+    reason is visible. Zero/several matches (or an unreadable recorded path) leave the smoke
+    status unknown with the unchanged `UNVERIFIED_SMOKE_BANNER`. `--registration` supplied the
+    file: the override must match the journal exactly, and a different file is a usage error
     (exit 2) rather than a banner over the wrong day.
     """
     recorded, digest = _recorded_registration(journal)
@@ -687,9 +839,24 @@ def _smoke_banner(
                 "tell which one this day ran under. Nothing was printed"
             )
         return daily_selection.smoke_banner(override)
-    if recorded is None or digest is None or _sha256(recorded) != digest:
+    if recorded is None or digest is None:
         return UNVERIFIED_SMOKE_BANNER
-    return daily_selection.smoke_banner(recorded)
+    recorded_path = Path(recorded)
+    if recorded_path.is_absolute():
+        if _sha256(recorded_path) != digest:
+            return UNVERIFIED_SMOKE_BANNER
+        return daily_selection.smoke_banner(recorded_path)
+    found = _found_registrations(recorded_path.name)
+    if len(found) != 1:
+        return UNVERIFIED_SMOKE_BANNER
+    found_sha256 = _sha256(found[0])
+    if found_sha256 is None:
+        return UNVERIFIED_SMOKE_BANNER
+    if found_sha256 != digest:
+        return registration_sha256_mismatch_banner(
+            found=found[0], found_sha256=found_sha256, recorded_sha256=digest
+        )
+    return daily_selection.smoke_banner(found[0])
 
 
 def _require_panel_catalog(panel_runtime_dir: Path) -> None:
@@ -803,6 +970,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print("\n".join(annotation_lines(document)))
         return int(daily_selection.DailyExit.done)
+    except VetoDisagreement as error:
+        # The one exit-2 refusal: the journal and the panel are not the same pairing (the module
+        # docstring's exit list keeps the code distinct from an ordinary malformed-input refusal).
+        print(f"survivor annotation: {error}", file=sys.stderr)
+        return 2
     except MissingFactorBuild as error:
         print(f"survivor annotation: {error}", file=sys.stderr)
         print(error.command, file=sys.stderr)
