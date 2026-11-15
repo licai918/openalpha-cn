@@ -80,8 +80,9 @@ def _rebuilt_parallel_body(
     assert "survivor_continuation" not in body["settings"], path
     committed = _git_bytes(root, "show", f"HEAD:{base}")
     assert block["sha256"] == hashlib.sha256(committed).hexdigest(), path
+    # The rule is read from the registration being checked, not hard-coded: a future R-N7 rule
+    # beside the same base must rebuild from the body it actually stores.
     rule = body["config"]["survivor_book"]["entry_veto"]
-    assert rule == VETO_RULE_ID, path
     book = p7_smoke_env.veto_book(rule, base_body["config"]["survivor_book"])
     epoch = date.fromisoformat(body["config"]["adapter"]["epoch_session"])
     return registration_body(epoch, book=book, parallel_of=block)
@@ -388,3 +389,73 @@ def test_the_real_c_registration_freezes_the_committed_protocol_document() -> No
     committed = _git_bytes(ROOT, "show", f"HEAD:{PROTOCOL_DOCUMENT}")
     assert block.sha256 == hashlib.sha256(committed).hexdigest()
     assert (ROOT / PROTOCOL_DOCUMENT).read_bytes() == committed
+
+
+def test_a_parallel_registration_whose_base_is_another_parallel_registration_is_refused(
+    tmp_path: Path,
+) -> None:
+    """R-N5's negative half: a parallel registration runs beside a **base** registration, never
+    beside another parallel book.
+
+    The writer-side refusal (a parallel body's base read back) is tested elsewhere; this pins the
+    chain-check helper's own assertion, which a committed chain will exercise: a root, then a
+    parallel registration P naming it, then a parallel registration Q naming P. Q is a
+    registration `committed_survivor_registrations` will list, and `_rebuilt_parallel_body` must
+    refuse it by name -- Q's base is itself a parallel registration, so there is no base book for
+    Q's body to have been rebuilt from.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "--template=", "-b", "main")
+    (repo / "README.md").write_text("a registration repository\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "initial")
+    root = "docs/research/survivor.json"
+    first_parallel = "docs/research/parallel-one.json"
+    second_parallel = "docs/research/parallel-two.json"
+    epoch = date(2026, 12, 18)
+
+    config, criteria, settings = registration_body(epoch)
+    root_path = repo / root
+    root_path.parent.mkdir(parents=True)
+    registry.register(
+        config,
+        criteria,
+        root_path,
+        code_commit=_git(repo, "rev-parse", "HEAD"),
+        settings=settings,
+    )
+    _git(repo, "add", "--", root)
+    _git(repo, "commit", "-q", "-m", "the base registration")
+
+    def commit_parallel(relative: str, base: str) -> None:
+        """A parallel registration at `relative`, its block naming the committed `base`."""
+        base_path = repo / base
+        base_body = json.loads(base_path.read_text(encoding="utf-8"))
+        block = {
+            "path": base,
+            "sha256": hashlib.sha256(base_path.read_bytes()).hexdigest(),
+        }
+        book = p7_smoke_env.veto_book(VETO_RULE_ID, base_body["config"]["survivor_book"])
+        parallel_config, parallel_criteria, parallel_settings = registration_body(
+            epoch, book=book, parallel_of=block
+        )
+        registry.register(
+            parallel_config,
+            parallel_criteria,
+            repo / relative,
+            code_commit=_git(repo, "rev-parse", "HEAD"),
+            settings=parallel_settings,
+        )
+        _git(repo, "add", "--", relative)
+        _git(repo, "commit", "-q", "-m", f"the parallel registration {relative}")
+
+    commit_parallel(first_parallel, root)
+    commit_parallel(second_parallel, first_parallel)
+
+    registrations = committed_survivor_registrations(repo)
+
+    assert set(registrations) == {root, first_parallel, second_parallel}
+    assert registrations[second_parallel]["settings"][_PARALLEL]["path"] == first_parallel
+    with pytest.raises(AssertionError, match="itself a parallel registration"):
+        _rebuilt_parallel_body(registrations, second_parallel, root=repo)

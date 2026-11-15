@@ -1174,13 +1174,19 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         ),
     ),
     "openalpha_cn.strategy_survivor_book": DatasetReach(
-        # V2-P7-008. It names no dataset: every one it reaches arrives through the two adapters
-        # it takes across the seam -- the facts day (`build_facts_day`: the calendar, the
-        # registry, the name corpus, the halts, the bands, the bars and, through the processed
-        # factor tier, the inputs of the four factors) and the session's market
-        # (`settlement_market`: the bars and bands again, the adjustment factors and the
-        # benchmark's close).
-        named=frozenset(),
+        # V2-P7-008. Every dataset it reaches arrives through the two adapters it takes across
+        # the seam -- the facts day (`build_facts_day`: the calendar, the registry, the name
+        # corpus, the halts, the bands, the bars and, through the processed factor tier, the
+        # inputs of the four factors) and the session's market (`settlement_market`: the bars
+        # and bands again, the adjustment factors and the benchmark's close).
+        #
+        # V2-P7-027 final fix: `_veto_calendar` asks the catalog whether the session's prior year
+        # is registered for `trade_cal` (`registered_years(TRADING_CALENDAR_DATASET)`) to tell
+        # "the panel does not store the year before" from "it does and the read fails". That is
+        # a catalog question, not a data read, so `trade_cal` is named (the module's source can
+        # say the name) and the reached set is unchanged -- the dataset was already reached
+        # through the facts day's calendar.
+        named=frozenset({"trade_cal"}),
         reached=frozenset(
             {
                 "adj_factor",

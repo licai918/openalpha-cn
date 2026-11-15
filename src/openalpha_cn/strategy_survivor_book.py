@@ -167,7 +167,7 @@ from openalpha_cn.backtest.paper_state import (
 from openalpha_cn.domain.factor_transform import FactorTransformSpec
 from openalpha_cn.domain.survivor_book import ScreenResult
 from openalpha_cn.domain.survivor_screen import screen as survivor_screen
-from openalpha_cn.domain.trading_calendar import TradingCalendar, TradingCalendarError
+from openalpha_cn.domain.trading_calendar import TRADING_CALENDAR_DATASET, TradingCalendar
 
 # `_try_lock` and `_unlock` are the panel catalog's two lock primitives, shared rather than
 # restated: an exclusive `flock(2)` (`msvcrt.locking` on Windows) through one open file
@@ -1373,21 +1373,27 @@ def _veto_calendar(
     session.year + 1)` and so cannot hold a January session's New Year predecessors; widening it
     would move `SessionOrdinals` and the base book, so only this read widens.
 
-    A year before the session's the panel does not store is not an error in itself: the evening's
-    calendar is used and `veto_sessions` refuses by name if the window still runs past its start
-    -- never a shorter window and never a different vetoed set.
+    The one fact that makes the evening's calendar the answer is that the panel **does not
+    register** the session's year before (`registered_years(TRADING_CALENDAR_DATASET)`): the
+    evening's calendar is used, and `veto_sessions` refuses by name if the window still runs past
+    its start -- never a shorter window and never a different vetoed set.
+
+    A prior year the panel **does** register is read, and a registered-but-unreadable year is a
+    fault: `load_trading_calendar`'s refusal (`TradingCalendarError`, or the panel's
+    `PanelStorageError`) propagates rather than being swallowed. Falling back there would count
+    the window on the narrower evening calendar -- a different vetoed set -- instead of refusing,
+    which is the one thing the correctness rule forbids.
     """
     if session.year == date.min.year:  # pragma: no cover - no calendar reaches that year
         return calendar
-    try:
-        return load_trading_calendar(
-            panel,
-            exchange=registration.adapter.exchange,
-            years=(session.year - 1, session.year),
-            as_of=session_publication_instant(session),
-        )
-    except (TradingCalendarError, PanelStorageError):
+    if session.year - 1 not in panel.registered_years(TRADING_CALENDAR_DATASET):
         return calendar
+    return load_trading_calendar(
+        panel,
+        exchange=registration.adapter.exchange,
+        years=(session.year - 1, session.year),
+        as_of=session_publication_instant(session),
+    )
 
 
 @contextmanager

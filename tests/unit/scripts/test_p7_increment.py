@@ -36,6 +36,7 @@ from strategy_fixtures import (
     daily_requirement,
 )
 
+from openalpha_cn import model_view
 from openalpha_cn.domain.daily_prices import DAILY_DATASET
 from openalpha_cn.domain.horizon import HorizonUnit, ResearchHorizon
 from openalpha_cn.domain.incremental_ic import (
@@ -901,3 +902,160 @@ def test_the_panel_sources_wire_the_composite_and_the_labels(
     assert first_calls == len(expected_labels)
     assert dict(sources.labels(session)) == expected_labels
     assert reader.calls == first_calls
+
+
+# --- the shared label path across a year's sessions (fix round 2) ---------------------------------
+
+
+def test_the_panel_sources_share_one_label_reader_across_two_sessions_of_a_year(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_open_sources`' label path is shared across the sampled sessions of one **year**, not
+    just across the factors of one session.
+
+    Two December 2026 sessions (`readers` is keyed by `day.year`, so both ask the one reader built
+    for 2026) each have a matured h20 label at the panel's `as_of` and a composite build, and the
+    two h20 windows overlap, so the reader's per-session caches have something to reuse. Pinned:
+    the reader is constructed once; the second session's first ask costs only its own names, not
+    the first's again; a repeated ask reads nothing; and no calendar day's bars are read twice
+    across the two sessions (`load_daily_bars` counted through `model_view`, whose
+    `_LabelInputs.bars_on` is the only consumer here). Finally the readings computed over the
+    shared callable equal the readings a **non-sharing** callable -- a fresh reader per session --
+    produces: sharing changes how often the panel is read, never the answer.
+    """
+    panel = _two_year_panel()
+    store = PanelStore(tmp_path / "panel")
+    _write_by_year(store, panel)
+    for _year, part in split_panel_batch_by_year(panel.batch(NAMECHANGE_DATASET)):
+        write_name_history(store, part)
+    first_session = date(2026, 12, 1)
+    second_session = date(2026, 12, 15)
+    assert first_session.year == second_session.year == 2026
+    for session in (first_session, second_session):
+        _write_composite_builds(store, panel, session)
+    # Both B factors' raw builds on both sessions, so `sources.extras` has something to read and
+    # `increment_readings` measures a real partial IC rather than naming a missing build.
+    limit_values = {code: float(index + 1) for index, code in enumerate(panel.securities)}
+    write_factor_panels(
+        store,
+        [
+            _limit_build(store, panel, definition, session, limit_values)
+            for definition in p7_increment.FACTORS
+            for session in (first_session, second_session)
+        ],
+    )
+    monkeypatch.setattr(p7_increment, "EXCHANGE", "SZSE")
+    monkeypatch.setattr(
+        p7_increment, "FACTOR_TRANSFORMS", _Transforms(p7_increment.FACTOR_TRANSFORMS)
+    )
+    monkeypatch.setattr(p7_increment, "label_years", lambda year, *, ceiling_year: (2026, 2027))
+    window = p7_windows.DiagnosticWindow(
+        name="fixture", first=date(2027, 1, 4), last=TWO_YEAR_LAST, ceiling_year=2027
+    )
+    settings = p7_increment.ExploreSettings(
+        as_of=panel.as_of,
+        first=date(2027, 1, 4),
+        last=TWO_YEAR_LAST,
+        book=FRAME_BOOK,
+        transform=IDENTITY.qualified_key,
+    )
+    original = p7_increment.panel_label_source
+    made: list[_CountingLabels] = []
+
+    def counting_panel_label_source(*args: Any, **kwargs: Any) -> _CountingLabels:
+        reader = _CountingLabels(original(*args, **kwargs))
+        made.append(reader)
+        return reader
+
+    monkeypatch.setattr(p7_increment, "panel_label_source", counting_panel_label_source)
+    bar_days: list[date] = []
+    original_load_daily_bars = model_view.load_daily_bars
+
+    def counting_load_daily_bars(*args: Any, **kwargs: Any) -> Any:
+        bar_days.append(kwargs["day"])
+        return original_load_daily_bars(*args, **kwargs)
+
+    monkeypatch.setattr(model_view, "load_daily_bars", counting_load_daily_bars)
+
+    sources = p7_increment._open_sources(tmp_path, window=window, settings=settings)
+
+    first_labels = dict(sources.labels(first_session))
+    (reader,) = made
+    first_calls = reader.calls
+    second_labels = dict(sources.labels(second_session))
+    assert first_labels, "the first session has no matured h20 label, so this test proves nothing"
+    assert second_labels, "the second session has no matured h20 label, so this test proves nothing"
+    first_asks = len(dict(sources.composite(first_session)))
+    second_asks = len(dict(sources.composite(second_session)))
+    assert first_calls == first_asks
+    # The second ask is the second session's own names only -- the first session's names are not
+    # asked about again -- so the increment is exactly the first session's count.
+    assert reader.calls - first_calls == second_asks
+    assert len(made) == 1
+    assert len(bar_days) == len(set(bar_days)), (
+        "a calendar day's bars were read twice across the two sessions despite "
+        f"cached_sessions=HORIZON+2: {sorted(bar_days)}"
+    )
+    assert bar_days, "no bars were read at all, so the once-only check proves nothing"
+    # A repeated ask reads neither a label nor a bar again.
+    bar_count = len(bar_days)
+    assert dict(sources.labels(first_session)) == first_labels
+    assert dict(sources.labels(second_session)) == second_labels
+    assert reader.calls == first_asks + second_asks
+    assert len(bar_days) == bar_count
+
+    def sharing_years_reader() -> Any:
+        return original(
+            sources.store,
+            years=(2026, 2027),
+            exchange="SZSE",
+            as_of=settings.as_of,
+            cached_sessions=p7_increment.HORIZON + 2,
+        )
+
+    def labels_from(reader: Any, session: date) -> dict[str, float]:
+        label_window = reader.window(
+            session_publication_instant(session),
+            horizon=ResearchHorizon(count=p7_increment.HORIZON, unit=HorizonUnit.trading_days),
+        )
+        found: dict[str, float] = {}
+        for code in sorted(sources.composite(session)):
+            label = reader.label(code, label_window)
+            if label is None or not label.is_labelled:
+                continue
+            realized = label.realized_return
+            if realized is not None:
+                found[code] = realized
+        return found
+
+    def non_sharing_labels(session: date) -> Mapping[str, float]:
+        """A fresh reader per session: the path without the year's shared reader or caches."""
+        return labels_from(sharing_years_reader(), session)
+
+    sessions = (first_session, second_session)
+    per_session = {session: non_sharing_labels(session) for session in sessions}
+    assert all(per_session.values()), "a session's independently read labels came back empty"
+    assert per_session[first_session] == first_labels
+    assert per_session[second_session] == second_labels
+
+    for definition in p7_increment.FACTORS:
+        shared = p7_increment.increment_readings(
+            sessions=sessions,
+            composite=sources.composite,
+            extra=sources.extras[definition.qualified_key],
+            labels=sources.labels,
+        )
+        separate = p7_increment.increment_readings(
+            sessions=sessions,
+            composite=sources.composite,
+            extra=sources.extras[definition.qualified_key],
+            labels=lambda session: per_session[session],
+        )
+        assert shared == separate
+        # The labels reached the arithmetic on both sessions -- the shared callable's answer is
+        # what was scored -- even though the fixture's composite ranks are tied, so the statistic
+        # itself is undefined (`constant_factor_rank`) rather than a number.
+        assert [item.n_scored for item in shared] == [
+            len(per_session[session]) for session in sessions
+        ]
+        assert all(item.gaps == 0 for item in shared)

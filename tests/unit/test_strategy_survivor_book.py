@@ -99,6 +99,7 @@ from openalpha_cn.domain.trading_calendar import (
     TRADING_CALENDAR_DATASET,
     CalendarDay,
     TradingCalendar,
+    TradingCalendarError,
     build_trading_calendar,
 )
 from openalpha_cn.panel.store import PanelStorageError, PanelStore
@@ -2464,3 +2465,27 @@ def test_a_v2_evenings_window_reaching_a_year_the_panel_does_not_hold_refuses_by
     assert refused.value.step == "paper book"
     assert f"5-session window ending {VETO_ACROSS_NEW_YEAR.isoformat()}" in message
     assert "start of the calendar" in message
+
+
+def test_a_damaged_prior_year_calendar_partition_refuses_instead_of_falling_back(
+    tmp_path: Path,
+) -> None:
+    """A prior year the panel **registers** but cannot read is a fault, not the "the panel does
+    not store the year before" fact `_veto_calendar` falls back on.
+
+    The 2025 `trade_cal` partition is registered in this fixture's catalogue and then overwritten
+    with bytes that are not Parquet. The old broad `except (TradingCalendarError,
+    PanelStorageError)` returned the caller's 2026-only `CALENDAR` here, and the evening then
+    refused with `CalendarHorizonError` -- the window's walk past the narrower calendar's start --
+    which says nothing about the damage and would have counted a different window had the walk
+    fit. The calendar read's own refusal must propagate instead: the registration fact is what
+    separates "not stored" from "stored and unreadable".
+    """
+    store = two_year_panel(tmp_path)
+    partition = store.root / TRADING_CALENDAR_DATASET / "2025" / "data.parquet"
+    assert partition.is_file(), "the fixture does not write the 2025 calendar partition"
+    assert 2025 in store.registered_years(TRADING_CALENDAR_DATASET)
+    partition.write_bytes(b"not a parquet file")
+
+    with pytest.raises(TradingCalendarError):
+        _vetoed_for(store, V2_REGISTRATION, session=VETO_ACROSS_NEW_YEAR, calendar=CALENDAR)
