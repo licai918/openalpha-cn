@@ -860,10 +860,7 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync \
 
 **B 的构建。** 命令读的是面板里该交易日的 **raw 构建**：取该交易日 16:30 之后最早的那一次 build，只收 `TIER_ADMITTED_CODES["raw"]` 的有限值；一次构建是那一日的，晚一天的构建不能替代。面板里没有这样一次构建时，命令退出 1，并把要跑的那一行原样打印出来：
 
-```bash
-openalpha factor build --factor limit_up_count_20/v1 --tier raw --year <年> \
-  --as-of <交易日>T16:30:00+08:00 --max-staleness-days <days>
-```
+打印出来的那一行形如 `openalpha factor build --factor limit_up_count_20/v1 --tier raw --year <年> --as-of <交易日>T16:30:00+08:00 --max-staleness-days <days>`，三个尖括号处由命令填好（该交易日的年份、该交易日上海 16:30 的发布时刻、账簿登记的天数），照抄它打印的那一行即可。
 
 （`broken_board_count_20/v1` 是同样的另一行。）先在**面板克隆**上建好这些 raw 构建，再跑附注；构建改的是克隆，不是主运行目录的面板。
 
