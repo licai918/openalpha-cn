@@ -6138,6 +6138,61 @@ def _refuse_morning_options(options: DailyOptions) -> None:
             )
 
 
+def _morning_window_start(as_of: datetime) -> datetime:
+    """When the base book's morning window opens on the Shanghai date `as_of` falls on: its
+    printed job's hour and minute (`MORNING_PLIST_HOUR`/`MORNING_PLIST_MINUTE`), in Shanghai.
+
+    The launchd hour is the machine's local time, and the runbook states the assumption that the
+    machine reads Beijing time; a machine in another zone fails closed at the command's own 09:15
+    Shanghai cutoff rather than re-checking after the auction, so this window is stated in
+    Shanghai like every other instant the book reasons about.
+    """
+    day = as_of.astimezone(SHANGHAI).date()
+    return datetime(
+        day.year,
+        day.month,
+        day.day,
+        MORNING_PLIST_HOUR,
+        MORNING_PLIST_MINUTE,
+        tzinfo=SHANGHAI,
+    )
+
+
+def _refuse_unfetched_names(
+    store: PanelStore, *, session: date, as_of: datetime, read: PanelRead
+) -> None:
+    """Step 3 for a read-only morning re-check (R-S4, `V2-P7-027`): it fetches nothing, so the
+    name corpus must already carry the base book's morning fetch for today.
+
+    The exact field: the stored `namechange` partition's **coverage `fetched_at`** -- the instant
+    the partition's own `panel build` was pinned at (`panel_ingest.panel_coverage` copies
+    `batch.fetched_at`, which `cli` sets to the build's resolved `--as-of`, and coverage is
+    re-recorded even when the partition write is a no-op). The base book's morning build is
+    pinned at its run clock, so a `fetched_at` at or after `_morning_window_start(as_of)` is
+    today's morning fetch; anything earlier is the previous evening's fetch, and the base book's
+    morning recheck has not run. Refused by name, exit 1, naming the base runtime directory;
+    nothing is fetched or written.
+    """
+    coverage = store.read_coverage(NAMECHANGE_DATASET, session.year)
+    window = _morning_window_start(as_of)
+    if coverage is None:
+        detail = f"the stored {NAMECHANGE_DATASET} partition for {session.year} is missing"
+    elif coverage.fetched_at < window:
+        detail = (
+            f"the stored {NAMECHANGE_DATASET} partition for {session.year} was fetched at "
+            f"{coverage.fetched_at.isoformat()}, before today's morning window opens at "
+            f"{window.isoformat()}"
+        )
+    else:
+        return
+    raise _morning_refusal(
+        "panel update",
+        f"{detail}: the base book's morning recheck has not run for this session, and a "
+        "parallel book never fetches a panel. The base runtime directory it reads is "
+        f"{read.runtime_dir}. Nothing was fetched or written",
+    )
+
+
 def run_morning_recheck(
     options: DailyOptions, *, clock: Callable[[], datetime] = _utc_now
 ) -> MorningRecheck:
@@ -6340,7 +6395,18 @@ def _run_morning_recheck(
 
     Writes one morning file and the `namechange` partition, nothing else: the prediction store,
     the ledger, the snapshots, the evening's journal and the provenance files are not touched
-    (advice only: the book follows the evening's plan)."""
+    (advice only: the book follows the evening's plan).
+
+    **The parallel book (`V2-P7-027`, R-S4).** A registration carrying
+    `settings.survivor_parallel_of` runs read-only: it reads the base book's `panel/` from
+    `--panel-runtime-dir` (required; a base registration refuses it), and step 3 fetches nothing.
+    In place of the fetch, `_refuse_unfetched_names` requires the stored `namechange` partition's
+    coverage `fetched_at` to be at or after today's morning window (`_morning_window_start`) --
+    the base book's morning recheck for this evening -- and otherwise refuses by name, exit 1,
+    naming the base runtime directory. Its morning file records `panel_mode: "read_only"` and the
+    panel directory it read; a base book's file and printed bytes are unchanged (R-N4). Its job
+    fires 15 minutes after the base book's (`LAUNCHD_PARALLEL_MORNING_LAG_MINUTES`), so this
+    check runs after the fetch it depends on and before the 09:15 auction."""
     runtime_dir = options.runtime_dir
     with _step("registration", steps=MORNING_STEPS):
         registration = admit_registration(options.registration, options.repo)
@@ -6354,6 +6420,10 @@ def _run_morning_recheck(
                 exit_code=DailyExit.no_registration,
             )
         _refuse_morning_options(options)
+        # Where this run reads its panel: its own --runtime-dir for the base book, or -- for a
+        # parallel registration -- the base book's --panel-runtime-dir, read-only (R-S1/R-S2).
+        # (`source`, not `read`: the facts reader below is named `read`.)
+        source = panel_read(options, registration)
         # Imported here, never for a P6 day: they load `backtest/paper.py` and its audit hook.
         from openalpha_cn import strategy_survivor_book as paper_book
         from openalpha_cn import strategy_survivor_morning as morning
@@ -6362,7 +6432,7 @@ def _run_morning_recheck(
 
     adapter = survivor.adapter
     with _step("preconditions", steps=MORNING_STEPS):
-        store = panel_store(runtime_dir)
+        store = panel_store(source.runtime_dir)
         first_as_of = options.as_of or clock()
         session = _stored_session(store, adapter.exchange, first_as_of)
         if session is None:
@@ -6425,6 +6495,12 @@ def _run_morning_recheck(
                 )
             if pin is not None and morning.morning_complete(pin):
                 return MorningRecheck(document=pin, requests={}, wrote=False)
+            if source.read_only:
+                # R-S4: no fetch. The name corpus must already carry the base book's morning
+                # fetch for today; checked before the pin is written, so the refusal leaves
+                # nothing in the parallel runtime directory.
+                with _step("panel update", steps=MORNING_STEPS):
+                    _refuse_unfetched_names(store, session=session, as_of=as_of, read=source)
             held = tuple(journal["held"])
             transform = FACTOR_TRANSFORMS.get(adapter.transform)
 
@@ -6481,11 +6557,18 @@ def _run_morning_recheck(
                     "registration": journal["registration"],
                     "evening_read": evening_read.to_json(),
                     "carried_from": carried_from,
+                    **source.journal_keys,
                 }
                 write_journal(path, pin)
         if "requests" not in pin:
             with _step("panel update", steps=MORNING_STEPS), counted_transport(counts):
-                _fetch_names(runtime_dir, session=session, as_of=as_of, exchange=adapter.exchange)
+                if not source.read_only:
+                    # R-S4: only the base book's morning fetches. A parallel book's readiness
+                    # check above proved the base book's morning already did, and its pin records
+                    # the empty request count so a rerun resumes past it.
+                    _fetch_names(
+                        runtime_dir, session=session, as_of=as_of, exchange=adapter.exchange
+                    )
                 pin = {**pin, "requests": dict(sorted(counts.items()))}
                 write_journal(path, pin)
         with _step("facts", steps=MORNING_STEPS):
@@ -6897,6 +6980,11 @@ LAUNCHD_PARALLEL_LAG_MINUTES: Final[int] = 60
 """The parallel book's evening job fires this long after the base book's (`V2-P7-027`): the two
 books share one `TUSHARE_TOKEN`, and a parallel panel update at 18:30 would ask at the same moment
 as the base book's. It is a printed schedule only -- nothing here installs a job."""
+LAUNCHD_PARALLEL_MORNING_LAG_MINUTES: Final[int] = 15
+"""The parallel book's morning re-check fires this long after the base book's (`V2-P7-027`,
+R-S4): the evening's 60-minute lag would reach 09:30, past the 09:15 call auction, while the
+parallel morning needs only for the base morning's one `namechange` fetch to have landed
+(08:30 -> 08:45). A printed schedule only."""
 
 
 def _parallel_config_id(registration: Path) -> str | None:
@@ -6966,6 +7054,17 @@ def _evening_schedule(parallel_config_id: str | None) -> tuple[int, int]:
     minutes = BASE_EVENING_HOUR * 60 + BASE_EVENING_MINUTE
     if parallel_config_id is not None:
         minutes += LAUNCHD_PARALLEL_LAG_MINUTES
+    hour, minute = divmod(minutes, 60)
+    return hour, minute
+
+
+def _morning_schedule(parallel_config_id: str | None) -> tuple[int, int]:
+    """The morning job's `(hour, minute)`: the base book's 08:30, or 15 minutes later for a
+    parallel book -- after the base morning's `namechange` fetch it reads and still before the
+    09:15 call auction it advises (`LAUNCHD_PARALLEL_MORNING_LAG_MINUTES`, R-S4)."""
+    minutes = MORNING_PLIST_HOUR * 60 + MORNING_PLIST_MINUTE
+    if parallel_config_id is not None:
+        minutes += LAUNCHD_PARALLEL_MORNING_LAG_MINUTES
     hour, minute = divmod(minutes, 60)
     return hour, minute
 
@@ -7069,12 +7168,49 @@ def _launchd_job(
     return plistlib.dumps(job, sort_keys=False).decode("utf-8")
 
 
+def _printer_panel(
+    config_id: str | None, panel_runtime_dir: Path | None, *, runtime_dir: Path
+) -> Path | None:
+    """The panel directory a printed job names for a parallel book, or `None` for a base job.
+
+    A parallel book's job must carry `--panel-runtime-dir` (`V2-P7-027`, R-S2): the day refuses
+    to run without it, so a job printed without one would fail every night. A base book's job
+    must not carry it -- the day refuses it -- so both cases are refused here, by name, and
+    nothing is printed. The two directories must differ, as the day requires.
+    """
+    if config_id is not None:
+        if panel_runtime_dir is None:
+            raise ValueError(
+                "this registration is a parallel book (settings."
+                f"{SURVIVOR_PARALLEL_OF_KEY}), whose job reads the base book's panel: name it "
+                "with --panel-runtime-dir, the base book's runtime directory, or the printed job "
+                "would refuse every night. Nothing was printed"
+            )
+        if panel_runtime_dir.resolve() == runtime_dir.resolve():
+            raise ValueError(
+                f"--panel-runtime-dir {panel_runtime_dir} is this book's own --runtime-dir: a "
+                "parallel book reads the base book's panel from another runtime directory, and "
+                "the day refuses the same two being one. Nothing was printed"
+            )
+        return panel_runtime_dir
+    if panel_runtime_dir is not None:
+        raise ValueError(
+            f"--panel-runtime-dir {panel_runtime_dir} is the parallel book's option: this "
+            "registration carries no "
+            f"settings.{SURVIVOR_PARALLEL_OF_KEY}, so it is the base book, whose job reads its "
+            "own --runtime-dir's panel and whose printed bytes must not move (R-N4). Nothing was "
+            "printed"
+        )
+    return None
+
+
 def launchd_plist(
     *,
     worktree: Path,
     runtime_dir: Path,
     log_dir: Path,
     registration: Path,
+    panel_runtime_dir: Path | None = None,
     env_file: str = ENV_FILE,
     uv: Path,
 ) -> str:
@@ -7085,15 +7221,19 @@ def launchd_plist(
     so it fires every weekday and the command decides: on a holiday the newest closed session is
     one whose journal is already complete, which prints the summary again with no request and no
     write. The registration file is read for the book's identity: a parallel book gets the
-    suffixed label, the suffixed log files and a job 60 minutes after the base book's
-    (`V2-P7-027`); a file that cannot be read is refused, not printed with the base label."""
+    suffixed label, the suffixed log files, a job 60 minutes after the base book's
+    (`V2-P7-027`) and `--panel-runtime-dir` with the base book's runtime directory, which it
+    requires (`panel_runtime_dir`, R-S2); a file that cannot be read is refused, not printed with
+    the base label, and a base book's job is byte-identical to what it was (R-N4)."""
     config_id = _parallel_config_id(registration)
+    panel = _printer_panel(config_id, panel_runtime_dir, runtime_dir=runtime_dir)
     hour, minute = _evening_schedule(config_id)
+    tail: tuple[str, ...] = () if panel is None else ("--panel-runtime-dir", str(panel))
     return _launchd_job(
         label=_launchd_label(LAUNCHD_LABEL, config_id),
         hour=hour,
         minute=minute,
-        tail=(),
+        tail=tail,
         log_stem=_launchd_log_stem("daily-selection", config_id),
         when=f"{hour:02d}:{minute:02d}",
         worktree=worktree,
@@ -7111,6 +7251,7 @@ def launchd_morning_plist(
     runtime_dir: Path,
     log_dir: Path,
     registration: Path,
+    panel_runtime_dir: Path | None = None,
     env_file: str = ENV_FILE,
     uv: Path,
 ) -> str:
@@ -7122,15 +7263,23 @@ def launchd_morning_plist(
     The command itself refuses after `registration_cutoff`, so a machine in another time zone
     fails closed rather than re-checking after the auction. The registration is the caller's,
     resolved and proved inside `worktree` (`launchd_registration`). A parallel book's job keeps
-    its own label and log files (`V2-P7-027`). Printed, never installed."""
+    its own label and log files and fires 15 minutes after the base book's (`V2-P7-027`, R-S4):
+    after the base morning's fetch it reads and before the auction; it also carries
+    `--panel-runtime-dir` (required, `panel_runtime_dir`). A base book's job is byte-identical to
+    what it was (R-N4). Printed, never installed."""
     config_id = _parallel_config_id(registration)
+    panel = _printer_panel(config_id, panel_runtime_dir, runtime_dir=runtime_dir)
+    hour, minute = _morning_schedule(config_id)
+    tail: tuple[str, ...] = ("--morning-recheck",)
+    if panel is not None:
+        tail += ("--panel-runtime-dir", str(panel))
     return _launchd_job(
         label=_launchd_label(LAUNCHD_MORNING_LABEL, config_id),
-        hour=MORNING_PLIST_HOUR,
-        minute=MORNING_PLIST_MINUTE,
-        tail=("--morning-recheck",),
+        hour=hour,
+        minute=minute,
+        tail=tail,
         log_stem=_launchd_log_stem("daily-selection.morning", config_id),
-        when="08:30",
+        when=f"{hour:02d}:{minute:02d}",
         worktree=worktree,
         runtime_dir=runtime_dir,
         log_dir=log_dir,
@@ -7424,6 +7573,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
             (arguments.launchd_morning_plist, "--launchd-morning-plist"),
             (arguments.account_record, "--account-record"),
             (arguments.worktree, "--worktree"),
+            (arguments.panel_runtime_dir, "--panel-runtime-dir"),
         ):
             if given:
                 parser.error(f"--show-book cannot be combined with {flag}")
@@ -7529,6 +7679,11 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
                 runtime_dir=arguments.runtime_dir.resolve(),
                 log_dir=log_dir.resolve(),
                 registration=launchd_registration(arguments.worktree, registration),
+                panel_runtime_dir=(
+                    None
+                    if arguments.panel_runtime_dir is None
+                    else arguments.panel_runtime_dir.resolve()
+                ),
                 env_file=arguments.env_file,
                 uv=uv,
             )

@@ -8,8 +8,9 @@ clones it. Read-only is a property of the registration, not a flag (R-S1): a bas
 refuses the option so its command line, journal bytes and plist stay exactly what they were
 (R-N4), and a parallel registration always runs read-only. The evening replaces step 2's fetch
 and step 4's factor builds with a readiness check against the stored panel at the pinned
-`as_of` (R-S3). A refusal says the base book's evening has not completed and names the base
-runtime directory.
+`as_of` (R-S3), and the morning re-check replaces its one `namechange` fetch with a check that
+the base book's morning has already stored today's corpus (R-S4). Both refusals say the base
+book's evening/morning has not completed and name the base runtime directory.
 
 The panels here are generated: `test_daily_selection_survivor_day.py`'s scripted 120-security
 market and its seeded panel, which the base-book fixtures extend through 6 April exactly as a
@@ -28,6 +29,7 @@ import contextlib
 import hashlib
 import io
 import json
+import plistlib
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -55,6 +57,10 @@ DAY_AS_OF: Final[datetime] = sd.DAY_AS_OF
 """The base book's evening and the parallel book's pinned clock for `DAY`: 18:30 Shanghai."""
 RUN_CLOCK: Final[datetime] = sd.RUN_CLOCK
 """The command's own clock on the evening: five minutes after the pinned one."""
+MORNING_AS_OF: Final[datetime] = datetime(2026, 4, 7, 8, 30, tzinfo=daily.SHANGHAI)
+"""The base book's morning re-check clock for `DAY`'s evening: 08:30 Shanghai, its window start."""
+PARALLEL_MORNING: Final[datetime] = datetime(2026, 4, 7, 8, 45, tzinfo=daily.SHANGHAI)
+"""The parallel book's morning clock: 15 minutes after the base book's (R-S4's lag)."""
 PARALLEL_SETTINGS: Final[dict[str, object]] = {
     **tds.grid.protocol_settings(),
     daily.SURVIVOR_PARALLEL_OF_KEY: {
@@ -147,6 +153,15 @@ def _day_arguments(
     if panel_runtime_dir is not None:
         arguments += ["--panel-runtime-dir", str(panel_runtime_dir)]
     return arguments
+
+
+def _morning_arguments(
+    world: tds.World, *, panel_runtime_dir: Path | None, as_of: datetime
+) -> list[str]:
+    return [
+        *_day_arguments(world, panel_runtime_dir=panel_runtime_dir, as_of=as_of),
+        "--morning-recheck",
+    ]
 
 
 def _config_id(world: tds.World) -> str:
@@ -262,6 +277,15 @@ def parallel_evening(tmp_path_factory: pytest.TempPathFactory, base_panel: Path)
         base_after=after,
         calls=tripwire.calls,
     )
+
+
+@pytest.fixture(scope="module")
+def base_morning(base_panel: Path) -> Path:
+    """The base book's morning re-check for `DAY`'s evening: its one `namechange` fetch, at
+    08:30 Shanghai, stored in the base panel."""
+    market = sd.SurvivorMarket(open_days=tds.OPEN_2026)
+    _panel_build(base_panel, market, as_of=MORNING_AS_OF, datasets=("namechange",))
+    return base_panel
 
 
 # --- R-S2: the option is the parallel book's, and required --------------------------------------
@@ -391,6 +415,25 @@ def test_there_is_no_read_only_switch() -> None:
     assert refused.value.code == 2
 
 
+def test_show_book_neither_needs_nor_accepts_the_panel_option() -> None:
+    """R-S2 names `--show-book` only where it reads the panel; it reads the paper book's own
+    state and opens no panel, so the option is refused (exit 2) rather than silently ignored."""
+    with pytest.raises(SystemExit) as refused:
+        daily.main(
+            [
+                "--runtime-dir",
+                "/nonexistent/runtime",
+                "--registration",
+                str(daily.DEFAULT_REGISTRATION),
+                "--show-book",
+                "--panel-runtime-dir",
+                "/nonexistent/base",
+            ]
+        )
+
+    assert refused.value.code == 2
+
+
 # --- R-S3/R-S5: the read-only evening ----------------------------------------------------------
 
 
@@ -486,3 +529,203 @@ def test_a_parallel_evening_refuses_a_base_panel_missing_a_factor_instant(
     assert str(panel) in err
     assert tripwire.calls == []
     assert not world.runtime.exists()
+
+
+# --- R-S4/R-S5: the read-only morning ----------------------------------------------------------
+
+
+def test_a_parallel_morning_refuses_until_the_base_morning_has_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parallel_evening: ParallelEvening
+) -> None:
+    """R-S4: the parallel morning fetches nothing; without the base book's morning fetch of
+    today's name corpus it refuses by name, exit 1, naming the base runtime directory, before it
+    writes its own morning file."""
+    world = parallel_evening.world
+    tripwire = Tripwire()
+    _bind(monkeypatch, world.repo, world.market, tripwire)
+    before = _tree(world.runtime)
+
+    code, _out, err = _invoke(
+        _morning_arguments(
+            world, panel_runtime_dir=parallel_evening.base_runtime, as_of=PARALLEL_MORNING
+        ),
+        clock=PARALLEL_MORNING,
+    )
+
+    assert code == int(daily.DailyExit.step_failed) == 1
+    assert "the base book's morning recheck has not run" in err
+    assert str(parallel_evening.base_runtime) in err
+    assert tripwire.calls == []
+    assert _tree(world.runtime) == before
+
+
+def test_a_parallel_morning_reads_the_base_name_corpus_and_fetches_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parallel_evening: ParallelEvening,
+    base_morning: Path,
+) -> None:
+    """R-S4/R-S5: once the base book's morning has stored today's name corpus, the parallel
+    morning runs on it with zero requests, writes its own morning file in its own runtime
+    directory, leaves the base panel unchanged, and that file records the mode and the panel
+    directory it read."""
+    world = parallel_evening.world
+    tripwire = Tripwire()
+    _bind(monkeypatch, world.repo, world.market, tripwire)
+    base_before = _tree(base_morning)
+
+    code, out, err = _invoke(
+        _morning_arguments(world, panel_runtime_dir=base_morning, as_of=PARALLEL_MORNING),
+        clock=PARALLEL_MORNING,
+    )
+
+    assert code == 0, err
+    document = json.loads(out)
+    # The morning's printed document is its file, whose pinned `requests` is the fetch it made
+    # (none): `--json` does not add the evening's `this_run` block.
+    assert document["requests"] == {}
+    assert document["panel_mode"] == daily.PANEL_MODE_READ_ONLY
+    assert document["panel_runtime_dir"] == str(base_morning)
+    assert tripwire.calls == []
+    assert _tree(base_morning) == base_before
+    filed = json.loads(
+        (
+            world.runtime
+            / "daily_survivor"
+            / _config_id(world)[:16]
+            / f"{DAY.isoformat()}.morning.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert filed["panel_mode"] == daily.PANEL_MODE_READ_ONLY
+    assert filed["panel_runtime_dir"] == str(base_morning)
+    assert filed["requests"] == {}
+
+
+# --- R-S2/R-S4: the printed launchd jobs --------------------------------------------------------
+
+
+def _printable_worktree(tmp_path: Path, settings: Mapping[str, Any]) -> Path:
+    """A pinned worktree holding a readable registration with `settings`, as the printer reads
+    it for the book's identity."""
+    worktree = tmp_path / "pinned"
+    registration = worktree / "docs" / "research" / "p7-registration.json"
+    registration.parent.mkdir(parents=True, exist_ok=True)
+    registration.write_text(
+        json.dumps(
+            {
+                "config": {"survivor_book": {"entry_veto": "market_bearish_5/v1"}},
+                "config_id": "0123456789abcdef" + "9" * 48,
+                "settings": settings,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return worktree
+
+
+def _printed_job(
+    tmp_path: Path, worktree: Path, *, morning: bool, panel_runtime_dir: Path | None
+) -> dict[str, Any]:
+    """The job `daily.main` prints for the worktree's registration."""
+    flag = "--launchd-morning-plist" if morning else "--launchd-plist"
+    arguments = [
+        "--runtime-dir",
+        str(tmp_path / "runtime"),
+        "--worktree",
+        str(worktree),
+        "--uv",
+        str(tmp_path / "bin" / "uv"),
+        "--registration",
+        "docs/research/p7-registration.json",
+        flag,
+        str(tmp_path / "logs"),
+    ]
+    if panel_runtime_dir is not None:
+        arguments += ["--panel-runtime-dir", str(panel_runtime_dir)]
+    code, out, err = _invoke(arguments, clock=RUN_CLOCK)
+    assert code == 0, err
+    job: dict[str, Any] = plistlib.loads(out.encode("utf-8"))
+    return job
+
+
+def test_the_parallel_morning_lag_is_a_named_constant() -> None:
+    """R-S4: the parallel morning fires 15 minutes after the base book's -- the evening's
+    60-minute lag would reach 09:30, past the 09:15 auction."""
+    assert daily.LAUNCHD_PARALLEL_MORNING_LAG_MINUTES == 15
+    assert (daily.MORNING_PLIST_HOUR, daily.MORNING_PLIST_MINUTE) == (8, 30)
+
+
+def test_a_parallel_job_carries_the_panel_directory_and_fires_after_the_base_book(
+    tmp_path: Path,
+) -> None:
+    """R-S2/R-S4: a parallel book's two printed jobs carry `--panel-runtime-dir <base runtime>`;
+    the evening keeps its 60-minute lag (19:30) and the morning fires at 08:45, 15 minutes after
+    the base book's 08:30."""
+    settings = {
+        daily.SURVIVOR_PARALLEL_OF_KEY: {
+            "path": "docs/research/p7-registration.json",
+            "sha256": "0" * 64,
+        }
+    }
+    worktree = _printable_worktree(tmp_path, settings)
+    base = tmp_path / "base-runtime"
+
+    evening = _printed_job(tmp_path, worktree, morning=False, panel_runtime_dir=base)
+    morning = _printed_job(tmp_path, worktree, morning=True, panel_runtime_dir=base)
+
+    assert evening["ProgramArguments"][-2:] == ["--panel-runtime-dir", str(base)]
+    assert morning["ProgramArguments"][-3:] == [
+        "--morning-recheck",
+        "--panel-runtime-dir",
+        str(base),
+    ]
+    assert [(entry["Hour"], entry["Minute"]) for entry in evening["StartCalendarInterval"]] == [
+        (19, 30)
+    ] * 5
+    assert [(entry["Hour"], entry["Minute"]) for entry in morning["StartCalendarInterval"]] == [
+        (8, 45)
+    ] * 5
+
+
+@pytest.mark.parametrize(
+    ("settings", "panel"),
+    [
+        pytest.param({}, True, id="a-base-book-refuses-it"),
+        pytest.param(
+            {
+                daily.SURVIVOR_PARALLEL_OF_KEY: {
+                    "path": "docs/research/p7-registration.json",
+                    "sha256": "0" * 64,
+                }
+            },
+            False,
+            id="a-parallel-book-requires-it",
+        ),
+    ],
+)
+def test_a_printed_job_refuses_a_missing_or_misplaced_panel_directory(
+    tmp_path: Path, settings: Mapping[str, Any], panel: bool
+) -> None:
+    """R-S2: a base book's job must not gain the parallel book's option (its bytes are pinned
+    elsewhere), and a parallel book's job is never printed without it -- a job that would refuse
+    every night. Both are usage refusals, exit 2, printing nothing."""
+    worktree = _printable_worktree(tmp_path, settings)
+
+    with pytest.raises(SystemExit) as refused:
+        daily.main(
+            [
+                "--runtime-dir",
+                str(tmp_path / "runtime"),
+                "--worktree",
+                str(worktree),
+                "--uv",
+                str(tmp_path / "bin" / "uv"),
+                "--registration",
+                "docs/research/p7-registration.json",
+                "--launchd-plist",
+                str(tmp_path / "logs"),
+                *(["--panel-runtime-dir", str(tmp_path / "base-runtime")] if panel else []),
+            ]
+        )
+
+    assert refused.value.code == 2

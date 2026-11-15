@@ -2153,6 +2153,7 @@ def _plist_for(
     config_id: str,
     settings: Mapping[str, Any],
     morning: bool = False,
+    panel_runtime_dir: Path | None = None,
     relative: str = "docs/research/p7-registration.json",
 ) -> dict[str, Any]:
     """The job `daily.main` prints for a registration file inside the pinned worktree."""
@@ -2176,6 +2177,8 @@ def _plist_for(
         flag,
         str(tmp_path / "logs"),
     ]
+    if panel_runtime_dir is not None:
+        arguments += ["--panel-runtime-dir", str(panel_runtime_dir)]
 
     assert daily.main(arguments) == 0
     job: dict[str, Any] = plistlib.loads(capsys.readouterr().out.encode("utf-8"))
@@ -2210,9 +2213,13 @@ def test_a_parallel_registration_prints_its_own_launchd_labels(
     """A registration carrying `settings.survivor_parallel_of` is a parallel book: its two jobs'
     labels carry the config id's first 16 characters, so the two books' jobs cannot collide while
     both are still only printed (R-N5, Task 5b). Its log files carry the same suffix: printed with
-    one log directory, the two books' logs must not mix (final review 2)."""
+    one log directory, the two books' logs must not mix (final review 2). Both jobs carry
+    `--panel-runtime-dir` -- the base book's runtime directory, which the day requires of a
+    parallel registration and a printed job could not otherwise run (R-S2) -- and the morning
+    fires 15 minutes after the base book's, not at the same minute (R-S4)."""
     assert daily.SURVIVOR_PARALLEL_OF_KEY == "survivor_parallel_of"
     config_id = "0123456789abcdef" + "9" * 48
+    base_runtime = tmp_path / "base-runtime"
     settings = {
         "survivor_parallel_of": {
             "path": "docs/research/p7-registration.json",
@@ -2220,8 +2227,17 @@ def test_a_parallel_registration_prints_its_own_launchd_labels(
         }
     }
 
-    evening = _plist_for(tmp_path, capsys, config_id=config_id, settings=settings)
-    morning = _plist_for(tmp_path, capsys, config_id=config_id, settings=settings, morning=True)
+    evening = _plist_for(
+        tmp_path, capsys, config_id=config_id, settings=settings, panel_runtime_dir=base_runtime
+    )
+    morning = _plist_for(
+        tmp_path,
+        capsys,
+        config_id=config_id,
+        settings=settings,
+        morning=True,
+        panel_runtime_dir=base_runtime,
+    )
 
     assert evening["Label"] == f"com.openalpha.daily-selection.{config_id[:16]}"
     assert morning["Label"] == f"com.openalpha.daily-selection.morning.{config_id[:16]}"
@@ -2237,13 +2253,20 @@ def test_a_parallel_registration_prints_its_own_launchd_labels(
     assert morning["StandardErrorPath"] == str(
         tmp_path / "logs" / f"daily-selection.morning.{config_id[:16]}.err.log"
     )
+    assert evening["ProgramArguments"][-2:] == ["--panel-runtime-dir", str(base_runtime)]
+    assert morning["ProgramArguments"][-3:] == [
+        "--morning-recheck",
+        "--panel-runtime-dir",
+        str(base_runtime),
+    ]
     # The two books share one TUSHARE_TOKEN: the parallel book's evening fires 60 minutes after
-    # the base book's, so their panel updates do not ask at the same moment (`V2-P7-027`).
+    # the base book's, so their panel updates do not ask at the same moment (`V2-P7-027`), and
+    # its morning fires 15 minutes after the base book's namechange fetch it reads (R-S4).
     assert [(entry["Hour"], entry["Minute"]) for entry in evening["StartCalendarInterval"]] == [
         (19, 30)
     ] * 5
     assert [(entry["Hour"], entry["Minute"]) for entry in morning["StartCalendarInterval"]] == [
-        (8, 30)
+        (8, 45)
     ] * 5
 
 
