@@ -26,9 +26,11 @@ for _directory in (_SCRIPTS, _SCRIPTS / "research"):
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
 
+import daily_selection  # noqa: E402
 import grid  # noqa: E402
+import p7_smoke_env  # noqa: E402
+import registry  # noqa: E402
 from p7_register import (  # noqa: E402
-    SURVIVOR_PARALLEL_OF_KEY,
     chain_problems,
     committed_survivor_registrations,
     registration_body,
@@ -51,6 +53,53 @@ from openalpha_cn.strategy_agent_evaluation import (  # noqa: E402
 )
 
 _FULL_COMMIT: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}")
+_PARALLEL: Final[str] = daily_selection.SURVIVOR_PARALLEL_OF_KEY
+"""The `settings` key of a parallel registration (`V2-P7-027`, R-N5), read from the daily command's
+own spelling: the writer takes it from there, and so does this test."""
+
+
+def _rebuilt_parallel_body(
+    registrations: dict[str, dict[str, Any]], path: str, *, root: Path
+) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
+    """`(config, criteria, settings)` rebuilt for `path`: its base's stored book as the parallel
+    v2 book carrying `path`'s rule, its own epoch, and its own `survivor_parallel_of` block.
+
+    The base is a committed member of the set and must not itself be a parallel registration; the
+    sha256 the block records must be the committed base's bytes. A parallel registration whose
+    body differs from this rebuild -- a hand-edited criteria, settings, adapter or book parameter
+    -- is not the one the writer would have produced from that base."""
+    body = registrations[path]
+    block = body["settings"][_PARALLEL]
+    base = block["path"]
+    assert base in registrations, f"{path} names {base}, which is not a committed registration"
+    base_body = registrations[base]
+    assert _PARALLEL not in base_body["settings"], (
+        f"{path} names {base}, which is itself a parallel registration; a parallel book runs "
+        "beside a base registration, never beside another parallel book"
+    )
+    assert "survivor_continuation" not in body["settings"], path
+    committed = _git_bytes(root, "show", f"HEAD:{base}")
+    assert block["sha256"] == hashlib.sha256(committed).hexdigest(), path
+    rule = body["config"]["survivor_book"]["entry_veto"]
+    assert rule == VETO_RULE_ID, path
+    book = p7_smoke_env.veto_book(rule, base_body["config"]["survivor_book"])
+    epoch = date.fromisoformat(body["config"]["adapter"]["epoch_session"])
+    return registration_body(epoch, book=book, parallel_of=block)
+
+
+def _assert_a_parallel_registration(
+    registrations: dict[str, dict[str, Any]], path: str, *, root: Path
+) -> None:
+    """`path`'s whole body is the one rebuilt from the base it names (`V2-P7-027`, R-N5)."""
+    body = registrations[path]
+    if _PARALLEL not in body["settings"]:
+        return
+    config, criteria, settings = _rebuilt_parallel_body(registrations, path, root=root)
+    assert body["config"] == config, path
+    assert body["criteria"] == criteria, path
+    assert body["settings"] == settings, path
+    assert body["config_id"] == grid.config_id(config), path
+    assert body["config_id"] != registrations[settings[_PARALLEL]["path"]]["config_id"], path
 
 
 def test_every_committed_survivor_registration_is_frozen_and_chained() -> None:
@@ -58,9 +107,7 @@ def test_every_committed_survivor_registration_is_frozen_and_chained() -> None:
 
     assert chain_problems(registrations) == []
     chain = {
-        path: body
-        for path, body in registrations.items()
-        if SURVIVOR_PARALLEL_OF_KEY not in body["settings"]
+        path: body for path, body in registrations.items() if _PARALLEL not in body["settings"]
     }
     roots = [
         path for path, body in chain.items() if "survivor_continuation" not in body["settings"]
@@ -77,23 +124,59 @@ def test_every_committed_survivor_registration_is_frozen_and_chained() -> None:
         assert body["criteria"] == criteria, path
         assert body["settings"] == settings, path
         assert body["config_id"] == grid.config_id(config), path
-    # R-N5: a parallel registration is outside the chain; it names a committed base registration
-    # whose committed bytes are the sha256 it records, and the two books have two identities.
-    for path, body in registrations.items():
-        block = body["settings"].get(SURVIVOR_PARALLEL_OF_KEY)
-        if block is None:
-            continue
-        base = block["path"]
-        assert base in registrations, (
-            f"{path} names {base}, which is not a committed survivor registration"
-        )
-        assert "survivor_continuation" not in body["settings"], path
-        committed = _git_bytes(ROOT, "show", f"HEAD:{base}")
-        assert block["sha256"] == hashlib.sha256(committed).hexdigest(), path
-        book = body["config"]["survivor_book"]
-        assert book["schema_version"] == "survivor-book-config/v2", path
-        assert book["entry_veto"] == VETO_RULE_ID, path
-        assert body["config_id"] != registrations[base]["config_id"], path
+    # R-N5: a parallel registration is outside the chain, names a committed base registration
+    # whose committed bytes are the sha256 it records, and its whole body is that base's rebuilt.
+    for path in registrations:
+        _assert_a_parallel_registration(registrations, path, root=ROOT)
+
+
+def test_a_committed_parallel_registration_rebuilds_from_its_base(tmp_path: Path) -> None:
+    """The parallel assertions above only run on real committed data, which does not exist yet.
+    This commits a base and a parallel registration in a throwaway repository and runs them,
+    so the check itself is pinned (a hand-edited parallel body fails here)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "--template=", "-b", "main")
+    (repo / "README.md").write_text("a registration repository\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "initial")
+    base = "docs/research/survivor.json"
+    parallel = "docs/research/parallel.json"
+    epoch = date(2026, 12, 18)
+    config, criteria, settings = registration_body(epoch)
+    base_path = repo / base
+    base_path.parent.mkdir(parents=True)
+    registry.register(
+        config, criteria, base_path, code_commit=_git(repo, "rev-parse", "HEAD"), settings=settings
+    )
+    _git(repo, "add", "--", base)
+    _git(repo, "commit", "-q", "-m", "the base registrarion")
+    block = {
+        "path": base,
+        "sha256": hashlib.sha256(base_path.read_bytes()).hexdigest(),
+    }
+    book = p7_smoke_env.veto_book(VETO_RULE_ID, config["survivor_book"])
+    parallel_config, parallel_criteria, parallel_settings = registration_body(
+        epoch, book=book, parallel_of=block
+    )
+    registry.register(
+        parallel_config,
+        parallel_criteria,
+        repo / parallel,
+        code_commit=_git(repo, "rev-parse", "HEAD"),
+        settings=parallel_settings,
+    )
+    _git(repo, "add", "--", parallel)
+    _git(repo, "commit", "-q", "-m", "the parallel registration")
+
+    registrations = committed_survivor_registrations(repo)
+
+    assert set(registrations) == {base, parallel}
+    assert chain_problems(registrations) == []
+    roots = [path for path, body in registrations.items() if _PARALLEL not in body["settings"]]
+    assert roots == [base]
+    for path in registrations:
+        _assert_a_parallel_registration(registrations, path, root=repo)
 
 
 PROTOCOL: Final[Path] = ROOT / "docs/research/p7-protocol.md"

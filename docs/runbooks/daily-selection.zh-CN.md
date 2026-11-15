@@ -725,6 +725,11 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 **已提交字节**的 sha256）。它**不在 006b 的链里**（R-N5）：不是链根、不是延续，也不进入
 `admit_predecessors` 与周报的合并样本。运行目录、钉住 worktree、launchd 标签都是它自己的。
 
+**它不是 A 的检验。** A 的否决**唯一**的预登记读数是 `forward_ab_1`（R-N0），它的统计检验在那
+份冻结的登记上；并列账簿的周报（`scripts/forward_report.py` 对并列登记跑出的整份前向读数）与
+它的停止规则行只是**运行监控**——说"这本书有没有按登记在跑、有没有触发停止规则"，不是 A 的
+证据，也不要拿它去改 A 的结论。周报每个数字仍然是「候选」。
+
 **操作顺序（每一步都要用户同意）：**
 
 1. **前提。** 006b 的正式登记已完成并提交（上一节）；包含本批次代码的分支已并入 `main`；用户
@@ -739,13 +744,26 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
    cp -c -R <基础运行目录>/panel <并列运行目录>/panel
    ```
 
-   `cp -c` 是 APFS 的 clonefile：不复制数据块。这样并列账簿第 2 步（面板更新）看到的是最新的
-   面板，**发出 0 次请求**；不要用 `cp -R`、也不要在基础账簿不存在的面板上让第 2 步自己抓。
-4. **在新提交上做它自己的冒烟。** 用冒烟工具在**这个提交**上准备一个**新的冒烟根**（自己的
-   caps、自己的纪元），照「真实数据冒烟」一节的 `scripts/p7_smoke.py prepare` 与 `smoke
-   evening` 跑，等阶段 1 的 go。冒烟工具写的是它自己的 v1 设计账簿（标了 `smoke_run`），它核对
-   的是这份登记要绑定的**代码字节**；A 的否决本身由并列账簿第一晚的日志（`entry_veto` 块）与
-   「清单附注（候选参考）」核对。
+   `cp -c` 是 APFS 的 clonefile：不复制数据块。**只有搭建的这一次是 0 次请求**：这一天的面板
+   已经是最新的，所以搭好之后第一次运行的第 2 步只要增量。此后并列账簿**每晚自己**做增量构建，
+   用同一个 `TUSHARE_TOKEN` 发自己的请求（基础账簿也在同一时段发）——所以两本账的晚间作业错开
+   一小时（第 9 步）。不要用 `cp -R`。
+4. **在新提交上做它自己的冒烟，并且真的跑否决路径。** 用冒烟工具在**这个提交**上准备一个
+   **新的冒烟根**（自己的 caps、自己的纪元），**带上 `--entry-veto market_bearish_5/v1`**，照
+   「真实数据冒烟」一节的 `scripts/p7_smoke.py prepare` 与 `smoke evening` 跑，等阶段 1 的 go：
+
+   ```bash
+   uv run --no-sync python scripts/p7_smoke.py prepare \
+     --smoke-root <并列冒烟根> --epoch <并列纪元> \
+     --phase1-cap <第一阶段请求上限> --phase2-cap <整个冒烟的上限> \
+     --entry-veto market_bearish_5/v1
+   ```
+
+   这样冒烟登记里的账簿本身就是并列账簿（`survivor-book-config/v2` + A 的否决，种子是登记的
+   种子），第一晚就在**克隆面板的真实数据**上跑否决路径：五会话窗口、每个会话按它自己的 16:30
+   发布时刻读、跨休市/新年的窗口、窗口内有重述时按名拒绝（R-N3a）。**不传 `--entry-veto` 时
+   冒烟字节与改动前完全一致**——那是基础设计账簿的冒烟，不是这本账的。`--entry-veto none` 或
+   未知取值按名拒绝（退出 2），什么都不做。
 5. **空跑一次，给用户看：**
 
    ```bash
@@ -762,7 +780,8 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
    `--entry-veto` 与 `--parallel-of` 只给一个；同时给了 `--supersedes`（并列登记永远不是延续，
    R-N5）；`--parallel-of` 指向的文件没有提交、或提交后又被改过（字节与 `HEAD` 不符）；基础
    登记的 sha256 与块里记的不符；`--entry-veto none`（基础账簿本来就是无否决的那本，R-N4）；
-   同一基础登记/同一 `config_id` 的第二份并列登记。然后只提交这一个文件：
+   同一基础登记、**同一 `entry_veto` 规则**的第二份并列登记（不同规则是另一本账，为 R-N7 之后的
+   LLM 否决留路）；基础登记本身是并列登记/冒烟登记/不是 survivor 登记。然后只提交这一个文件：
 
    ```bash
    git add docs/research/p7-parallel-registration.json
@@ -770,8 +789,9 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
    ```
 
 7. **跑登记测试。** `uv run pytest tests/unit/test_p7_registration_chain.py`：006b 链最多一个
-   链根；每一份并列登记都指向一份已提交、且 sha256 相符的基础登记，`config` 是 v2 + A 的否决，
-   `config_id` 与基础登记不同。
+   链根；每一份并列登记都指向一份已提交、且 sha256 相符的基础登记（基础登记本身不是并列登记），
+   并且整份 body 等于用它的纪元、基础账簿的书参数和 `survivor_parallel_of` 重建的
+   `registration_body(...)`；`config_id` 与基础登记不同。
 8. **它自己的钉住 worktree，绝不用 006b 那个：**
 
    ```bash
@@ -781,9 +801,14 @@ UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv run --no-sync --env-file .env "$PWD/.venv
 
    两个账簿各有自己的钉住 checkout、自己的运行目录：换用 006b 的会让并列账簿绑定另一份代码。
 9. **launchd 只打印、不安装。** 并列登记的 `--launchd-plist` 与 `--launchd-morning-plist` 打印的
-   `Label` 带 `.<config_id 前 16 位>` 后缀，与 006b 的作业分开；仍然只输出文本，不安装。
+   `Label` 带 `.<config_id 前 16 位>` 后缀，与 006b 的作业分开；**晚间作业的触发时间比基础账簿
+   晚 60 分钟（19:30，基础是 18:30）**，因为两本账共用一个 `TUSHARE_TOKEN`，同一时刻各自做面板
+   增量会同时打上游；清晨复核仍是 08:30。仍然只输出文本，不安装。登记文件在打印时会被读一次
+   （为了拿 `config_id`）：`--worktree` 里读不到那份登记就按名拒绝（退出 2）、不打印任何 plist，
+   不会悄悄退回基础标签。
 10. **第一晚由用户手动跑。** 第 1 步对纪元做 0 次请求的精确核对；晚间会按 `entry_veto` 拦买入
-    并记日志（R-A1：被否决的持仓不卖）。真钱闸门仍关着；纸面权益不是证据。
+    并记日志（R-A1：被否决的持仓不卖）。此后每晚的增量构建用同一个 token 发它自己的请求（第 3
+    步）。真钱闸门仍关着；纸面权益不是证据。
 
 ### 已知局限（幸存者形态）
 

@@ -805,7 +805,10 @@ PARALLEL_KEY: Final[str] = "survivor_parallel_of"
 
 
 def test_the_parallel_key_is_the_plans_spelling() -> None:
-    assert register.SURVIVOR_PARALLEL_OF_KEY == PARALLEL_KEY
+    """One spelling: the daily command's (its launchd printer reads it), which the writer takes
+    rather than spelling again, and the plan's literal."""
+    assert tds.daily.SURVIVOR_PARALLEL_OF_KEY == PARALLEL_KEY
+    assert register._PARALLEL_KEY == tds.daily.SURVIVOR_PARALLEL_OF_KEY
 
 
 def test_the_parallel_body_is_a_v2_book_beside_its_base() -> None:
@@ -1138,6 +1141,165 @@ def test_a_parallel_registration_naming_itself_is_refused() -> None:
 
     assert problems
     assert any("p.json" in problem and "itself" in problem for problem in problems)
+
+
+def _commit_a_parallel_registration_with_rule(
+    repo: Path, capsys: pytest.CaptureFixture[str], rule: str
+) -> str:
+    """A committed parallel registration of the same base under `rule` -- fabricated past the
+    writer for an R-N7 rule this build does not register yet, so the writer's second-parallel
+    check can be pinned on the rule it keys on."""
+    base_config, criteria, settings = register.registration_body(VALID_EPOCH)
+    block = {
+        "path": FIRST,
+        "sha256": hashlib.sha256((repo / FIRST).read_bytes()).hexdigest(),
+    }
+    config = {
+        **base_config,
+        "survivor_book": {
+            **base_config["survivor_book"],
+            "schema_version": "survivor-book-config/v2",
+            "entry_veto": rule,
+        },
+    }
+    path = repo / "docs/research/p7-parallel-by-another-rule.json"
+    registry.register(
+        config,
+        criteria,
+        path,
+        code_commit=research_repo.head(repo),
+        settings={**settings, PARALLEL_KEY: block},
+    )
+    research_repo.commit_file(
+        repo, path, "a parallel registration by another rule", at=tds.COMMITTED
+    )
+    return path.relative_to(repo).as_posix()
+
+
+def test_a_parallel_registration_by_another_rule_beside_the_same_base_is_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One base book has one parallel book **per entry-veto rule**: a different rule is a
+    different book (R-N7's LLM veto will need one beside 006b), so it is not refused. The same
+    base and the same rule is (`test_the_writer_refuses_a_second_parallel_registration_...`)."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    _commit_a_parallel_registration_with_rule(repo, capsys, "llm_bearish/v1")
+
+    code, _, err = _run(
+        capsys, *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=FIRST)
+    )
+
+    assert code == 0, err
+    written = json.loads((repo / REGISTRATION).read_text(encoding="utf-8"))
+    assert written["settings"][PARALLEL_KEY]["path"] == FIRST
+    assert written["config"]["survivor_book"]["entry_veto"] == VETO
+
+
+def test_the_writer_refuses_an_unknown_entry_veto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A value that is not a rule this build registers is refused by name -- not written into a
+    v2 book the daily command would refuse -- and nothing is written."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+
+    code, _, err = _run(
+        capsys,
+        *_arguments(
+            smoke=research_repo.head(repo),
+            entry_veto="llm_bearish/v1",
+            parallel_of=FIRST,
+        ),
+    )
+
+    assert code == 2
+    assert "llm_bearish/v1" in err
+    assert VETO in err
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_refuses_a_parallel_registration_beside_a_parallel_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A parallel book runs beside a base book; another parallel registration is not a base, so
+    it is refused by name (`_parallel_base`'s "is itself a parallel registration")."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    _commit_a_survivor_registration(repo)
+    _commit_a_parallel_registration(repo, capsys)
+    beside = "docs/research/p7-a-second-parallel.json"
+
+    code, _, err = _run(
+        capsys,
+        *_arguments(
+            smoke=research_repo.head(repo),
+            entry_veto=VETO,
+            parallel_of=REGISTRATION,
+            path=beside,
+        ),
+    )
+
+    assert code == 2
+    assert REGISTRATION in err
+    assert "parallel" in err
+    assert not (repo / beside).exists()
+
+
+def test_the_writer_refuses_a_parallel_registration_beside_a_smoke_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A parallel book runs beside the registered book, never beside a smoke run: a smoke
+    registration is refused by name, and nothing is written."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    smoke = _commit_a_smoke_registration(repo)
+
+    code, _, err = _run(
+        capsys,
+        *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=smoke),
+    )
+
+    assert code == 2
+    assert smoke in err
+    assert "smoke" in err
+    assert not (repo / REGISTRATION).exists()
+
+
+def test_the_writer_refuses_a_parallel_registration_beside_a_non_survivor_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The base is a **survivor** book's registration (the 006b one): a committed registration of
+    another kind -- the P6 book's -- is refused by name and nothing is written."""
+    repo = _repository(tmp_path)
+    _pin_the_clock(monkeypatch)
+    monkeypatch.chdir(repo)
+    p6 = "docs/research/p6-registration.json"
+    (repo / p6).parent.mkdir(parents=True, exist_ok=True)
+    registry.register(
+        {"start": "2026-01-12"},
+        {"primary": "the P6 book's"},
+        repo / p6,
+        code_commit=research_repo.head(repo),
+        settings={},
+    )
+    research_repo.commit_file(repo, repo / p6, "the P6 registration", at=tds.COMMITTED)
+
+    code, _, err = _run(
+        capsys,
+        *_arguments(smoke=research_repo.head(repo), entry_veto=VETO, parallel_of=p6),
+    )
+
+    assert code == 2
+    assert p6 in err
+    assert "not a survivor registration" in err
+    assert not (repo / REGISTRATION).exists()
 
 
 def test_a_continuation_naming_a_parallel_registration_is_refused() -> None:

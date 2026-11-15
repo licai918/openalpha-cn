@@ -335,6 +335,23 @@ def _p6_world_naming_a_predecessor(root: Path, monkeypatch: pytest.MonkeyPatch) 
     return dataclasses.replace(world, registration=registration)
 
 
+def _p6_world_naming_a_parallel(root: Path, monkeypatch: pytest.MonkeyPatch) -> tds.World:
+    """A committed P6 registration whose `settings` carry a `survivor_parallel_of` block -- the
+    block only a survivor paper book reads, committed onto the P6 book. No panel: every day here
+    stops at step 1."""
+    world = _survivor_world(root, monkeypatch, tds.CONFIG)
+    body = json.loads(world.registration.read_text(encoding="utf-8"))
+    body["settings"] = {
+        **(body.get("settings") or {}),
+        daily.SURVIVOR_PARALLEL_OF_KEY: {
+            "path": "docs/research/p7-registration.json",
+            "sha256": "0" * 64,
+        },
+    }
+    registration = _committed_body(world, "p6-names-a-parallel.json", body, at_days=1)
+    return dataclasses.replace(world, registration=registration)
+
+
 def modules_a_day_loads(form: str, root: str) -> dict[str, Any]:
     """Run one day of `form` -- `"p6"` end to end on `test_daily_selection`'s January world,
     `"p6_continuation"` on a P6 registration naming a predecessor (refused at step 1), or
@@ -444,6 +461,22 @@ def test_a_p6_registration_naming_a_predecessor_exits_2(
     assert "only a survivor registration continues a sample" in report["stderr"]
     assert report["before"] == []
     assert report["after"] == []
+
+
+def test_a_p6_registration_naming_a_parallel_registration_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`survivor_parallel_of` is a survivor paper book's block, read by no P6 path: a P6
+    registration carrying one would run as P6 and never mention it, which its contract forbids --
+    the same "never defaulted and never ignored" rule as `survivor_continuation`. Step 1 refuses
+    it by name, before any request."""
+    world = _p6_world_naming_a_parallel(tmp_path, monkeypatch)
+
+    code, err = _stopped_at_registration(world, capsys)
+
+    assert code == 2
+    assert "settings.survivor_parallel_of" in err
+    assert "only a survivor registration runs as a parallel book" in err
 
 
 # --- the predecessor chain (`V2-P7-023`) -------------------------------------------------------

@@ -3652,6 +3652,17 @@ def _run_daily_selection(
                 "registration continues a sample",
                 exit_code=DailyExit.no_registration,
             )
+        elif SURVIVOR_PARALLEL_OF_KEY in registration.settings:
+            # The same rule for a parallel book's block (`V2-P7-027`, R-N5): only a survivor
+            # registration runs beside a base book, so a P6 body carrying one is refused by name
+            # rather than run as P6 and never mention it.
+            raise StepFailedError(
+                "registration",
+                f"{registration.path} names a base registration in "
+                f"settings.{SURVIVOR_PARALLEL_OF_KEY}, and it is the P6 book; only a survivor "
+                "registration runs as a parallel book",
+                exit_code=DailyExit.no_registration,
+            )
     if survivor is not None:
         # The registration's `kind` decides the day (`V2-P7-008`); the survivor day numbers and
         # reports its own steps, so it runs outside this step's fault handler.
@@ -6574,34 +6585,51 @@ def sync_pinned_environment(worktree: Path, *, uv: Path) -> Path:
 
 LAUNCHD_LABEL: Final[str] = "com.openalpha.daily-selection"
 LAUNCHD_MORNING_LABEL: Final[str] = "com.openalpha.daily-selection.morning"
+BASE_EVENING_HOUR: Final[int] = 18
+BASE_EVENING_MINUTE: Final[int] = 30
+LAUNCHD_PARALLEL_LAG_MINUTES: Final[int] = 60
+"""The parallel book's evening job fires this long after the base book's (`V2-P7-027`): the two
+books share one `TUSHARE_TOKEN`, and a parallel panel update at 18:30 would ask at the same moment
+as the base book's. It is a printed schedule only -- nothing here installs a job."""
 
 
-def _launchd_label(label: str, registration: Path) -> str:
-    """`label` for a base book, suffixed with the frozen configuration's id for a parallel one.
+def _parallel_config_id(registration: Path) -> str | None:
+    """`registration`'s `config_id` when it is a parallel book's, else `None` (the base book).
 
-    A parallel registration (`settings.survivor_parallel_of`, `V2-P7-027` Task 5b) runs beside the
-    base book, so the two books' launchd jobs must not share a label: the suffix is the
-    registration's `config_id` first 16 characters (`f"{label}.{config_id[:16]}"`). The file is
-    read only to choose the label, and nothing here installs anything: the printer stays
-    print-only.
+    A parallel registration (`settings.survivor_parallel_of`, `V2-P7-027`) runs beside the base
+    book, so the printer needs its identity to keep the two books' jobs apart. The file is read
+    only for that: nothing here writes or installs anything.
 
-    A path that is not a readable JSON document keeps the base label. That is the base book's
-    case -- the printer's existing tests name a registration the pinned worktree does not hold yet
-    -- and it is what keeps a base book's printed bytes identical to before (R-N4). A registration
-    that does carry the block but names no `config_id` is refused by name: a suffixed label needs
-    one.
+    A file that is not there, or that cannot be read or parsed, is refused by name (`ValueError`,
+    which `main` turns into the printer's exit 2) rather than read as a base book's -- a wrong
+    `--worktree` would otherwise print a job with the base label, and installing it by hand would
+    replace the base book's job. A readable base registration has no `survivor_parallel_of` block
+    and gets the base label, so R-N4's base bytes are untouched.
     """
     try:
-        if not registration.is_file():
-            return label
-        document = json.loads(registration.read_bytes())
-    except Exception:
-        return label
+        content = registration.read_bytes()
+    except OSError as error:
+        raise ValueError(
+            f"--registration {registration} cannot be read: {error}. The launchd job's label is "
+            "its book's identity, so the registration must be readable inside --worktree; "
+            "nothing was printed"
+        ) from error
+    try:
+        document = json.loads(content)
+    except ValueError as error:
+        raise ValueError(
+            f"--registration {registration} is not JSON: {error}. The launchd job's label is its "
+            "book's identity, so the registration must be readable inside --worktree; nothing "
+            "was printed"
+        ) from error
     if not isinstance(document, dict):
-        return label
+        raise ValueError(
+            f"--registration {registration} is not a JSON object, so its book's identity cannot "
+            "be read; nothing was printed"
+        )
     settings = document.get("settings")
     if not isinstance(settings, dict) or SURVIVOR_PARALLEL_OF_KEY not in settings:
-        return label
+        return None
     config_id = document.get("config_id")
     if not isinstance(config_id, str) or not config_id:
         raise ValueError(
@@ -6609,7 +6637,25 @@ def _launchd_label(label: str, registration: Path) -> str:
             "config_id: a parallel book's launchd label is its configuration's id first 16 "
             "characters, so the registration has to name one"
         )
-    return f"{label}.{config_id[:16]}"
+    return config_id
+
+
+def _launchd_label(label: str, registration: Path) -> str:
+    """`label` for a base book, suffixed with the frozen configuration's id for a parallel one
+    (`f"{label}.{config_id[:16]}"`); the read and its refusals are `_parallel_config_id`'s."""
+    config_id = _parallel_config_id(registration)
+    return label if config_id is None else f"{label}.{config_id[:16]}"
+
+
+def _evening_schedule(parallel_config_id: str | None) -> tuple[int, int]:
+    """The evening job's `(hour, minute)`: the base book's 18:30, or 60 minutes later for a
+    parallel book, so the two books' panel updates do not ask at the same moment
+    (`LAUNCHD_PARALLEL_LAG_MINUTES`)."""
+    minutes = BASE_EVENING_HOUR * 60 + BASE_EVENING_MINUTE
+    if parallel_config_id is not None:
+        minutes += LAUNCHD_PARALLEL_LAG_MINUTES
+    hour, minute = divmod(minutes, 60)
+    return hour, minute
 
 
 MORNING_PLIST_HOUR: Final[int] = 8
@@ -6726,14 +6772,18 @@ def launchd_plist(
     proved it is inside `worktree`. Printed, never installed. launchd has no exchange calendar,
     so it fires every weekday and the command decides: on a holiday the newest closed session is
     one whose journal is already complete, which prints the summary again with no request and no
-    write."""
+    write. The registration file is read for the book's identity: a parallel book gets the
+    suffixed label and a job 60 minutes after the base book's (`V2-P7-027`); a file that cannot be
+    read is refused, not printed with the base label."""
+    config_id = _parallel_config_id(registration)
+    hour, minute = _evening_schedule(config_id)
     return _launchd_job(
-        label=_launchd_label(LAUNCHD_LABEL, registration),
-        hour=18,
-        minute=30,
+        label=LAUNCHD_LABEL if config_id is None else f"{LAUNCHD_LABEL}.{config_id[:16]}",
+        hour=hour,
+        minute=minute,
         tail=(),
         log_stem="daily-selection",
-        when="18:30",
+        when=f"{hour:02d}:{minute:02d}",
         worktree=worktree,
         runtime_dir=runtime_dir,
         log_dir=log_dir,

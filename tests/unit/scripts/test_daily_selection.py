@@ -1697,6 +1697,8 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
     odd = tmp_path / 'my "daily" $HOME dir'
     worktree, runtime, logs = odd / "pinned", odd / "runtime", odd / "logs"
     uv = odd / "bin" / "uv"
+    _printable_registration(worktree)
+    before = _files(odd)
 
     code = daily.main(
         [
@@ -1742,7 +1744,7 @@ def test_the_launchd_job_runs_the_pinned_checkout_with_no_shell_and_is_not_insta
         {"Weekday": weekday, "Hour": 18, "Minute": 30} for weekday in range(1, 6)
     ]
     assert job["RunAtLoad"] is False
-    assert not odd.exists()
+    assert _files(odd) == before
 
 
 def test_the_launchd_jobs_take_the_registration_and_the_morning_recheck(
@@ -1754,6 +1756,8 @@ def test_the_launchd_jobs_take_the_registration_and_the_morning_recheck(
     odd = tmp_path / "pinned daily"
     worktree, runtime, logs = odd, odd / "runtime", odd / "logs"
     uv = tmp_path / "bin" / "uv"
+    _printable_registration(worktree, "docs/research/survivor.json")
+    before = _files(odd)
 
     def job(*, morning: bool = False) -> dict[str, Any]:
         arguments = [
@@ -1797,7 +1801,7 @@ def test_the_launchd_jobs_take_the_registration_and_the_morning_recheck(
     assert morning["StandardOutPath"].endswith("daily-selection.morning.out.log")
     assert morning["WorkingDirectory"] == str(worktree)
     assert morning["RunAtLoad"] is False
-    assert not odd.exists()
+    assert _files(odd) == before
 
 
 # --- V2-P7-027 Task 5b: a parallel book prints its own launchd labels ---------------------------
@@ -1983,27 +1987,118 @@ BASE_MORNING_PLIST: Final[str] = (
 `plistlib.dumps` bytes, so a moved byte in a base job fails here)."""
 
 
+def _printable_registration(
+    worktree: Path, relative: str = "docs/research/p6-registration.json"
+) -> Path:
+    """A readable base registration where a pinned worktree's `--registration` points: the printer
+    reads it for the book's identity (`V2-P7-027`), so a printing test makes one first."""
+    registration = worktree / relative
+    registration.parent.mkdir(parents=True, exist_ok=True)
+    registration.write_text(
+        json.dumps({"config": {}, "config_id": "a" * 64, "settings": {}}), encoding="utf-8"
+    )
+    return registration
+
+
 def test_the_base_book_plist_is_unchanged() -> None:
-    """R-N4 for the printer: a base book's two jobs are byte-identical to the literals captured
-    before Task 5b. The registration carries no `survivor_parallel_of`, so the printer adds no
-    label suffix -- and it names no config_id either."""
-    evening = daily.launchd_plist(
+    """R-N4 for the printer: the base book's two jobs are byte-identical to the literals captured
+    before Task 5b. They are built through `_launchd_job` with the base labels and the base hours
+    -- exactly what `launchd_plist`/`launchd_morning_plist` pass for a book without the parallel
+    marker -- so a moved byte in a base job fails here."""
+    evening = daily._launchd_job(
+        label=daily.LAUNCHD_LABEL,
+        hour=18,
+        minute=30,
+        tail=(),
+        log_stem="daily-selection",
+        when="18:30",
         worktree=BASE_WORKTREE,
         runtime_dir=BASE_RUNTIME,
         log_dir=BASE_LOGS,
         registration=BASE_REGISTRATION,
+        env_file=".env",
         uv=BASE_UV,
     )
-    morning = daily.launchd_morning_plist(
+    morning = daily._launchd_job(
+        label=daily.LAUNCHD_MORNING_LABEL,
+        hour=daily.MORNING_PLIST_HOUR,
+        minute=daily.MORNING_PLIST_MINUTE,
+        tail=("--morning-recheck",),
+        log_stem="daily-selection.morning",
+        when="08:30",
         worktree=BASE_WORKTREE,
         runtime_dir=BASE_RUNTIME,
         log_dir=BASE_LOGS,
         registration=BASE_REGISTRATION,
+        env_file=".env",
         uv=BASE_UV,
     )
 
     assert evening == BASE_EVENING_PLIST
     assert morning == BASE_MORNING_PLIST
+
+
+def test_a_launchd_printer_refuses_a_registration_that_is_not_there(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The label is the book's identity, so the printer reads the registration: a `--worktree`
+    that does not hold the file named by `--registration` is refused by name (exit 2), and no
+    plist is printed -- a printed job with the base label could replace the base book's job."""
+    worktree = tmp_path / "pinned"
+    arguments = [
+        "--runtime-dir",
+        str(tmp_path / "runtime"),
+        "--worktree",
+        str(worktree),
+        "--uv",
+        str(tmp_path / "bin" / "uv"),
+        "--registration",
+        "docs/research/survivor.json",
+        "--launchd-plist",
+        str(tmp_path / "logs"),
+    ]
+
+    with pytest.raises(SystemExit) as refused:
+        daily.main(arguments)
+
+    out, err = capsys.readouterr()
+    assert refused.value.code == 2
+    assert out == ""
+    assert "docs/research/survivor.json" in err
+    assert "cannot be read" in err
+
+
+def test_a_launchd_printer_refuses_a_registration_that_is_not_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file that cannot be parsed is the same case: the printer cannot know whether the book is
+    a parallel one, so it refuses by name and prints nothing rather than falling back to the
+    base label."""
+    worktree = tmp_path / "pinned"
+    registration = worktree / "docs/research/survivor.json"
+    registration.parent.mkdir(parents=True)
+    registration.write_text("not a registration\n", encoding="utf-8")
+    arguments = [
+        "--runtime-dir",
+        str(tmp_path / "runtime"),
+        "--worktree",
+        str(worktree),
+        "--uv",
+        str(tmp_path / "bin" / "uv"),
+        "--registration",
+        "docs/research/survivor.json",
+        "--launchd-morning-plist",
+        str(tmp_path / "logs"),
+    ]
+
+    with pytest.raises(SystemExit) as refused:
+        daily.main(arguments)
+
+    out, err = capsys.readouterr()
+    assert refused.value.code == 2
+    assert out == ""
+    assert "docs/research/survivor.json" in err
+    assert "not JSON" in err
 
 
 def _plist_for(
@@ -2054,6 +2149,8 @@ def test_a_base_registration_keeps_the_base_labels(
 
     assert evening["Label"] == "com.openalpha.daily-selection"
     assert morning["Label"] == "com.openalpha.daily-selection.morning"
+    assert [entry["Hour"] for entry in evening["StartCalendarInterval"]] == [18] * 5
+    assert [entry["Minute"] for entry in evening["StartCalendarInterval"]] == [30] * 5
 
 
 def test_a_parallel_registration_prints_its_own_launchd_labels(
@@ -2076,6 +2173,14 @@ def test_a_parallel_registration_prints_its_own_launchd_labels(
 
     assert evening["Label"] == f"com.openalpha.daily-selection.{config_id[:16]}"
     assert morning["Label"] == f"com.openalpha.daily-selection.morning.{config_id[:16]}"
+    # The two books share one TUSHARE_TOKEN: the parallel book's evening fires 60 minutes after
+    # the base book's, so their panel updates do not ask at the same moment (`V2-P7-027`).
+    assert [(entry["Hour"], entry["Minute"]) for entry in evening["StartCalendarInterval"]] == [
+        (19, 30)
+    ] * 5
+    assert [(entry["Hour"], entry["Minute"]) for entry in morning["StartCalendarInterval"]] == [
+        (8, 30)
+    ] * 5
 
 
 def test_an_explicit_absolute_p6_registration_is_still_printed_inside_the_pinned_worktree(
@@ -2087,6 +2192,7 @@ def test_an_explicit_absolute_p6_registration_is_still_printed_inside_the_pinned
     that branch the absolute path is outside the pinned worktree and refused (exit 2), so the
     branch is not dead and this pins it."""
     worktree = tmp_path / "pinned daily"
+    _printable_registration(worktree, daily.REGISTRATION_IN_REPOSITORY)
 
     code = daily.main(
         [
@@ -2188,6 +2294,7 @@ def test_no_launchd_install_path_exists(
     monkeypatch.setattr(daily.subprocess, "run", refused)
     monkeypatch.setattr(daily, "invoke", refused)
     logs = tmp_path / "logs"
+    _printable_registration(tmp_path / "pinned")
 
     for flag in ("--launchd-plist", "--launchd-morning-plist"):
         assert (
@@ -2230,6 +2337,7 @@ def test_an_env_file_uv_would_split_is_refused_instead_of_printing_a_job_that_ca
 ) -> None:
     """`--env-file` names the file relative to the worktree; whitespace in it is refused, saying
     that uv splits it, rather than printed into a configuration that fails at 18:30."""
+    _printable_registration(tmp_path / "pinned")
     arguments = [
         "--runtime-dir",
         str(tmp_path / "runtime"),
@@ -2421,6 +2529,7 @@ def test_the_launchd_job_loads_the_env_file_through_uv_from_a_path_with_spaces(
     main_checkout, worktree = spaced / "main checkout", spaced / "pinned daily"
     main_checkout.mkdir(parents=True)
     worktree.mkdir()
+    _printable_registration(worktree)
     (main_checkout / ".env").write_text("OPENALPHA_P6_029_PROBE=linked\n", encoding="utf-8")
     daily.link_env_file(main_checkout, worktree)
 
