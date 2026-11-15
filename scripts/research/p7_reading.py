@@ -369,7 +369,12 @@ from openalpha_cn.panel_ingest import (
     newest_published_session,
     session_publication_instant,
 )
-from openalpha_cn.panel_limit_events import limit_events_on
+from openalpha_cn.panel_limit_events import (
+    LimitEventReadError,
+    limit_events_on,
+    veto_reader,
+    veto_sessions,
+)
 from openalpha_cn.panel_view import PANEL_SUBDIRECTORY
 from openalpha_cn.strategy_survivor_forward import (
     ADOPTED_PRIMARY_HORIZON,
@@ -2596,21 +2601,13 @@ class _CapturingLabels:
 def _limit_events_reader(store: PanelStore) -> Callable[[date], tuple[LimitEvent, ...]]:
     """Each session's limit events, read at **that session's own** 16:30 publication instant.
 
-    The veto's five-session window is assembled by `_vetoed_on`; this is its read, and the
-    per-session instant is the point-in-time rule: a replay at session D's evening cannot see a
-    row published after D's 16:30, and reading all five sessions at the read's own `as_of` would
-    let a later restatement change an earlier session's events.
+    The read itself moved into `panel_limit_events.veto_reader` (`V2-P7-027`, Task 1): the
+    veto's window is the same reading the evening book and the daily annotation take, so the
+    research code delegates rather than keeping a second copy of the per-session instant. The
+    module-level `limit_events_on` is passed through by name because this reading is what
+    `test_p7_ab_reading.py` spies on; `V2-P7-027`'s plan names it as the A/B measurement's seam.
     """
-
-    def events_on(session: date) -> tuple[LimitEvent, ...]:
-        return limit_events_on(
-            store,
-            session=session,
-            as_of=session_publication_instant(session),
-            exchange=EXCHANGE,
-        )
-
-    return events_on
+    return veto_reader(store, exchange=EXCHANGE, read=limit_events_on)
 
 
 def _vetoed_on(
@@ -2622,22 +2619,23 @@ def _vetoed_on(
 ) -> frozenset[str]:
     """The rule's answer on `day`: the `lookback` sessions **ending at** `day`, newest first.
 
-    A session further back than the fourth predecessor is never passed to `vetoed_codes`: the
-    window is the rule's, and a rule that read six sessions would not be
-    `market_bearish_5/v1`. Reading the calendar's predecessor (instead of subtracting days) is
-    what makes the window five *sessions* across a holiday or a year boundary.
+    The window is assembled by `panel_limit_events.veto_sessions` (`V2-P7-027`, Task 1), which
+    reads the calendar's predecessor rather than subtracting days -- that is what makes the
+    window five *sessions* across a holiday or a year boundary -- and refuses a walk past the
+    calendar's start with `LimitEventReadError`. The refusal is re-raised as the `ReadingError`
+    this module has always answered with, so the A/B section's isolation still sees the same
+    kind of error and its document's wording does not change.
     """
-    sessions = [day]
-    current = day
-    for _ in range(lookback - 1):
-        try:
-            current = calendar.previous_trading_day(current)
-        except CalendarHorizonError as error:
-            raise ReadingError(
-                f"the veto's {lookback}-session window ending {day.isoformat()} reaches the "
-                f"start of the calendar the reading loaded: {error}"
-            ) from error
-        sessions.append(current)
+    try:
+        sessions = veto_sessions(day, calendar=calendar, lookback=lookback)
+    except LimitEventReadError as error:
+        # The window sentence was already written here before the assembly moved into the panel
+        # plane; `veto_sessions`'s own error repeats it, so interpolating the *cause* (the
+        # calendar's error, which is what this line always interpolated) keeps the bytes equal.
+        raise ReadingError(
+            f"the veto's {lookback}-session window ending {day.isoformat()} reaches the "
+            f"start of the calendar the reading loaded: {error.__cause__}"
+        ) from error
     return vetoed_codes([events_for(session) for session in sessions])
 
 

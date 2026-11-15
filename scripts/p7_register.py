@@ -29,10 +29,13 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, TypedDict
 from zoneinfo import ZoneInfo
+
+from pydantic import ValidationError
 
 _SCRIPTS: Final[Path] = Path(__file__).resolve().parent
 for _root in (_SCRIPTS, _SCRIPTS / "research"):
@@ -49,6 +52,8 @@ from openalpha_cn import (  # noqa: E402
     strategy_survivor_continuation,
     strategy_survivor_forward,
 )
+from openalpha_cn.domain.survivor_book import SurvivorBookConfig  # noqa: E402
+from openalpha_cn.domain.survivor_veto import VETO_RULE_ID  # noqa: E402
 
 REGISTRATION_PATH: Final[str] = "docs/research/p7-registration.json"
 RESEARCH_DIRECTORY: Final[str] = "docs/research"
@@ -99,6 +104,16 @@ class SupersedesRefusedError(RegistrationWriterError):
 
 class ChainRefusedError(RegistrationWriterError):
     """The registration chain would stop being one rooted chain."""
+
+
+class ParallelOfRefusedError(RegistrationWriterError):
+    """The base registration a parallel book names, or the pair of arguments itself, cannot be
+    written as asked (`V2-P7-027`, R-N5)."""
+
+
+class EntryVetoRefusedError(RegistrationWriterError):
+    """A parallel book must carry plan A's live entry veto; `none` (the base book's rule) and
+    anything else are refused by name."""
 
 
 class RegistrationRefusedError(RegistrationWriterError):
@@ -188,11 +203,22 @@ forward report and the protocol document are read against. Every value is a cand
 verdict."""
 
 
-def registration_body(epoch: date) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
+def registration_body(
+    epoch: date,
+    *,
+    book: SurvivorBookConfig | None = None,
+    parallel_of: ParallelOf | None = None,
+) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
     """The registration's `(config, criteria, settings)` for `epoch`: plan sections 1.1 and 1.2.
 
-    Pure: returns fresh copies, so a caller changing one cannot move the frozen literals."""
-    config = p7_smoke_env.smoke_configuration(epoch)
+    Pure: returns fresh copies, so a caller changing one cannot move the frozen literals.
+
+    `book` is the book's parameters when they are not the design's (a parallel book's: the base
+    book's parameters as a `survivor-book-config/v2` carrying plan A's veto); `parallel_of` is the
+    `{"path", "sha256"}` block naming the committed base registration the parallel book runs
+    beside (`V2-P7-027`, R-N5), written under `settings.survivor_parallel_of`. The base body names
+    neither, so its config, settings and `config_id` are the frozen ones still."""
+    config = p7_smoke_env.smoke_configuration(epoch, book=book)
     # 用户按建议采纳（2026-11-12）：D-4 本登记不带任何 agent_* 块，方案 C 的映射只在协议文档里占位。
     settings: dict[str, Any] = {
         **grid.protocol_settings(),
@@ -200,6 +226,11 @@ def registration_body(epoch: date) -> tuple[dict[str, Any], dict[str, str], dict
         "survivor_forward_power": copy.deepcopy(FORWARD_POWER),
         "survivor_forward_stop_rule": strategy_survivor_forward.adopted_forward_stop_rule(),
     }
+    if parallel_of is not None:
+        settings[_PARALLEL_KEY] = {
+            "path": parallel_of["path"],
+            "sha256": parallel_of["sha256"],
+        }
     return config, copy.deepcopy(CRITERIA), settings
 
 
@@ -209,6 +240,32 @@ _SURVIVOR_KIND: Final[str] = strategy_survivor.SURVIVOR_KIND
 _KIND_KEY: Final[str] = strategy_survivor.KIND_KEY
 _SMOKE_KEY: Final[str] = daily_selection.SMOKE_SETTINGS_KEY
 _CONTINUATION_KEY: Final[str] = strategy_survivor_continuation.SURVIVOR_CONTINUATION_KEY
+_PARALLEL_KEY: Final[str] = daily_selection.SURVIVOR_PARALLEL_OF_KEY
+"""The `settings` key that names the base registration a parallel book runs beside (R-N5), taken
+from `daily_selection` as `_SMOKE_KEY` is: the daily command and its plist printer read the same
+spelling, and `src/` imports no script. The block is `{"path", "sha256"}`, written by this writer;
+a registration carrying it is outside the 006b chain -- never a root, never a continuation -- and
+the chain test verifies every block against the committed base."""
+_SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
+
+
+class ParallelOf(TypedDict):
+    """The base registration a parallel book runs beside: its repository-relative path and the
+    sha256 of its committed bytes (`V2-P7-027`, Task 5; R-N5)."""
+
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelBase:
+    """A committed base registration read back for a parallel book: the block to record, and the
+    base's book parameters as the `survivor-book-config/v2` a parallel registration stores."""
+
+    path: str
+    sha256: str
+    book: SurvivorBookConfig
+    config_id: str
 
 
 def committed_survivor_registrations(repo: Path) -> dict[str, dict[str, Any]]:
@@ -249,12 +306,55 @@ def committed_survivor_registrations(repo: Path) -> dict[str, dict[str, Any]]:
 
 
 def _chain_roots(registrations: Mapping[str, Mapping[str, Any]]) -> list[str]:
-    """The registrations whose settings carry no `survivor_continuation`: the chain's root."""
+    """The registrations whose settings carry neither `survivor_continuation` nor
+    `survivor_parallel_of`: the chain's roots.
+
+    A parallel registration is outside the chain by R-N5 (`V2-P7-027`): it runs beside the base
+    book and never extends or forks it, so it is not a root and not counted in the one-root rule
+    (`chain_problems`)."""
     return sorted(
         path
         for path, body in registrations.items()
-        if isinstance(body.get("settings"), Mapping) and _CONTINUATION_KEY not in body["settings"]
+        if isinstance(body.get("settings"), Mapping)
+        and _CONTINUATION_KEY not in body["settings"]
+        and _PARALLEL_KEY not in body["settings"]
     )
+
+
+def _parallel_problems(
+    path: str, block: object, registrations: Mapping[str, Mapping[str, Any]]
+) -> list[str]:
+    """Why `path`'s `survivor_parallel_of` block is not one a parallel registration may carry.
+
+    Structural only -- the sha256 is checked against git by the chain test and by the writer
+    (`_refuse_a_bad_parallel_block`), because this function has no repository. Shape, no
+    self-reference, and a base that is a committed member of the set: the block names a base
+    registration, never a path outside the registration set (a missing file, a smoke
+    registration, or the parallel registration itself)."""
+    if not isinstance(block, Mapping):
+        return [f"{path}: its {_PARALLEL_KEY} is not an object, so its base is unreadable"]
+    named = block.get("path")
+    digest = block.get("sha256")
+    problems: list[str] = []
+    if not isinstance(named, str) or not named:
+        problems.append(f"{path}: its {_PARALLEL_KEY} names no base registration path")
+        return problems
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        problems.append(
+            f"{path}: its {_PARALLEL_KEY} names no sha256 of the base registration's committed "
+            f"bytes ({digest!r})"
+        )
+    if named == path:
+        problems.append(
+            f"{path}: its {_PARALLEL_KEY} names itself; a parallel registration runs beside a "
+            "base registration, never beside itself"
+        )
+    elif named not in registrations:
+        problems.append(
+            f"{path}: it names {named}, which is not a committed survivor registration; a "
+            f"parallel registration's {_PARALLEL_KEY} names the base it runs beside (R-N5)"
+        )
+    return problems
 
 
 def chain_problems(registrations: Mapping[str, Mapping[str, Any]]) -> list[str]:
@@ -262,10 +362,17 @@ def chain_problems(registrations: Mapping[str, Mapping[str, Any]]) -> list[str]:
 
     Exactly one registration is a root (none when the set is empty); every other registration's
     `survivor_continuation` block reads, and names a registration in the set; and no two name the
-    same predecessor -- a fork is a second chain nobody declared."""
+    same predecessor -- a fork is a second chain nobody declared.
+
+    A registration with `survivor_parallel_of` is outside the chain by R-N5 (`V2-P7-027`): it is
+    neither a root nor a link, its block must be one of `_parallel_problems`, and naming a
+    `survivor_continuation` in the same body is refused -- a parallel book is never both. A
+    continuation that names a parallel registration as its predecessor is refused as well: the
+    parallel book's records never enter the chain's confirmatory sample."""
     problems: list[str] = []
     roots: list[str] = []
     successors: dict[str, list[str]] = {}
+    members: list[str] = []
     for path in sorted(registrations):
         settings = registrations[path].get("settings")
         if not isinstance(settings, Mapping):
@@ -276,6 +383,15 @@ def chain_problems(registrations: Mapping[str, Mapping[str, Any]]) -> list[str]:
         except strategy_survivor_continuation.SurvivorContinuationError as error:
             problems.append(f"{path}: {error}")
             continue
+        if _PARALLEL_KEY in settings:
+            problems.extend(_parallel_problems(path, settings[_PARALLEL_KEY], registrations))
+            if continuation is not None:
+                problems.append(
+                    f"{path}: it names both {_PARALLEL_KEY} and {_CONTINUATION_KEY}; a parallel "
+                    "registration runs beside its base book and never continues one (R-N5)"
+                )
+            continue
+        members.append(path)
         if continuation is None:
             roots.append(path)
             continue
@@ -285,9 +401,16 @@ def chain_problems(registrations: Mapping[str, Mapping[str, Any]]) -> list[str]:
             problems.append(
                 f"{path}: it names {successor}, which is not a committed survivor registration"
             )
+            continue
+        named_settings = registrations[successor].get("settings")
+        if isinstance(named_settings, Mapping) and _PARALLEL_KEY in named_settings:
+            problems.append(
+                f"{path}: it names {successor}, a parallel registration; a parallel book runs "
+                "beside the chain and is never a predecessor its sample is continued from (R-N5)"
+            )
     if len(roots) > 1:
         problems.append(f"more than one chain root: {roots}")
-    elif registrations and not roots:
+    elif members and not roots:
         problems.append(
             "no chain root: every registration names a predecessor, so the chain is a cycle or "
             "leaves the set"
@@ -318,12 +441,221 @@ def _with_predecessor(repo: Path, settings: Mapping[str, Any], value: str) -> di
     config_id = admitted.registered.get("config_id")
     if not isinstance(config_id, str) or not config_id:
         raise SupersedesRefusedError(f"{value}: the predecessor names no config_id")
+    inherited = admitted.registered.get("settings")
+    if isinstance(inherited, Mapping) and _PARALLEL_KEY in inherited:
+        raise SupersedesRefusedError(
+            f"{relative} is a parallel registration: a parallel book runs beside the base book "
+            "and its records never enter a chain's sample, so it is never a predecessor a "
+            "registration continues (R-N5)"
+        )
     block = strategy_survivor_continuation.continuation_block(
         path=relative,
         sha256=hashlib.sha256(admitted.content).hexdigest(),
         config_id=config_id,
     )
     return {**settings, _CONTINUATION_KEY: block}
+
+
+# --- Task 5: the parallel book beside the base book (`V2-P7-027`, R-N5) --------------------------
+
+
+def _checked_entry_veto(value: str) -> str:
+    """`--entry-veto`'s value: plan A's live rule, or a refusal that says why.
+
+    A parallel book is A's veto book beside the base book. `none` is the base book's rule (R-N4):
+    a second registration with no veto would be the base configuration again, so it is refused by
+    name rather than written."""
+    if value == VETO_RULE_ID:
+        return value
+    if value == "none":
+        raise EntryVetoRefusedError(
+            "--entry-veto none: a parallel registration is A's veto book beside the base book, "
+            "and the base book is the one registered without a veto (R-N4); a second registration "
+            f"with none would be the base configuration again. Name {VETO_RULE_ID}"
+        )
+    raise EntryVetoRefusedError(
+        f"--entry-veto {value!r} is not a rule this build registers: a parallel book carries "
+        f"{VETO_RULE_ID}, the rule plan A fixes"
+    )
+
+
+def _head_bytes(repo: Path, relative: str) -> bytes | None:
+    """`HEAD:<relative>`'s bytes, or `None` when `HEAD` does not hold the path.
+
+    Bytes on purpose: the parallel block's sha256 is over exactly the committed bytes, so the
+    read cannot go through a text decode."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment |= {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        finished = subprocess.run(
+            ["git", "show", f"HEAD:{relative}"],
+            cwd=repo,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise CheckoutRefusedError(
+            f"git show HEAD:{relative} in {repo} could not run: {error}"
+        ) from error
+    if finished.returncode != 0:
+        return None
+    return finished.stdout
+
+
+def _parallel_base(repo: Path, value: str, entry_veto: str) -> ParallelBase:
+    """The committed base registration `--parallel-of` names, read back as a parallel book's base.
+
+    Its bytes must be the ones `HEAD` holds (`registry.committed_registration`: an untracked file
+    has no committed sha256, and an edit after the commit is no longer the registered bytes); it
+    is a non-smoke survivor registration; it is not itself a parallel registration (a parallel
+    book runs beside a base book, never beside another parallel one); and its `survivor_book`
+    block is re-read as a `survivor-book-config/v2` carrying `entry_veto` -- the base's
+    parameters, the parallel book's version and rule."""
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = repo / candidate
+    try:
+        root, admitted = registry.committed_registration(candidate, repo)
+    except (registry.RegistrationNotCommittedError, registry.HoldoutConfigurationError) as error:
+        raise ParallelOfRefusedError(f"{value}: {error}") from error
+    try:
+        relative = candidate.resolve().relative_to(Path(root).resolve()).as_posix()
+    except ValueError as error:
+        raise ParallelOfRefusedError(
+            f"{value} is outside the repository {root}: a parallel registration names a "
+            "committed registration of this repository as its base"
+        ) from error
+    body = admitted.registered
+    config = body.get("config")
+    settings = body.get("settings")
+    if (
+        not isinstance(config, Mapping)
+        or config.get(_KIND_KEY) != _SURVIVOR_KIND
+        or not isinstance(settings, Mapping)
+    ):
+        raise ParallelOfRefusedError(
+            f"{relative} is not a survivor registration: a parallel registration runs beside the "
+            f"survivor book's registration, and {relative} registers no {_SURVIVOR_KIND}"
+        )
+    if _SMOKE_KEY in settings:
+        raise ParallelOfRefusedError(
+            f"{relative} is a smoke registration: a parallel book runs beside the registered book "
+            "and never beside a smoke run"
+        )
+    if _PARALLEL_KEY in settings:
+        raise ParallelOfRefusedError(
+            f"{relative} is itself a parallel registration: a parallel book runs beside the base "
+            "registration, never beside another parallel book"
+        )
+    block = config.get(strategy_survivor.BOOK_BLOCK)
+    if not isinstance(block, Mapping):
+        raise ParallelOfRefusedError(
+            f"{relative} registers no {strategy_survivor.BOOK_BLOCK} block: its parameters "
+            "cannot be made a parallel book's"
+        )
+    try:
+        book = p7_smoke_env.veto_book(entry_veto, block)
+    except ValidationError as error:
+        raise ParallelOfRefusedError(
+            f"{relative}'s book parameters are not a survivor-book-config/v2 a parallel book can "
+            f"store: {error}"
+        ) from error
+    config_id = body.get("config_id")
+    return ParallelBase(
+        path=relative,
+        sha256=hashlib.sha256(admitted.content).hexdigest(),
+        book=book,
+        config_id=config_id if isinstance(config_id, str) else "",
+    )
+
+
+def _refuse_a_bad_parallel_block(repo: Path, settings: Mapping[str, Any]) -> None:
+    """Read the `survivor_parallel_of` block back against `HEAD` before anything is written.
+
+    The sha256 must be the committed base's, exactly: a block naming another digest points a
+    registration at bytes the base no longer holds, so it is refused by name here rather than
+    written and discovered later."""
+    block = settings.get(_PARALLEL_KEY)
+    if block is None:
+        return
+    if not isinstance(block, Mapping) or set(block) != {"path", "sha256"}:
+        raise ParallelOfRefusedError(
+            f"the {_PARALLEL_KEY} block is {{'path', 'sha256'}}, not {block!r}: a parallel "
+            "registration names one base registration"
+        )
+    named = block.get("path")
+    digest = block.get("sha256")
+    if not isinstance(named, str) or not named:
+        raise ParallelOfRefusedError(
+            f"the {_PARALLEL_KEY} block names no base registration path ({named!r})"
+        )
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise ParallelOfRefusedError(
+            f"the {_PARALLEL_KEY} block names no sha256 of {named}'s committed bytes ({digest!r})"
+        )
+    held = _head_bytes(repo, named)
+    if held is None:
+        raise ParallelOfRefusedError(
+            f"the base registration {named} is not a file HEAD holds: a parallel registration "
+            "names a committed base registration whose sha256 it records"
+        )
+    actual = hashlib.sha256(held).hexdigest()
+    if actual != digest:
+        raise ParallelOfRefusedError(
+            f"the base registration {named} holds sha256 {actual} at HEAD, not the {digest} the "
+            f"{_PARALLEL_KEY} block names: a parallel registration names the bytes it was built "
+            "from"
+        )
+
+
+def _entry_veto_of(config: object) -> str | None:
+    """The `survivor_book.entry_veto` a configuration carries, or `None` when it names no book.
+
+    A v1 stored block has no `entry_veto` (the field is outside v1's stored form), so a committed
+    registration's absence reads as `"none"` -- the base book's rule."""
+    if not isinstance(config, Mapping):
+        return None
+    book = config.get(strategy_survivor.BOOK_BLOCK)
+    if not isinstance(book, Mapping):
+        return None
+    rule = book.get("entry_veto", "none")
+    return rule if isinstance(rule, str) else None
+
+
+def _refuse_a_second_parallel(
+    committed: Mapping[str, Mapping[str, Any]],
+    block: ParallelOf,
+    config: Mapping[str, Any],
+    config_id: str,
+) -> None:
+    """One base book has one parallel book **per entry-veto rule** (`V2-P7-027`, R-N5).
+
+    A second parallel registration of the same base under the same rule is the same book, so it
+    is refused; a different rule beside the same base is a different book -- R-N7's LLM veto will
+    need one beside 006b -- and is allowed. Every candidate is a committed registration already
+    read from `HEAD`; the refusal names the file an operator would have to look at."""
+    rule = _entry_veto_of(config)
+    for path in sorted(committed):
+        settings = committed[path].get("settings")
+        if not isinstance(settings, Mapping):
+            continue
+        existing = settings.get(_PARALLEL_KEY)
+        if not isinstance(existing, Mapping) or existing.get("path") != block["path"]:
+            continue
+        if _entry_veto_of(committed[path].get("config")) == rule:
+            raise ParallelOfRefusedError(
+                f"{path} is already the parallel registration of {block['path']} under "
+                f"entry_veto {rule!r}: a base book has one parallel book per rule, so "
+                f"configuration {config_id} cannot be registered a second time (R-N5)"
+            )
 
 
 def read_back(
@@ -351,8 +683,16 @@ _NEXT_STEP: Final[str] = (
     "next: stage and commit only this one file yourself -- the message names V2-P7-006b -- and "
     "then run the registration test; this writer never stages, commits or pushes anything."
 )
-"""What to do after a successful write. It names the step in words rather than as a shell line: the
-writer is the only thing here that touches a registration, and it is not a commit helper."""
+"""What to do after the base registration's successful write. It names the step in words rather
+than as a shell line: the writer is the only thing here that touches a registration, and it is not
+a commit helper."""
+_PARALLEL_NEXT_STEP: Final[str] = (
+    "next: stage and commit only this one file yourself -- the message names V2-P7-027 -- and "
+    "then run the registration test; a parallel registration is outside the 006b chain, and this "
+    "writer never stages, commits or pushes anything."
+)
+"""What to do after a parallel registration's successful write: the same step, under the parallel
+registration's own issue (`V2-P7-027`), and saying it is outside the 006b chain."""
 
 
 def _today() -> date:
@@ -530,22 +870,78 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--smoke-commit", required=True)
     parser.add_argument("--path", default=REGISTRATION_PATH)
     parser.add_argument("--supersedes")
+    parser.add_argument(
+        "--entry-veto",
+        metavar="RULE",
+        help="A parallel book's entry veto: the rule plan A fixes (market_bearish_5/v1). "
+        "Given only with --parallel-of; the parallel registration is written as a "
+        "survivor-book-config/v2 carrying it.",
+    )
+    parser.add_argument(
+        "--parallel-of",
+        metavar="REGISTRATION",
+        help="The committed base registration the parallel book runs beside. Given only with "
+        "--entry-veto; the parallel registration is outside the survivor chain (R-N5).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
+def _refuse_a_half_parallel_pair(arguments: argparse.Namespace) -> None:
+    """`--entry-veto` and `--parallel-of` are one registration's pair: a rule with no base, or a
+    base with no rule, would write a registration that names only half of what it is."""
+    if (arguments.entry_veto is None) == (arguments.parallel_of is None):
+        return
+    raise ParallelOfRefusedError(
+        "--entry-veto and --parallel-of are one parallel registration's pair: the rule the book "
+        "applies and the committed base book it runs beside. Given only one, nothing is written; "
+        "give both, or neither for the base book (R-N5)"
+    )
+
+
+def _refuse_a_parallel_continuation(arguments: argparse.Namespace) -> None:
+    """R-N5: a parallel registration is never a continuation, and a continuation is never a
+    parallel registration; the two blocks in one body are refused by name."""
+    if arguments.parallel_of is None or arguments.supersedes is None:
+        return
+    raise ParallelOfRefusedError(
+        f"--parallel-of {arguments.parallel_of} with --supersedes {arguments.supersedes}: a "
+        "parallel registration runs beside its base book and is never a continuation or a chain "
+        f"link; it names its base in settings.{_PARALLEL_KEY} only (R-N5)"
+    )
+
+
 def _write(arguments: argparse.Namespace) -> None:
+    _refuse_a_half_parallel_pair(arguments)
+    _refuse_a_parallel_continuation(arguments)
     repo = _repository()
     head = _git(repo, "rev-parse", "HEAD")
     _refuse_an_unwritable_checkout(repo, head)
     _refuse_a_smoke_commit(repo, arguments.smoke_commit)
     path = _checked_path(repo, arguments.path)
     epoch = _checked_epoch(arguments.epoch, _today())
-    config, criteria, settings = registration_body(epoch)
     committed = committed_survivor_registrations(repo)
+    book = None
+    base: ParallelBase | None = None
+    parallel: ParallelOf | None = None
+    if arguments.parallel_of is not None:
+        entry_veto = _checked_entry_veto(arguments.entry_veto)
+        base = _parallel_base(repo, arguments.parallel_of, entry_veto)
+        book = base.book
+        parallel = {"path": base.path, "sha256": base.sha256}
+    config, criteria, settings = registration_body(epoch, book=book, parallel_of=parallel)
+    config_id = grid.config_id(config)
+    if base is not None and base.config_id == config_id:
+        raise ParallelOfRefusedError(
+            f"{base.path} already registers configuration {config_id}: the base book's "
+            "parameters with the same veto and epoch are the same configuration, so a parallel "
+            "registration would be a second copy of the base book"
+        )
+    if parallel is not None:
+        _refuse_a_second_parallel(committed, parallel, config, config_id)
     if arguments.supersedes is not None:
         settings = _with_predecessor(repo, settings, arguments.supersedes)
-    else:
+    elif parallel is None:
         roots = _chain_roots(committed)
         if roots:
             raise ChainRefusedError(
@@ -553,6 +949,8 @@ def _write(arguments: argparse.Namespace) -> None:
                 "given: every survivor registration after the first must name the one it "
                 "supersedes (U1)"
             )
+    if parallel is not None:
+        _refuse_a_bad_parallel_block(repo, settings)
     read_back(config, criteria, settings)
     proposed = {
         **committed,
@@ -562,7 +960,6 @@ def _write(arguments: argparse.Namespace) -> None:
     if problems:
         raise ChainRefusedError("; ".join(problems))
     content = _document(config, criteria, settings, head)
-    config_id = grid.config_id(config)
     digest = hashlib.sha256(content).hexdigest()
     if arguments.dry_run:
         sys.stdout.write(content.decode("utf-8"))
@@ -588,7 +985,7 @@ def _write(arguments: argparse.Namespace) -> None:
     print(f"wrote {path.relative_to(repo).as_posix()}")
     print(f"config_id {config_id}")
     print(f"sha256 {written}")
-    print(_NEXT_STEP)
+    print(_PARALLEL_NEXT_STEP if parallel is not None else _NEXT_STEP)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

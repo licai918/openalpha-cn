@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import json
 import os
 import re
 import shutil
@@ -38,7 +39,7 @@ from test_daily_selection_survivor import STEADY_SURVIVOR
 from test_daily_selection_survivor_day import seeded  # noqa: F401  (a module fixture, reused)
 from typer.main import get_command
 
-from openalpha_cn import cli
+from openalpha_cn import cli, strategy_survivor
 from openalpha_cn.panel.store import _try_lock, _unlock
 
 ROOT: Final[Path] = Path(__file__).resolve().parents[3]
@@ -1012,9 +1013,12 @@ def _prepare_through_the_driver(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     checkout: Path,
+    *,
+    extra: Sequence[str] = (),
 ) -> tuple[int, str, str, list[Path]]:
     """`prepare` as the user runs it, from `checkout` standing in for the driver's own checkout,
-    with `HOME` in `tmp_path` and a policy that allows `tmp_path`."""
+    with `HOME` in `tmp_path` and a policy that allows `tmp_path`; `extra` are further `prepare`
+    options (a parallel book's `--entry-veto`)."""
     home = tmp_path / "home"
     _research_panel(home)
     monkeypatch.setenv("HOME", str(home))
@@ -1035,10 +1039,22 @@ def _prepare_through_the_driver(
 
     monkeypatch.setattr(env.PathPolicy, "default", classmethod(default))
     code = driver.main(
-        ["prepare", "--smoke-root", str(tmp_path / "smoke"), "--epoch", "2026-04-03",
-         "--phase1-cap", "190", "--phase2-cap", "460", "--uv", "uv"],
+        [
+            "prepare",
+            "--smoke-root",
+            str(tmp_path / "smoke"),
+            "--epoch",
+            "2026-04-03",
+            "--phase1-cap",
+            "190",
+            "--phase2-cap",
+            "460",
+            "--uv",
+            "uv",
+            *extra,
+        ],
         clock=lambda: NOW,
-    )  # fmt: skip
+    )
     out, err = capsys.readouterr()
     assert env_tests.SENTINEL not in out + err
     return code, out, err, policed
@@ -1074,6 +1090,108 @@ def test_prepare_clones_its_own_checkout_and_p6_s_panel_by_default(
     ):
         assert shown in out, shown
     assert "shallow" not in err
+
+
+def _prepared_registration(tmp_path: Path) -> dict[str, Any]:
+    """The smoke registration `prepare` wrote in the smoke root's clone, read as a document."""
+    manifest = env.SmokeManifest.read(tmp_path / "smoke")
+    document: dict[str, Any] = json.loads(manifest.registration.read_text(encoding="utf-8"))
+    return document
+
+
+def test_prepare_without_an_entry_veto_writes_the_base_design_books_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The flag is opt-in (`V2-P7-027`, plan A): without it the smoke registration is exactly the
+    base design book's -- the same configuration `smoke_configuration` builds, no `entry_veto`
+    key, a v1 identity -- so a base smoke's bytes do not move."""
+    source = env_tests._source_repository(tmp_path)
+
+    code, _out, err, _policed = _prepare_through_the_driver(tmp_path, monkeypatch, capsys, source)
+
+    assert code == 0, err
+    document = _prepared_registration(tmp_path)
+    epoch = date.fromisoformat(document["config"]["adapter"]["epoch_session"])
+    assert document["config"] == env.smoke_configuration(epoch)
+    assert document["settings"] == env.smoke_settings()
+    assert document["config_id"] == tds.grid.config_id(document["config"])
+    # Frozen on commit 9976e05 (`V2-P7-027`, final review N2): a literal, so a drift in the
+    # default smoke configuration fails here even though the two assertions above recompute the
+    # same value from the same functions. It was measured on that commit; a later change to the
+    # default book is a new registration and must change this literal deliberately.
+    assert (
+        document["config_id"] == "541761b864070df221d98e2d4cc0750c3b4001680fc5427f41fc4901c85839b3"
+    )
+    book = document["config"]["survivor_book"]
+    assert book["schema_version"] == "survivor-book-config/v1"
+    assert "entry_veto" not in book
+    survivor = strategy_survivor.read_survivor_registration(
+        document["config"], seed=document["settings"]["random_seed"]
+    )
+    assert survivor.book.entry_veto == "none"
+
+
+def test_prepare_with_an_entry_veto_writes_the_v2_veto_book(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--entry-veto market_bearish_5/v1` makes the smoke run A's parallel book: the base design
+    book's parameters as a `survivor-book-config/v2` carrying the veto, at the registered seed,
+    so the real panel goes through the veto path before the parallel registration freezes it."""
+    source = env_tests._source_repository(tmp_path)
+
+    code, _out, err, _policed = _prepare_through_the_driver(
+        tmp_path, monkeypatch, capsys, source, extra=("--entry-veto", env.VETO_RULE)
+    )
+
+    assert code == 0, err
+    document = _prepared_registration(tmp_path)
+    epoch = date.fromisoformat(document["config"]["adapter"]["epoch_session"])
+    book = document["config"]["survivor_book"]
+    assert book["schema_version"] == "survivor-book-config/v2"
+    assert book["entry_veto"] == env.VETO_RULE
+    assert book["seed"] == tds.grid.PROTOCOL_RANDOM_SEED
+    assert document["config"]["adapter"] == env.smoke_configuration(epoch)["adapter"]
+    assert document["config_id"] != tds.grid.config_id(env.smoke_configuration(epoch))
+    survivor = strategy_survivor.read_survivor_registration(
+        document["config"], seed=document["settings"]["random_seed"]
+    )
+    assert survivor.book.entry_veto == env.VETO_RULE
+
+
+def test_prepare_refuses_entry_veto_none_and_an_unknown_rule_before_making_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`none` is the base book's rule (R-N4) and anything else is not a rule this build
+    registers: both are a usage refusal (exit 2) that names the accepted rule, and no smoke root
+    is made."""
+    source = env_tests._source_repository(tmp_path)
+    monkeypatch.setattr(driver, "REPOSITORY", source)
+    monkeypatch.setattr(daily, "REPOSITORY", source)
+
+    for value in ("none", "llm_bearish/v1"):
+        with pytest.raises(SystemExit) as refused:
+            driver.main(
+                [
+                    "prepare",
+                    "--smoke-root",
+                    str(tmp_path / "smoke"),
+                    "--epoch",
+                    "2026-04-03",
+                    "--phase1-cap",
+                    "190",
+                    "--phase2-cap",
+                    "460",
+                    "--uv",
+                    "uv",
+                    "--entry-veto",
+                    value,
+                ],
+                clock=lambda: NOW,
+            )
+        assert refused.value.code == 2, value
+        err = capsys.readouterr().err
+        assert "--entry-veto" in err and env.VETO_RULE in err, value
+        assert not (tmp_path / "smoke").exists()
 
 
 def test_prepare_refuses_a_checkout_whose_smoke_scripts_are_not_what_head_holds(

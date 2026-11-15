@@ -21,12 +21,17 @@ panel build` or `factor build` a refusal printed -- each run in this process, as
 | `phase --to 2 --reason TEXT` | anywhere | phase 1 to 2, once | -- |
 
 `prepare` takes `--smoke-root DIR --epoch D --phase1-cap N --phase2-cap M` and `[--commit SHA]
-[--source-panel DIR] [--uv PATH]`: it is `prepare_smoke` of this checkout -- the commit is its
-`HEAD` by default and must be it, and the source panel is P6's, `~/openalpha-research/panel`, by
-default, never the repository's own `runtime/panel`; it warns of a shallow checkout, and refuses
-one whose `SMOKE_SCRIPTS` are not what `HEAD` holds. A remedy's
-kind sets its rule: `panel-build` has no ceiling, needs `PAGED_SESSION_REQUESTS x (catch_up_bound
-+ 1)` to start and discards on the cap; `factor-build` has a ceiling of 0; a day's rerun is an
+[--source-panel DIR] [--uv PATH] [--entry-veto RULE]`: it is `prepare_smoke` of this checkout --
+the commit is its `HEAD` by default and must be it, and the source panel is P6's,
+`~/openalpha-research/panel`, by default, never the repository's own `runtime/panel`; it warns of a
+shallow checkout, and refuses one whose `SMOKE_SCRIPTS` are not what `HEAD` holds. `--entry-veto
+market_bearish_5/v1` prepares A's **parallel** book instead of the design book (`V2-P7-027`,
+`p7_smoke_env.veto_book`), so the real panel goes through the veto path before the parallel
+registration freezes it; without the flag the smoke registration is the base design book's,
+byte for byte as before. `none` and any other rule are a usage refusal (exit 2) that names the
+rule. A remedy's kind sets its rule: `panel-build` has no ceiling, needs
+`PAGED_SESSION_REQUESTS x (catch_up_bound + 1)` to start and discards on the cap;
+`factor-build` has a ceiling of 0; a day's rerun is an
 `evening` or a `morning`. "To start" is the headroom: an invocation is refused, before anything is
 written, unless that many requests of the phase's cap remain.
 
@@ -915,7 +920,8 @@ def _phase(manifest: env.SmokeManifest, *, reason: str, clock: Callable[[], date
 
 def _prepare(arguments: argparse.Namespace, *, clock: Callable[[], datetime]) -> int:
     """`prepare_smoke` of this checkout, at its `HEAD` unless `--commit` names it, and of P6's
-    panel unless `--source-panel` names another; sends no request."""
+    panel unless `--source-panel` names another; sends no request. `--entry-veto` prepares A's
+    parallel book's smoke (`env.veto_book`), without it the base design book's."""
     source = REPOSITORY
     if daily.REPOSITORY.resolve() != source.resolve():
         raise SmokeDriverError(
@@ -939,6 +945,7 @@ def _prepare(arguments: argparse.Namespace, *, clock: Callable[[], datetime]) ->
     commit = arguments.commit or env._git(source, "rev-parse", "HEAD")
     panel = arguments.source_panel or Path.home() / "openalpha-research" / env.PANEL_NAME
     uv = (arguments.uv or Path(shutil.which("uv") or "uv")).resolve()
+    book = None if arguments.entry_veto is None else env.veto_book(arguments.entry_veto)
     manifest = env.prepare_smoke(
         root=arguments.smoke_root.expanduser(),
         source_repo=source,
@@ -949,6 +956,7 @@ def _prepare(arguments: argparse.Namespace, *, clock: Callable[[], datetime]) ->
         policy=env.PathPolicy.default(daily.REPOSITORY),
         uv=uv,
         clock=clock,
+        book=book,
         copy_tree=env.apfs_clone,
     )
     smoke = (
@@ -957,12 +965,14 @@ def _prepare(arguments: argparse.Namespace, *, clock: Callable[[], datetime]) ->
         f'{daily.ENV_FILE} "$PWD/{daily.PINNED_ENVIRONMENT}/bin/python" scripts/p7_smoke.py "$@" '
         ") }"
     )
+    prepared_book = "base design" if book is None else f"parallel, entry veto {env.VETO_RULE}"
     lines = [
         f"smoke root    {manifest.root}",
         f"commit        {manifest.commit} (the registration's: {manifest.registration_commit})",
         f"registration  {manifest.registration}",
         f"              sha256 {manifest.registration_sha256}",
         f"              config_id {manifest.config_id}",
+        f"book          {prepared_book}",
         f"epoch         {manifest.epoch.isoformat()}; catch-up bound {manifest.catch_up_bound} "
         "session(s)",
         f"caps          phase 1: {manifest.caps[1]} requests; phase 2 (the whole smoke): "
@@ -1020,6 +1030,21 @@ def _one_line(text: str) -> str:
     return lines[0]
 
 
+def _entry_veto_argument(value: str) -> str:
+    """`--entry-veto`'s only value: plan A's live rule (`V2-P7-027`). `none` is the base book's
+    (`R-N4`) and anything else is not a rule this build registers; both are a usage refusal
+    (argparse's exit 2) whose message names the accepted rule. A usage refusal is right here
+    rather than the driver's `REFUSED_EXIT`: the flag's value is the command line's, and nothing
+    is made."""
+    if value == env.VETO_RULE:
+        return value
+    raise argparse.ArgumentTypeError(
+        f"{value!r} is not the entry veto a parallel smoke carries: name {env.VETO_RULE}, plan "
+        "A's rule; `none` is the base book's rule and a book without a veto is not a parallel "
+        "book (R-N4)"
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="p7_smoke.py",
@@ -1036,6 +1061,14 @@ def _parser() -> argparse.ArgumentParser:
         "--source-panel", type=Path, default=None, help="Default: ~/openalpha-research/panel."
     )
     prepare.add_argument("--uv", type=Path, default=None, help="Default: the uv on PATH.")
+    prepare.add_argument(
+        "--entry-veto",
+        type=_entry_veto_argument,
+        default=None,
+        metavar="RULE",
+        help="Prepare A's parallel book's smoke (V2-P7-027): the design book as a "
+        "survivor-book-config/v2 carrying this rule. Omit for the base design book.",
+    )
     for name, text in (
         ("evening", "The day: scripts/daily_selection.py."),
         ("morning", "The morning re-check: scripts/daily_selection.py --morning-recheck."),

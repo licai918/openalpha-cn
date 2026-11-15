@@ -25,6 +25,7 @@ from test_daily_selection_survivor_day import seeded  # noqa: F401  (a module fi
 
 from openalpha_cn import strategy_survivor_summary
 from openalpha_cn.backtest.paper_state import held_head
+from openalpha_cn.domain.survivor_veto import VETO_RULE_ID
 from openalpha_cn.storage.paper_state import FilePaperStateStore
 
 daily = tds.daily
@@ -655,3 +656,94 @@ def test_show_book_reads_the_snapshot_directory_the_composition_root_names(
 
     assert code == 0
     assert json.loads(out)["kind"] == daily.BOOK_VIEW_KIND
+
+
+# --- a parallel book's listing says which book it is (`V2-P7-027`, R-N5) -------------------------
+
+
+def _parallel_registration(tmp_path: Path, registration: Path) -> Path:
+    """The held book's registration as a parallel book's: a `survivor-book-config/v2` carrying
+    plan A's entry veto and `settings.survivor_parallel_of` naming the base it runs beside. The
+    file is not committed, and `--show-book` reads it only at the print boundary: no day runs and
+    no configuration is admitted, so only the identity read matters here."""
+    body = json.loads(registration.read_text(encoding="utf-8"))
+    book = dict(body["config"]["survivor_book"])
+    book["schema_version"] = "survivor-book-config/v2"
+    book["entry_veto"] = VETO_RULE_ID
+    body["config"]["survivor_book"] = book
+    body.setdefault("settings", {})[daily.SURVIVOR_PARALLEL_OF_KEY] = {
+        "path": "docs/research/p7-registration.json",
+        "sha256": "0" * 64,
+    }
+    path = tmp_path / "parallel-registration.json"
+    path.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def test_show_book_of_a_parallel_registration_is_bannered_first_and_last(
+    world: tds.World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parallel book's listing says which book it is on its first and last line, and its JSON
+    carries the identity under `parallel` (`V2-P7-027`, R-N5): the user trades by hand from two
+    books of the same shape, so the listing alone must name the veto book."""
+    parallel = _parallel_registration(tmp_path, world.registration)
+    book = daily.parallel_book(parallel)
+    assert book is not None
+    before = _tree(world.runtime)
+
+    code, out, err = _show(world, as_json=False, registration=parallel)
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == lines[-1] == book.banner
+    assert VETO_RULE_ID in lines[0]
+    assert "不是基础账簿的清单 / not the base book's list" in lines[0]
+    assert any(line.startswith("read-only ") for line in lines)
+    assert _tree(world.runtime) == before
+
+    code, out, err = _show(world, registration=parallel)
+    assert code == 0, err
+    assert json.loads(out)["parallel"] == {
+        "config_id": book.config_id,
+        "entry_veto": VETO_RULE_ID,
+        "banner": book.banner,
+    }
+
+
+def test_a_base_show_book_carries_no_parallel_identity(world: tds.World) -> None:
+    """R-N4: the base book's listing is what it always was -- no banner, no `parallel` key."""
+    code, out, _err = _show(world, as_json=False)
+
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0].startswith("kind ")
+    assert lines[-1].startswith("read-only ")
+    assert "并列账簿" not in out
+
+    code, out, _err = _show(world)
+    assert code == 0
+    assert "parallel" not in json.loads(out)
+
+
+def test_a_show_book_that_is_both_keeps_the_smoke_and_the_parallel_banner(
+    world: tds.World, tmp_path: Path
+) -> None:
+    """Neither wrapper is lost when a registration is both a smoke run and a parallel book: the
+    smoke banner is outermost (the smoke wrapper's own order), the parallel identity inside it,
+    and the JSON carries both keys -- the smoke's and the parallel book's."""
+    parallel = _parallel_registration(tmp_path, world.registration)
+    both = _smoke_registration(tmp_path, parallel)
+    book = daily.parallel_book(both)
+    assert book is not None
+
+    code, out, err = _show(world, as_json=False, registration=both)
+    assert code == 0, err
+    lines = out.splitlines()
+    assert lines[0] == lines[-1] == daily.SMOKE_BANNER
+    assert lines[1] == lines[-2] == book.banner
+    assert err[0] == err[-1] == daily.SMOKE_BANNER
+
+    code, out, err = _show(world, registration=both)
+    assert code == 0, err
+    shown = json.loads(out)
+    assert shown["smoke"] == daily.SMOKE_BANNER
+    assert shown["parallel"]["config_id"] == book.config_id

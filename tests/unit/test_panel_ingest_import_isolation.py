@@ -603,10 +603,20 @@ RESEARCH_PLANE_SEAM_IMPORTS: dict[str, frozenset[str]] = {
             # tonight's when the catch-up changed the holdings ...
             "strategy_survivor_facts.FactsDay",
             "strategy_survivor_facts.build_facts_day",
-            # ... and each session's market, counted in the book's ordinals. It reads nothing
-            # itself: every read is one of these two adapters'.
+            # ... and each session's market, counted in the book's ordinals ...
             "strategy_survivor_market.SessionOrdinals",
             "strategy_survivor_market.settlement_market",
+            # ... and (`V2-P7-027`) the one panel read the evening makes itself: plan A's entry
+            # veto's window, each session of it at its own 16:30, for a book registered with the
+            # rule. It reaches `daily`, `stk_limit` and `trade_cal`, which the two adapters'
+            # reads above already reach, so the dataset row below does not grow.
+            "panel_limit_events.vetoed_on",
+            # ... and, for that read only (fix round 1, review finding 1), the calendar it walks:
+            # the session's year and the one before it, at the session's publication instant,
+            # because the evening's own calendar stops at the epoch's year. Reaches `trade_cal`,
+            # already in the row; `session_publication_instant` is a clock and reaches none.
+            "panel_ingest.load_trading_calendar",
+            "panel_ingest.session_publication_instant",
         }
     ),
     "openalpha_cn.strategy_survivor_check": frozenset(
@@ -1164,13 +1174,19 @@ RESEARCH_PLANE_DATASETS: dict[str, DatasetReach] = {
         ),
     ),
     "openalpha_cn.strategy_survivor_book": DatasetReach(
-        # V2-P7-008. It names no dataset: every one it reaches arrives through the two adapters
-        # it takes across the seam -- the facts day (`build_facts_day`: the calendar, the
-        # registry, the name corpus, the halts, the bands, the bars and, through the processed
-        # factor tier, the inputs of the four factors) and the session's market
-        # (`settlement_market`: the bars and bands again, the adjustment factors and the
-        # benchmark's close).
-        named=frozenset(),
+        # V2-P7-008. Every dataset it reaches arrives through the two adapters it takes across
+        # the seam -- the facts day (`build_facts_day`: the calendar, the registry, the name
+        # corpus, the halts, the bands, the bars and, through the processed factor tier, the
+        # inputs of the four factors) and the session's market (`settlement_market`: the bars
+        # and bands again, the adjustment factors and the benchmark's close).
+        #
+        # V2-P7-027 final fix: `_veto_calendar` asks the catalog whether the session's prior year
+        # is registered for `trade_cal` (`registered_years(TRADING_CALENDAR_DATASET)`) to tell
+        # "the panel does not store the year before" from "it does and the read fails". That is
+        # a catalog question, not a data read, so `trade_cal` is named (the module's source can
+        # say the name) and the reached set is unchanged -- the dataset was already reached
+        # through the facts day's calendar.
+        named=frozenset({"trade_cal"}),
         reached=frozenset(
             {
                 "adj_factor",

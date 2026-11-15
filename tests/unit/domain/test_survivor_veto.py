@@ -18,6 +18,7 @@ this module names codes and nothing else, so `domain/survivor_policy.decide_book
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from datetime import date
 from typing import Final
 
@@ -28,6 +29,8 @@ from openalpha_cn.domain.limit_events import LimitEvent, LimitEventKind
 from openalpha_cn.domain.survivor_veto import (
     VETO_LOOKBACK_SESSIONS,
     VETO_RULE_ID,
+    VetoDetail,
+    veto_details,
     vetoed_codes,
 )
 
@@ -127,6 +130,85 @@ def test_the_result_is_a_frozenset_so_a_caller_cannot_mutate_the_decision() -> N
     vetoed = vetoed_codes([[event(A, "broken_board")]])
 
     assert isinstance(vetoed, frozenset)
+
+
+# --- `veto_details`: the same answer, per name, with the evidence behind it -------------------
+#
+# Plan A's daily annotation (Task 2) prints *why* a name is vetoed, not only that it is: the
+# event count and the mean weight are the two numbers the rule's arithmetic is made of. The
+# refactor must not become a second rule, so the equality below is the contract -- the details
+# select exactly the codes `vetoed_codes` selects, on every example in this file.
+
+
+def test_veto_details_names_only_the_securities_that_carry_an_event() -> None:
+    """A name with no event is absent, not present with a zero mean: it has no reading."""
+    details = veto_details([[event(A, "limit_up"), event(B, "broken_board")], []])
+
+    assert set(details) == {A, B}
+    assert details[A].ts_code == A
+
+
+def test_veto_details_agrees_with_vetoed_codes_on_every_example_of_the_rule() -> None:
+    """The plan's contract: the vetoed names are exactly the details' vetoed names."""
+    fixtures = (
+        [[event(A, "broken_board")]],
+        [[event(A, "limit_up"), event(A, "broken_board")]],
+        [[event(A, "broken_board"), event(A, "consecutive_board")]],
+        [[event(A, "broken_board")], [event(A, "broken_board")]],
+        [[event(A, "broken_board"), event(B, "limit_up"), event(C, "consecutive_board")]],
+        [],
+    )
+    for sessions in fixtures:
+        details = veto_details(sessions)
+
+        assert {detail.ts_code for detail in details.values() if detail.vetoed} == vetoed_codes(
+            sessions
+        )
+
+
+def test_veto_details_counts_events_and_averages_their_weights() -> None:
+    """The two numbers are the rule's own: the event count and the mean of the weights."""
+    details = veto_details(
+        [[event(A, "limit_up"), event(B, "broken_board")], [event(A, "broken_board")]]
+    )
+
+    assert details[A].event_count == 2
+    assert details[A].mean_weight == 0.0
+    assert details[A].vetoed is False
+    assert details[B].event_count == 1
+    assert details[B].mean_weight == -0.65
+    assert details[B].vetoed is True
+
+
+def test_veto_details_refuses_more_than_the_lookback_sessions_like_vetoed_codes() -> None:
+    """A sixth session is refused by the same name and in the same words, not cut here."""
+    sessions: list[list[LimitEvent]] = [[] for _ in range(VETO_LOOKBACK_SESSIONS + 1)]
+
+    with pytest.raises(ValueError, match="at most 5 sessions"):
+        vetoed_codes(sessions)
+    with pytest.raises(ValueError, match="at most 5 sessions"):
+        veto_details(sessions)
+
+
+def test_the_shared_window_refusal_names_the_function_the_caller_used() -> None:
+    """The shared guard keeps each caller's own wording: `vetoed_codes` said "vetoed_codes ..."."""
+    sessions: list[list[LimitEvent]] = [[] for _ in range(VETO_LOOKBACK_SESSIONS + 1)]
+
+    with pytest.raises(ValueError) as codes:
+        vetoed_codes(sessions)
+    with pytest.raises(ValueError) as details:
+        veto_details(sessions)
+
+    assert str(codes.value).startswith("vetoed_codes reads at most 5 sessions")
+    assert str(details.value).startswith("veto_details reads at most 5 sessions")
+
+
+def test_veto_detail_is_frozen_so_a_printed_row_cannot_be_edited_after_the_reading() -> None:
+    detail = veto_details([[event(A, "broken_board")]])[A]
+
+    assert isinstance(detail, VetoDetail)
+    with pytest.raises(FrozenInstanceError):
+        detail.vetoed = False  # type: ignore[misc]
 
 
 def test_survivor_veto_imports_nothing_numeric_and_no_sibling_subpackage() -> None:

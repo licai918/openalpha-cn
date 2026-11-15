@@ -49,6 +49,21 @@ range is still a refusal: the panel claims that year and cannot answer for it.
 the pair -- a published band with no bar is a halt (skipped, D2), while no band at all means the
 security is not listed and the walk ends. See `domain/limit_events.py`.
 
+## The veto window (`V2-P7-027`)
+
+`domain/survivor_veto.py` is plan A's rule; `veto_window` is its reading. The window is the
+target session and its four **calendar** predecessors, newest first -- the calendar's own
+`previous_trading_day`, never day arithmetic, so a holiday or a year boundary leaves five
+sessions and not five days -- and each session is read **at its own 16:30**
+(`session_publication_instant`), not at one late `as_of` for the whole window. That is what
+lets a rerun of the same evening reproduce the same set: a row published after a session's own
+16:30 cannot enter that session's events, and the panel store keeps no earlier version of a
+restated row, so such a read refuses by name rather than substituting the restated bytes. A
+walk that runs past the first session the calendar knows raises `LimitEventReadError` naming
+the window; `veto_sessions` assembles the window (and is the piece a caller holding its own
+per-session reader, like the research reading, delegates to), `veto_reader` builds the
+per-session producer, and `vetoed_on` is the rule applied to the whole window.
+
 ## Layering
 
 Top-level beside `panel_ingest`, for the same reason: it joins `domain` (the rule and the
@@ -60,8 +75,9 @@ across the seam and the datasets they can reach.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime
-from typing import Final
+from typing import Final, Protocol
 
 from openalpha_cn.domain.limit_events import (
     MAX_BOARD_LOOKBACK_SESSIONS,
@@ -70,6 +86,7 @@ from openalpha_cn.domain.limit_events import (
     session_limit_events,
     session_state,
 )
+from openalpha_cn.domain.survivor_veto import VETO_LOOKBACK_SESSIONS, vetoed_codes
 from openalpha_cn.domain.time import ensure_aware
 from openalpha_cn.domain.trading_calendar import (
     CalendarHorizonError,
@@ -156,6 +173,111 @@ def limit_events_on(
         max_lookback=max_lookback,
         truncated_alive=truncated_alive,
     )
+
+
+def veto_sessions(
+    session: date,
+    *,
+    calendar: TradingCalendar,
+    lookback: int = VETO_LOOKBACK_SESSIONS,
+) -> tuple[date, ...]:
+    """The `lookback` sessions ending at `session`, newest first, off the calendar.
+
+    Reading the calendar's predecessor rather than subtracting days is what makes the window
+    five *sessions* across a holiday or a year boundary. A walk that runs past the calendar's
+    first session raises `LimitEventReadError` naming the window: a shorter window would answer
+    a different question, and the rule cannot speak about a session the calendar does not hold.
+    """
+    sessions = [session]
+    current = session
+    for _ in range(lookback - 1):
+        try:
+            current = calendar.previous_trading_day(current)
+        except CalendarHorizonError as error:
+            held = ", ".join(day.isoformat() for day in sessions)
+            raise LimitEventReadError(
+                f"the veto's {lookback}-session window ending {session.isoformat()} reaches "
+                f"the start of the calendar at {current.isoformat()}: {error}; newest first it "
+                f"holds {len(sessions)} session(s) ({held})"
+            ) from error
+        sessions.append(current)
+    return tuple(sessions)
+
+
+class LimitEventProducer(Protocol):
+    """The per-session producer `veto_reader` reads through: `limit_events_on`'s own signature.
+
+    A Protocol rather than `Callable[..., ...]` so a caller handing in its own producer (the
+    research reading passes its `limit_events_on` binding, which its A/B spy replaces by name) is
+    checked against the call `veto_reader` actually makes instead of against any call at all.
+    """
+
+    def __call__(
+        self,
+        store: PanelStore,
+        *,
+        session: date,
+        as_of: datetime,
+        exchange: str,
+    ) -> tuple[LimitEvent, ...]: ...
+
+
+def veto_reader(
+    store: PanelStore,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    read: LimitEventProducer | None = None,
+) -> Callable[[date], tuple[LimitEvent, ...]]:
+    """Each session's limit events, read at **that session's own** 16:30 publication instant.
+
+    The point-in-time rule of the window: a replay at session D's evening cannot see a row
+    published after D's 16:30, and reading a whole window at one later `as_of` would let a
+    restatement change an earlier session's events.
+
+    `read` is the per-session producer. Omitted, this module's own `limit_events_on` is used and
+    that default is resolved **when `veto_reader` is called**: the returned reader closes over
+    the producer, so rebinding the module name afterwards does not reach it. A caller that
+    monitors the producer -- the research reading's tests replace its own `limit_events_on`
+    binding with a spy -- therefore passes its binding explicitly, and its seam survives the
+    move into this module.
+    """
+    producer: LimitEventProducer = limit_events_on if read is None else read
+
+    def events_on(session: date) -> tuple[LimitEvent, ...]:
+        return producer(
+            store,
+            session=session,
+            as_of=session_publication_instant(session),
+            exchange=exchange,
+        )
+
+    return events_on
+
+
+def veto_window(
+    store: PanelStore,
+    *,
+    session: date,
+    calendar: TradingCalendar,
+    exchange: str = DEFAULT_EXCHANGE,
+    lookback: int = VETO_LOOKBACK_SESSIONS,
+) -> tuple[tuple[LimitEvent, ...], ...]:
+    """The rule's `lookback` sessions ending at `session`, newest first, each at its own 16:30."""
+    events_on = veto_reader(store, exchange=exchange)
+    return tuple(
+        events_on(day) for day in veto_sessions(session, calendar=calendar, lookback=lookback)
+    )
+
+
+def vetoed_on(
+    store: PanelStore,
+    *,
+    session: date,
+    calendar: TradingCalendar,
+    exchange: str = DEFAULT_EXCHANGE,
+) -> frozenset[str]:
+    """`domain.survivor_veto.vetoed_codes` applied to `veto_window`'s answer."""
+    return vetoed_codes(veto_window(store, session=session, calendar=calendar, exchange=exchange))
 
 
 def _walk_earlier_sessions(

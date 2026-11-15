@@ -90,6 +90,7 @@ import registry  # noqa: E402
 
 from openalpha_cn import strategy_survivor  # noqa: E402
 from openalpha_cn.domain.survivor_book import SurvivorBookConfig  # noqa: E402
+from openalpha_cn.domain.survivor_veto import VETO_RULE_ID  # noqa: E402
 
 SMOKE_SCHEMA: Final[str] = "openalpha-p7-smoke/v1"
 MANIFEST_NAME: Final[str] = "smoke.json"
@@ -360,6 +361,43 @@ def smoke_configuration(epoch: date, *, book: SurvivorBookConfig | None = None) 
         strategy_survivor.BOOK_BLOCK: chosen.model_dump(mode="json", exclude_computed_fields=True),
         strategy_survivor.ADAPTER_BLOCK: {**DESIGN_ADAPTER, "epoch_session": epoch.isoformat()},
     }
+
+
+VETO_RULE: Final[str] = VETO_RULE_ID
+"""Plan A's entry veto rule (`V2-P7-027`): the only `entry_veto` a parallel book -- a registration
+or a smoke -- may carry. `none` is the base book's (`R-N4`), and an unknown rule is no rule."""
+PARALLEL_BOOK_SCHEMA: Final[str] = "survivor-book-config/v2"
+"""The book version a parallel book is stored as: the base book's parameters plus `entry_veto`."""
+
+
+def veto_book(
+    entry_veto: str,
+    book: SurvivorBookConfig | Mapping[str, Any] | None = None,
+) -> SurvivorBookConfig:
+    """`book` -- the design's at the registered seed by default -- as a parallel book: the same
+    parameters stored as `survivor-book-config/v2` carrying `entry_veto` (`V2-P7-027`).
+
+    **One constructor for every writer of a parallel book.** `scripts/p7_register.py` builds the
+    parallel registration's book from the committed base's stored `survivor_book` block;
+    `scripts/p7_smoke.py prepare --entry-veto` builds the parallel smoke's from the design's
+    book. Both come through here, so the two books cannot be made to differ by a later edit to
+    one path. A v1 base block is accepted (it carries no `entry_veto`); a v2 base block is
+    re-stamped with this rule and version."""
+    if book is None:
+        source: Mapping[str, Any] = SurvivorBookConfig(seed=grid.PROTOCOL_RANDOM_SEED).model_dump(
+            mode="json", exclude_computed_fields=True
+        )
+    elif isinstance(book, SurvivorBookConfig):
+        source = book.model_dump(mode="json", exclude_computed_fields=True)
+    else:
+        source = dict(book)
+    return SurvivorBookConfig(
+        **{
+            **source,
+            "schema_version": PARALLEL_BOOK_SCHEMA,
+            "entry_veto": entry_veto,
+        }
+    )
 
 
 def smoke_settings() -> dict[str, Any]:

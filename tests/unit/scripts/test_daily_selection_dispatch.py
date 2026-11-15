@@ -335,6 +335,23 @@ def _p6_world_naming_a_predecessor(root: Path, monkeypatch: pytest.MonkeyPatch) 
     return dataclasses.replace(world, registration=registration)
 
 
+def _p6_world_naming_a_parallel(root: Path, monkeypatch: pytest.MonkeyPatch) -> tds.World:
+    """A committed P6 registration whose `settings` carry a `survivor_parallel_of` block -- the
+    block only a survivor paper book reads, committed onto the P6 book. No panel: every day here
+    stops at step 1."""
+    world = _survivor_world(root, monkeypatch, tds.CONFIG)
+    body = json.loads(world.registration.read_text(encoding="utf-8"))
+    body["settings"] = {
+        **(body.get("settings") or {}),
+        daily.SURVIVOR_PARALLEL_OF_KEY: {
+            "path": "docs/research/p7-registration.json",
+            "sha256": "0" * 64,
+        },
+    }
+    registration = _committed_body(world, "p6-names-a-parallel.json", body, at_days=1)
+    return dataclasses.replace(world, registration=registration)
+
+
 def modules_a_day_loads(form: str, root: str) -> dict[str, Any]:
     """Run one day of `form` -- `"p6"` end to end on `test_daily_selection`'s January world,
     `"p6_continuation"` on a P6 registration naming a predecessor (refused at step 1), or
@@ -444,6 +461,22 @@ def test_a_p6_registration_naming_a_predecessor_exits_2(
     assert "only a survivor registration continues a sample" in report["stderr"]
     assert report["before"] == []
     assert report["after"] == []
+
+
+def test_a_p6_registration_naming_a_parallel_registration_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`survivor_parallel_of` is a survivor paper book's block, read by no P6 path: a P6
+    registration carrying one would run as P6 and never mention it, which its contract forbids --
+    the same "never defaulted and never ignored" rule as `survivor_continuation`. Step 1 refuses
+    it by name, before any request."""
+    world = _p6_world_naming_a_parallel(tmp_path, monkeypatch)
+
+    code, err = _stopped_at_registration(world, capsys)
+
+    assert code == 2
+    assert "settings.survivor_parallel_of" in err
+    assert "only a survivor registration runs as a parallel book" in err
 
 
 # --- the predecessor chain (`V2-P7-023`) -------------------------------------------------------
@@ -584,6 +617,79 @@ def test_a_successor_continuing_a_smoke_registration_exits_2(
     assert code == 2
     assert "smoke registration" in err
     assert "smoke.json" in err
+
+
+def test_a_chain_naming_a_parallel_registration_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-N5 at the daily command's own step 1: a parallel registration is outside the chain, so
+    a successor that names one is refused by name. Without the refusal its records would be
+    merged into the confirmatory sample as if the parallel book were a chain link."""
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    parallel = _register(
+        world,
+        "parallel.json",
+        epoch="2026-01-16",
+        settings={
+            **tds.grid.protocol_settings(),
+            daily.SURVIVOR_PARALLEL_OF_KEY: {
+                "path": world.registration.relative_to(world.repo).as_posix(),
+                "sha256": hashlib.sha256(world.registration.read_bytes()).hexdigest(),
+            },
+        },
+        at_days=1,
+    )
+    successor = _successor_of(world, parallel)
+    admitted = daily.admit_registration(successor.registration, successor.repo)
+    survivor = daily.survivor_registration(admitted)
+    assert survivor is not None
+
+    with pytest.raises(daily.StepFailedError, match="parallel registration") as refused:
+        daily.admit_predecessors(admitted, survivor, successor.repo)
+
+    assert "parallel.json" in str(refused.value)
+    assert "R-N5" in str(refused.value)
+    assert refused.value.exit_code == daily.DailyExit.no_registration
+
+
+def test_a_parallel_registration_that_names_a_predecessor_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body carrying both blocks would be a parallel registration that tries to continue a
+    sample; R-N5 forbids the pair, so step 1 refuses it by name rather than walking the chain."""
+    from openalpha_cn import strategy_survivor_continuation as continuation
+
+    world = _survivor_world(tmp_path, monkeypatch, SURVIVOR_CONFIG)
+    root = json.loads(world.registration.read_text(encoding="utf-8"))
+    root_bytes = world.registration.read_bytes()
+    both = _register(
+        world,
+        "both.json",
+        epoch="2026-01-17",
+        settings={
+            **tds.grid.protocol_settings(),
+            daily.SURVIVOR_PARALLEL_OF_KEY: {
+                "path": world.registration.relative_to(world.repo).as_posix(),
+                "sha256": hashlib.sha256(root_bytes).hexdigest(),
+            },
+            continuation.SURVIVOR_CONTINUATION_KEY: continuation.continuation_block(
+                path=world.registration.relative_to(world.repo).as_posix(),
+                sha256=hashlib.sha256(root_bytes).hexdigest(),
+                config_id=root["config_id"],
+            ),
+        },
+        at_days=2,
+    )
+    admitted = daily.admit_registration(both, world.repo)
+    survivor = daily.survivor_registration(admitted)
+    assert survivor is not None
+
+    with pytest.raises(daily.StepFailedError, match="parallel registration") as refused:
+        daily.admit_predecessors(admitted, survivor, world.repo)
+
+    assert "both.json" in str(refused.value)
+    assert "survivor_continuation" in str(refused.value)
+    assert refused.value.exit_code == daily.DailyExit.no_registration
 
 
 def test_a_successor_whose_epoch_is_not_after_its_predecessors_exits_2(

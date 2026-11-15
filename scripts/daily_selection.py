@@ -350,6 +350,13 @@ registration names its predecessor in (`V2-P7-023`), repeated because a P6 regis
 it is refused here and `src/` imports no script; the two spellings are held equal by the dispatch
 test (`test_the_smoke_key_the_continuation_module_spells_is_the_daily_commands`)."""
 
+SURVIVOR_PARALLEL_OF_KEY: Final[str] = "survivor_parallel_of"
+"""The key of a survivor registration's `settings` that names the committed base registration it
+runs beside (`V2-P7-027`, R-N5): `{"path", "sha256"}`, written by `scripts/p7_register.py`. A
+registration carrying it is a parallel book -- outside the 006b chain -- and its launchd jobs get
+their own labels (Task 5b). The spelling is pinned here and in the writer's own test; `src/`
+imports no script."""
+
 SMOKE_BANNER: Final[str] = (
     "smoke: do not place these orders -- a V2-P7-019 smoke registration, not the V2-P7-006 "
     "registration; nothing it prints is evidence"
@@ -359,6 +366,12 @@ SMOKE_BANNER: Final[str] = (
 SMOKE_DOCUMENT_KEY: Final[str] = "smoke"
 """The key a printed JSON document of a smoke registration carries the banner under. Printed
 only: the journal, the morning file and the written weekly report never hold it."""
+
+PARALLEL_DOCUMENT_KEY: Final[str] = "parallel"
+"""The key a printed JSON document of a parallel book carries the book's identity under
+(`V2-P7-027`, R-N5): `{"config_id", "entry_veto", "banner"}`. Printed only, as the smoke banner
+is: the journal, the morning file and the written weekly report never hold it. A base book's
+document has no such key and its bytes do not move."""
 
 BOOK_VIEW_KIND: Final[str] = "paper-book-view/v1"
 """`--show-book`'s document kind: the paper book's head snapshot as a listing, read only."""
@@ -759,10 +772,33 @@ def admit_predecessors(
     `StepFailedError("registration", ..., exit_code=DailyExit.no_registration,
     steps=SURVIVOR_STEPS)`, naming the predecessor's path and what is wrong -- before any
     request or write.
+
+    A parallel registration (`settings.survivor_parallel_of`, `V2-P7-027`, R-N5) is outside the
+    chain: its own settings name no predecessor, so it has none (`()`), and a committed body
+    carrying both blocks is refused by name. A chain that names a parallel registration as its
+    predecessor is refused too: the parallel book's records never enter the confirmatory sample.
     """
     from openalpha_cn import strategy_survivor
     from openalpha_cn import strategy_survivor_continuation as continuation
 
+    if SURVIVOR_PARALLEL_OF_KEY in registration.settings:
+        # R-N5: a parallel registration is outside the chain. Its own settings name no
+        # predecessor (the writer refuses both blocks in one body); a committed body carrying
+        # both is refused by name rather than read as a link whose sample a later continuation
+        # would merge.
+        try:
+            parallel_block = continuation.read_survivor_continuation(registration.settings)
+        except continuation.SurvivorContinuationError as error:
+            raise _predecessor_refused(
+                f"{registration.path}'s survivor_continuation cannot be read: {error}"
+            ) from error
+        if parallel_block is not None:
+            raise _predecessor_refused(
+                f"{registration.path} is a parallel registration and also names a predecessor in "
+                f"settings.{SURVIVOR_PARALLEL_OF_KEY} and settings.{SURVIVOR_CONTINUATION_KEY}: a "
+                "parallel book runs beside the base book, and it is never a continuation (R-N5)"
+            )
+        return ()
     root, _ = registry.committed_registration(registration.path, repo)
     current = chain_link(registration, survivor)
     current_path = registration.path
@@ -806,6 +842,13 @@ def admit_predecessors(
             )
         seen.add(sha)
         body = admitted.registered
+        inherited = body.get("settings")
+        if isinstance(inherited, Mapping) and SURVIVOR_PARALLEL_OF_KEY in inherited:
+            raise _predecessor_refused(
+                f"the predecessor {block.supersedes_path} is a parallel registration: a "
+                "parallel book runs beside the base book and its records never enter a chain's "
+                "sample (R-N5)"
+            )
         config = body.get("config")
         if not isinstance(config, dict):
             raise _predecessor_refused(
@@ -3615,6 +3658,17 @@ def _run_daily_selection(
                 "registration continues a sample",
                 exit_code=DailyExit.no_registration,
             )
+        elif SURVIVOR_PARALLEL_OF_KEY in registration.settings:
+            # The same rule for a parallel book's block (`V2-P7-027`, R-N5): only a survivor
+            # registration runs beside a base book, so a P6 body carrying one is refused by name
+            # rather than run as P6 and never mention it.
+            raise StepFailedError(
+                "registration",
+                f"{registration.path} names a base registration in "
+                f"settings.{SURVIVOR_PARALLEL_OF_KEY}, and it is the P6 book; only a survivor "
+                "registration runs as a parallel book",
+                exit_code=DailyExit.no_registration,
+            )
     if survivor is not None:
         # The registration's `kind` decides the day (`V2-P7-008`); the survivor day numbers and
         # reports its own steps, so it runs outside this step's fault handler.
@@ -6164,12 +6218,13 @@ def _main_morning(
     as_json: bool,
     clock: Callable[[], datetime],
     banner: str | None,
+    parallel: ParallelBook | None,
 ) -> int:
     """`main`'s morning re-check: the advice printed -- the file's own document with `--json`, the
     advice block otherwise -- or the refusal and the requests it spent; a fault making the text is
-    the summary step's refusal, never a traceback. Under a smoke registration's banner when there
-    is one (`V2-P7-019`): the document carries it under `SMOKE_DOCUMENT_KEY`, the block first and
-    last; the morning file never holds it."""
+    the summary step's refusal, never a traceback. Under a smoke registration's banner and a
+    parallel book's identity when there is one (`V2-P7-019`, `V2-P7-027`): the document carries
+    them under their keys, the block them first and last; the morning file never holds either."""
     try:
         run = run_morning_recheck(options, clock=clock)
     except StepFailedError as error:
@@ -6177,15 +6232,15 @@ def _main_morning(
     try:
         with _step("summary", steps=MORNING_STEPS):
             if as_json:
-                text = json.dumps(
-                    with_smoke(run.document, banner), sort_keys=True, ensure_ascii=False
-                )
+                document = with_parallel(with_smoke(run.document, banner), parallel)
+                text = json.dumps(document, sort_keys=True, ensure_ascii=False)
             else:
                 from openalpha_cn.strategy_survivor_morning import morning_lines
 
-                text = "\n".join(
-                    bannered(morning_lines(run.document, this_run=run.this_run()), banner)
+                lines = parallel_bannered(
+                    morning_lines(run.document, this_run=run.this_run()), parallel
                 )
+                text = "\n".join(bannered(lines, banner))
     except StepFailedError as error:
         return _morning_refused(error, run.this_run()["requests"])
     print(text)
@@ -6537,6 +6592,85 @@ def sync_pinned_environment(worktree: Path, *, uv: Path) -> Path:
 
 LAUNCHD_LABEL: Final[str] = "com.openalpha.daily-selection"
 LAUNCHD_MORNING_LABEL: Final[str] = "com.openalpha.daily-selection.morning"
+BASE_EVENING_HOUR: Final[int] = 18
+BASE_EVENING_MINUTE: Final[int] = 30
+LAUNCHD_PARALLEL_LAG_MINUTES: Final[int] = 60
+"""The parallel book's evening job fires this long after the base book's (`V2-P7-027`): the two
+books share one `TUSHARE_TOKEN`, and a parallel panel update at 18:30 would ask at the same moment
+as the base book's. It is a printed schedule only -- nothing here installs a job."""
+
+
+def _parallel_config_id(registration: Path) -> str | None:
+    """`registration`'s `config_id` when it is a parallel book's, else `None` (the base book).
+
+    A parallel registration (`settings.survivor_parallel_of`, `V2-P7-027`) runs beside the base
+    book, so the printer needs its identity to keep the two books' jobs apart. The file is read
+    only for that: nothing here writes or installs anything.
+
+    A file that is not there, or that cannot be read or parsed, is refused by name (`ValueError`,
+    which `main` turns into the printer's exit 2) rather than read as a base book's -- a wrong
+    `--worktree` would otherwise print a job with the base label, and installing it by hand would
+    replace the base book's job. A readable base registration has no `survivor_parallel_of` block
+    and gets the base label, so R-N4's base bytes are untouched.
+    """
+    try:
+        content = registration.read_bytes()
+    except OSError as error:
+        raise ValueError(
+            f"--registration {registration} cannot be read: {error}. The launchd job's label is "
+            "its book's identity, so the registration must be readable inside --worktree; "
+            "nothing was printed"
+        ) from error
+    try:
+        document = json.loads(content)
+    except ValueError as error:
+        raise ValueError(
+            f"--registration {registration} is not JSON: {error}. The launchd job's label is its "
+            "book's identity, so the registration must be readable inside --worktree; nothing "
+            "was printed"
+        ) from error
+    if not isinstance(document, dict):
+        raise ValueError(
+            f"--registration {registration} is not a JSON object, so its book's identity cannot "
+            "be read; nothing was printed"
+        )
+    settings = document.get("settings")
+    if not isinstance(settings, dict) or SURVIVOR_PARALLEL_OF_KEY not in settings:
+        return None
+    config_id = document.get("config_id")
+    if not isinstance(config_id, str) or not config_id:
+        raise ValueError(
+            f"--registration {registration} carries settings.{SURVIVOR_PARALLEL_OF_KEY} and no "
+            "config_id: a parallel book's launchd label is its configuration's id first 16 "
+            "characters, so the registration has to name one"
+        )
+    return config_id
+
+
+def _launchd_label(label: str, config_id: str | None) -> str:
+    """`label` for a base book, suffixed with the frozen configuration's id for a parallel one
+    (`f"{label}.{config_id[:16]}"`); the read and its refusals are `_parallel_config_id`'s."""
+    return label if config_id is None else f"{label}.{config_id[:16]}"
+
+
+def _launchd_log_stem(stem: str, config_id: str | None) -> str:
+    """`stem` for a base book, suffixed with the frozen configuration's id for a parallel one
+    (`f"{stem}.{config_id[:16]}"`): the two books' log files must not collide when they are
+    printed with one `--launchd-plist` log directory (`V2-P7-027`, final review 2)."""
+    return stem if config_id is None else f"{stem}.{config_id[:16]}"
+
+
+def _evening_schedule(parallel_config_id: str | None) -> tuple[int, int]:
+    """The evening job's `(hour, minute)`: the base book's 18:30, or 60 minutes later for a
+    parallel book, so the two books' panel updates do not ask at the same moment
+    (`LAUNCHD_PARALLEL_LAG_MINUTES`)."""
+    minutes = BASE_EVENING_HOUR * 60 + BASE_EVENING_MINUTE
+    if parallel_config_id is not None:
+        minutes += LAUNCHD_PARALLEL_LAG_MINUTES
+    hour, minute = divmod(minutes, 60)
+    return hour, minute
+
+
 MORNING_PLIST_HOUR: Final[int] = 8
 MORNING_PLIST_MINUTE: Final[int] = 30
 """The morning job fires at 08:30 on the machine's local time -- the start of the window
@@ -6651,14 +6785,18 @@ def launchd_plist(
     proved it is inside `worktree`. Printed, never installed. launchd has no exchange calendar,
     so it fires every weekday and the command decides: on a holiday the newest closed session is
     one whose journal is already complete, which prints the summary again with no request and no
-    write."""
+    write. The registration file is read for the book's identity: a parallel book gets the
+    suffixed label, the suffixed log files and a job 60 minutes after the base book's
+    (`V2-P7-027`); a file that cannot be read is refused, not printed with the base label."""
+    config_id = _parallel_config_id(registration)
+    hour, minute = _evening_schedule(config_id)
     return _launchd_job(
-        label=LAUNCHD_LABEL,
-        hour=18,
-        minute=30,
+        label=_launchd_label(LAUNCHD_LABEL, config_id),
+        hour=hour,
+        minute=minute,
         tail=(),
-        log_stem="daily-selection",
-        when="18:30",
+        log_stem=_launchd_log_stem("daily-selection", config_id),
+        when=f"{hour:02d}:{minute:02d}",
         worktree=worktree,
         runtime_dir=runtime_dir,
         log_dir=log_dir,
@@ -6684,13 +6822,15 @@ def launchd_morning_plist(
     compares it with the evening's plan and prints the differences before the 09:15 call auction.
     The command itself refuses after `registration_cutoff`, so a machine in another time zone
     fails closed rather than re-checking after the auction. The registration is the caller's,
-    resolved and proved inside `worktree` (`launchd_registration`). Printed, never installed."""
+    resolved and proved inside `worktree` (`launchd_registration`). A parallel book's job keeps
+    its own label and log files (`V2-P7-027`). Printed, never installed."""
+    config_id = _parallel_config_id(registration)
     return _launchd_job(
-        label=LAUNCHD_MORNING_LABEL,
+        label=_launchd_label(LAUNCHD_MORNING_LABEL, config_id),
         hour=MORNING_PLIST_HOUR,
         minute=MORNING_PLIST_MINUTE,
         tail=("--morning-recheck",),
-        log_stem="daily-selection.morning",
+        log_stem=_launchd_log_stem("daily-selection.morning", config_id),
         when="08:30",
         worktree=worktree,
         runtime_dir=runtime_dir,
@@ -6732,6 +6872,83 @@ def bannered(lines: Sequence[str], banner: str | None) -> list[str]:
 def with_smoke(document: Mapping[str, Any], banner: str | None) -> Mapping[str, Any]:
     """A printed JSON `document` with the banner under `SMOKE_DOCUMENT_KEY`, or as it is."""
     return document if banner is None else {**document, SMOKE_DOCUMENT_KEY: banner}
+
+
+@dataclass(frozen=True)
+class ParallelBook:
+    """A parallel registration's identity, read at the print boundary (`V2-P7-027`, R-N5).
+
+    A registration whose `settings` name the base book it runs beside
+    (`SURVIVOR_PARALLEL_OF_KEY`) is a parallel book: it prints a list that can otherwise be read
+    as the base book's. `banner` is the one line every such list carries first and last, and
+    `document` the value its printed JSON carries under `PARALLEL_DOCUMENT_KEY`. Neither enters
+    the configuration, the journal, the morning file or a report -- the identity is printed only.
+    """
+
+    config_id: str
+    entry_veto: str
+
+    @property
+    def banner(self) -> str:
+        """The one line: which book, whose veto, and that it is an untested candidate."""
+        return (
+            f"并列账簿（A 的否决，纸面）/ parallel veto book {self.config_id[:16]}: "
+            "不是基础账簿的清单 / not the base book's list; "
+            f"否决规则 entry veto {self.entry_veto} 是候选，未经检验 / is an untested candidate"
+        )
+
+    def document(self) -> dict[str, str]:
+        """The identity as a printed JSON document's value, banner included."""
+        return {"config_id": self.config_id, "entry_veto": self.entry_veto, "banner": self.banner}
+
+
+def parallel_book(registration: Path) -> ParallelBook | None:
+    """`registration`'s identity when it is a parallel book's, else `None` (the base book).
+
+    A parallel registration (`settings.SURVIVOR_PARALLEL_OF_KEY`, `V2-P7-027`, R-N5) runs beside
+    the base book, so every list it prints has to say which book the list is. The file is read at
+    the print boundary, before the day admits it, and only to decide what is printed: a path
+    that is not a regular file is never opened (admission's own first test; a FIFO would block
+    the read and a device never end it), and a path that cannot be examined, read or parsed --
+    whatever the fault -- gives `None`. The banner also needs the book's own data, the
+    `config_id` and the `config`'s `survivor_book.entry_veto` rule: a registration carrying the
+    marker without them gives `None` too, so admission and its refusals keep deciding and no
+    print path traces back. A readable base registration has no marker and gets `None`, so R-N4's
+    base bytes are untouched.
+
+    Read only: nothing here is admitted, written or requested; `_parallel_config_id` is the
+    launchd printer's own strict read, and it is not this total one.
+    """
+    try:
+        if not registration.is_file():
+            return None
+        body = json.loads(registration.read_bytes())
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    settings = body.get("settings")
+    if not isinstance(settings, dict) or SURVIVOR_PARALLEL_OF_KEY not in settings:
+        return None
+    config_id = body.get("config_id")
+    config = body.get("config")
+    book = config.get("survivor_book") if isinstance(config, dict) else None
+    entry_veto = book.get("entry_veto") if isinstance(book, dict) else None
+    if not isinstance(config_id, str) or not config_id:
+        return None
+    if not isinstance(entry_veto, str) or not entry_veto:
+        return None
+    return ParallelBook(config_id=config_id, entry_veto=entry_veto)
+
+
+def parallel_bannered(lines: Sequence[str], book: ParallelBook | None) -> list[str]:
+    """`lines` with the parallel book's identity first and last, or as they are for no book."""
+    return bannered(lines, None if book is None else book.banner)
+
+
+def with_parallel(document: Mapping[str, Any], book: ParallelBook | None) -> Mapping[str, Any]:
+    """A printed JSON `document` with the identity under `PARALLEL_DOCUMENT_KEY`, or as it is."""
+    return document if book is None else {**document, PARALLEL_DOCUMENT_KEY: book.document()}
 
 
 def _missing_registration_next(repo: Path) -> str:
@@ -6923,6 +7140,7 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         from openalpha_cn.storage.paper_state import PaperStateStoreError
 
         banner = smoke_banner(arguments.registration)
+        identity = parallel_book(arguments.registration)
         if banner is not None:
             print(banner, file=sys.stderr)
         try:
@@ -6932,9 +7150,12 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
                 print(f"paper book: {error}", file=sys.stderr)
                 return int(DailyExit.step_failed)
             if arguments.json:
-                print(json.dumps(with_smoke(view, banner), sort_keys=True, ensure_ascii=False))
+                shown = with_parallel(with_smoke(view, banner), identity)
+                print(json.dumps(shown, sort_keys=True, ensure_ascii=False))
             else:
-                print("\n".join(bannered(book_view_lines(view), banner)))
+                print(
+                    "\n".join(bannered(parallel_bannered(book_view_lines(view), identity), banner))
+                )
             return int(DailyExit.done)
         finally:
             if banner is not None:
@@ -7008,13 +7229,25 @@ def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _
         account_record=arguments.account_record,
     )
     banner = smoke_banner(arguments.registration)
+    identity = parallel_book(arguments.registration)
     if banner is not None:
         print(banner, file=sys.stderr)
     try:
         if arguments.morning_recheck:
-            return _main_morning(options, as_json=arguments.json, clock=clock, banner=banner)
+            return _main_morning(
+                options,
+                as_json=arguments.json,
+                clock=clock,
+                banner=banner,
+                parallel=identity,
+            )
         return _main_day(
-            options, as_json=arguments.json, top=arguments.top, clock=clock, banner=banner
+            options,
+            as_json=arguments.json,
+            top=arguments.top,
+            clock=clock,
+            banner=banner,
+            parallel=identity,
         )
     finally:
         if banner is not None:
@@ -7028,9 +7261,12 @@ def _main_day(
     top: int | None,
     clock: Callable[[], datetime],
     banner: str | None,
+    parallel: ParallelBook | None,
 ) -> int:
     """`main`'s day: the result printed, or the refusal with its requests and -- for a survivor
-    day -- its aftermath; under a smoke registration's banner when there is one (`V2-P7-019`)."""
+    day -- its aftermath; under a smoke registration's banner and a parallel book's identity when
+    there is one (`V2-P7-019`, `V2-P7-027`). The smoke wrapper is the outer one: a registration
+    that is both a smoke and a parallel book keeps both banners."""
     try:
         result = run_daily_selection(options, clock=clock)
     except StepFailedError as error:
@@ -7047,9 +7283,11 @@ def _main_day(
                 },
             }
             if as_json:
-                print(json.dumps(with_smoke(shown, banner), sort_keys=True, ensure_ascii=False))
+                document = with_parallel(with_smoke(shown, banner), parallel)
+                print(json.dumps(document, sort_keys=True, ensure_ascii=False))
             else:
-                print("\n".join(bannered(survivor_summary_lines(shown), banner)))
+                lines = parallel_bannered(survivor_summary_lines(shown), parallel)
+                print("\n".join(bannered(lines, banner)))
         print(str(error), file=sys.stderr)
         print(
             f"tushare requests   {sum(error.requests.values())} this run "
@@ -7067,12 +7305,16 @@ def _main_day(
             print(_missing_registration_next(options.repo), file=sys.stderr)
         return int(error.exit_code)
     if as_json:
-        print(json.dumps(with_smoke(result, banner), sort_keys=True, ensure_ascii=False))
+        document = with_parallel(with_smoke(result, banner), parallel)
+        print(json.dumps(document, sort_keys=True, ensure_ascii=False))
     elif result.get("kind") == SURVIVOR_RESULT_KIND:
-        print("\n".join(bannered(survivor_summary_lines(result), banner)))
+        print(
+            "\n".join(bannered(parallel_bannered(survivor_summary_lines(result), parallel), banner))
+        )
     else:
         shown_top = top if top is not None else result["targets"]["holding_count"]
-        print("\n".join(bannered(summary_lines(result, top=int(shown_top)), banner)))
+        lines = parallel_bannered(summary_lines(result, top=int(shown_top)), parallel)
+        print("\n".join(bannered(lines, banner)))
     return int(DailyExit.done)
 
 
