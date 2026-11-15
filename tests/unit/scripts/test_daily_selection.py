@@ -2038,6 +2038,51 @@ def test_the_base_book_plist_is_unchanged() -> None:
     assert morning == BASE_MORNING_PLIST
 
 
+def test_the_public_base_printers_are_byte_identical_to_the_literals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding N1: R-N4 pinned where the command actually prints, not only where `_launchd_job`
+    is called with arguments the test supplies. `launchd_plist`/`launchd_morning_plist` read the
+    registration for the book's identity and pass `log_stem`, `tail`, `when` and `env_file`
+    themselves, so only a call through them pins a base job's bytes end to end.
+
+    The literals embed fixed non-existent `/p7-base/...` paths, which cannot be created, and a
+    printer refuses a registration it cannot read -- so the test first writes a readable base v1
+    registration and proves `_parallel_config_id` answers `None` for it (a readable base is not a
+    parallel book). It then substitutes a read that answers the real function for that readable
+    file and `None` for `BASE_REGISTRATION`, the fixed path the literals name: the printers under
+    test are still the public ones, and only the identity read of a file that cannot exist is
+    stubbed. A base job's bytes are the only byte-level R-N4 guard (`V2-P7-027`)."""
+    base = _printable_registration(tmp_path / "pinned", "docs/research/p7-registration.json")
+    real = daily._parallel_config_id
+    assert real(base) is None
+
+    def answered(registration: Path) -> str | None:
+        return None if registration == BASE_REGISTRATION else real(registration)
+
+    monkeypatch.setattr(daily, "_parallel_config_id", answered)
+
+    evening = daily.launchd_plist(
+        worktree=BASE_WORKTREE,
+        runtime_dir=BASE_RUNTIME,
+        log_dir=BASE_LOGS,
+        registration=BASE_REGISTRATION,
+        env_file=".env",
+        uv=BASE_UV,
+    )
+    morning = daily.launchd_morning_plist(
+        worktree=BASE_WORKTREE,
+        runtime_dir=BASE_RUNTIME,
+        log_dir=BASE_LOGS,
+        registration=BASE_REGISTRATION,
+        env_file=".env",
+        uv=BASE_UV,
+    )
+
+    assert evening == BASE_EVENING_PLIST
+    assert morning == BASE_MORNING_PLIST
+
+
 def test_a_launchd_printer_refuses_a_registration_that_is_not_there(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2140,8 +2185,8 @@ def _plist_for(
 def test_a_base_registration_keeps_the_base_labels(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A base (v1/no-veto) registration is not a parallel book: both jobs keep the base labels,
-    even when the registration file is present and readable."""
+    """A base (v1/no-veto) registration is not a parallel book: both jobs keep the base labels
+    and the base log names, even when the registration file is present and readable."""
     evening = _plist_for(tmp_path, capsys, config_id="a" * 64, settings={"random_seed": 1})
     morning = _plist_for(
         tmp_path, capsys, config_id="a" * 64, settings={"random_seed": 1}, morning=True
@@ -2151,6 +2196,12 @@ def test_a_base_registration_keeps_the_base_labels(
     assert morning["Label"] == "com.openalpha.daily-selection.morning"
     assert [entry["Hour"] for entry in evening["StartCalendarInterval"]] == [18] * 5
     assert [entry["Minute"] for entry in evening["StartCalendarInterval"]] == [30] * 5
+    assert evening["StandardOutPath"] == str(tmp_path / "logs" / "daily-selection.out.log")
+    assert evening["StandardErrorPath"] == str(tmp_path / "logs" / "daily-selection.err.log")
+    assert morning["StandardOutPath"] == str(tmp_path / "logs" / "daily-selection.morning.out.log")
+    assert morning["StandardErrorPath"] == str(
+        tmp_path / "logs" / "daily-selection.morning.err.log"
+    )
 
 
 def test_a_parallel_registration_prints_its_own_launchd_labels(
@@ -2158,7 +2209,8 @@ def test_a_parallel_registration_prints_its_own_launchd_labels(
 ) -> None:
     """A registration carrying `settings.survivor_parallel_of` is a parallel book: its two jobs'
     labels carry the config id's first 16 characters, so the two books' jobs cannot collide while
-    both are still only printed (R-N5, Task 5b)."""
+    both are still only printed (R-N5, Task 5b). Its log files carry the same suffix: printed with
+    one log directory, the two books' logs must not mix (final review 2)."""
     assert daily.SURVIVOR_PARALLEL_OF_KEY == "survivor_parallel_of"
     config_id = "0123456789abcdef" + "9" * 48
     settings = {
@@ -2173,6 +2225,18 @@ def test_a_parallel_registration_prints_its_own_launchd_labels(
 
     assert evening["Label"] == f"com.openalpha.daily-selection.{config_id[:16]}"
     assert morning["Label"] == f"com.openalpha.daily-selection.morning.{config_id[:16]}"
+    assert evening["StandardOutPath"] == str(
+        tmp_path / "logs" / f"daily-selection.{config_id[:16]}.out.log"
+    )
+    assert evening["StandardErrorPath"] == str(
+        tmp_path / "logs" / f"daily-selection.{config_id[:16]}.err.log"
+    )
+    assert morning["StandardOutPath"] == str(
+        tmp_path / "logs" / f"daily-selection.morning.{config_id[:16]}.out.log"
+    )
+    assert morning["StandardErrorPath"] == str(
+        tmp_path / "logs" / f"daily-selection.morning.{config_id[:16]}.err.log"
+    )
     # The two books share one TUSHARE_TOKEN: the parallel book's evening fires 60 minutes after
     # the base book's, so their panel updates do not ask at the same moment (`V2-P7-027`).
     assert [(entry["Hour"], entry["Minute"]) for entry in evening["StartCalendarInterval"]] == [

@@ -1115,6 +1115,13 @@ def test_prepare_without_an_entry_veto_writes_the_base_design_books_registration
     assert document["config"] == env.smoke_configuration(epoch)
     assert document["settings"] == env.smoke_settings()
     assert document["config_id"] == tds.grid.config_id(document["config"])
+    # Frozen on commit 9976e05 (`V2-P7-027`, final review N2): a literal, so a drift in the
+    # default smoke configuration fails here even though the two assertions above recompute the
+    # same value from the same functions. It was measured on that commit; a later change to the
+    # default book is a new registration and must change this literal deliberately.
+    assert (
+        document["config_id"] == "541761b864070df221d98e2d4cc0750c3b4001680fc5427f41fc4901c85839b3"
+    )
     book = document["config"]["survivor_book"]
     assert book["schema_version"] == "survivor-book-config/v1"
     assert "entry_veto" not in book

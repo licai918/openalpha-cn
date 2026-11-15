@@ -41,6 +41,8 @@ from openalpha_cn import strategy_survivor_book
 
 daily = tds.daily
 forward_report = survivor_report.forward_report
+env = tds._script("p7_smoke_env", tds.ROOT / "scripts")
+"""`scripts/p7_smoke_env.py`: the one constructor of a parallel (v2) book and plan A's rule."""
 
 MARKER: Final[dict[str, str]] = {"issue": "V2-P7-019", "note": "a test's smoke registration"}
 SMOKE_SETTINGS: Final[dict[str, Any]] = {**survivor_report.settings_with(), "smoke_run": MARKER}
@@ -469,3 +471,297 @@ def test_a_fault_no_refusal_anticipated_still_closes_the_weekly_banner(
 
     assert err.getvalue().splitlines() == [daily.SMOKE_BANNER, daily.SMOKE_BANNER]
     assert out.getvalue() == ""
+
+
+# --- a parallel book's printed list says so (`V2-P7-027`, R-N5) ----------------------------------
+
+PARALLEL_BLOCK: Final[dict[str, str]] = {
+    "path": "docs/research/p7-registration.json",
+    "sha256": "0" * 64,
+}
+"""`settings.survivor_parallel_of`: the base registration a parallel book runs beside. The base
+itself is not read at the print boundary, so a test's block need not name a committed file."""
+PARALLEL_CONFIG: Final[dict[str, Any]] = survivor_day.survivor_config(
+    book=env.veto_book(env.VETO_RULE, survivor_day.CONFIG["survivor_book"])
+)
+"""The survivor day's configuration as a parallel book: the design's parameters stored as a
+`survivor-book-config/v2` carrying plan A's entry veto, which the banner has to name."""
+PARALLEL_SETTINGS: Final[dict[str, Any]] = {
+    **survivor_report.settings_with(),
+    daily.SURVIVOR_PARALLEL_OF_KEY: PARALLEL_BLOCK,
+}
+"""A parallel registration's settings: the day's measurement settings and the base it names."""
+
+
+def _parallel_world(root: Path, seeded_runtime: Path) -> tds.World:
+    """A committed parallel registration (a v2 book carrying plan A's rule beside a base it names)
+    and a copy of the seeded panel."""
+    repo, registration = survivor_report._repository(
+        root, PARALLEL_CONFIG, settings=PARALLEL_SETTINGS
+    )
+    runtime = root / "runtime"
+    shutil.copytree(seeded_runtime, runtime)
+    market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
+    return tds.World(repo=repo, registration=registration, runtime=runtime, market=market)
+
+
+@pytest.fixture(scope="module")
+def parallel_evening(
+    tmp_path_factory: pytest.TempPathFactory,
+    seeded: Path,  # noqa: F811
+) -> Evening:
+    """A parallel book's first evening (6 April), run once through `main` with `--json`.
+
+    The real entry-veto window is read: the seeded panel holds the five sessions before 6 April,
+    so the v2 book's rule answers with its own set (the seeded market's up-limit rows) and the
+    day completes. Nothing here stubs the veto -- the banner is a print-boundary fact, and the
+    day behind it is the parallel book's own."""
+    world = _parallel_world(tmp_path_factory.mktemp("parallel-evening"), seeded)
+    with pytest.MonkeyPatch.context() as patch:
+        tds._bind(patch, world.repo, world.market)
+        world.market.today = survivor_day.DAY
+        code, out, err = _invoke(
+            daily.main,
+            _day_arguments(world, survivor_day.DAY_AS_OF, "--json"),
+            clock=lambda: survivor_day.RUN_CLOCK,
+        )
+    return Evening(world=world, code=code, out=out, err=err)
+
+
+@pytest.fixture
+def parallel_world(
+    parallel_evening: Evening, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tds.World:
+    """A copy of the parallel evening's runtime directory, under its registration."""
+    runtime = tmp_path / "runtime"
+    shutil.copytree(parallel_evening.world.runtime, runtime)
+    tds._bind(monkeypatch, parallel_evening.world.repo, parallel_evening.world.market)
+    return dataclasses.replace(parallel_evening.world, runtime=runtime)
+
+
+def _identity(world: tds.World) -> daily.ParallelBook:
+    """The identity `main` reads off `world`'s registration -- the object its prints are built
+    from, so the expected banner is the code's own and the assertions below name its content."""
+    book = daily.parallel_book(world.registration)
+    assert book is not None, "a parallel registration's identity must be readable"
+    return book
+
+
+def _parallel_body(*, config_id: str = "0123456789abcdef" + "9" * 48) -> dict[str, Any]:
+    """A registration body as a parallel book writes one: a v2 book carrying the rule, its
+    `config_id`, and the settings block naming the base."""
+    return {
+        "config": {
+            "kind": "survivor_book/v1",
+            "survivor_book": {
+                "schema_version": "survivor-book-config/v2",
+                "entry_veto": env.VETO_RULE,
+            },
+        },
+        "config_id": config_id,
+        "settings": {daily.SURVIVOR_PARALLEL_OF_KEY: dict(PARALLEL_BLOCK)},
+    }
+
+
+def test_a_parallel_book_is_a_small_total_read_of_the_parallel_registrations_identity() -> None:
+    """`parallel_book` and its wrapper are the smoke banner's shape (`V2-P7-019`): the identity is
+    a small value, the banner is a line of that value, and a document carries it under one key."""
+    assert daily.SURVIVOR_PARALLEL_OF_KEY == "survivor_parallel_of"
+    assert daily.PARALLEL_DOCUMENT_KEY == "parallel"
+    config_id = "0123456789abcdef" + "9" * 48
+    book = daily.ParallelBook(config_id=config_id, entry_veto=env.VETO_RULE)
+
+    banner = book.banner
+    for required in (
+        "并列账簿",
+        "parallel",
+        env.VETO_RULE,
+        "候选，未经检验",
+        "untested candidate",
+        "不是基础账簿的清单",
+        "not the base book's list",
+        config_id[:16],
+    ):
+        assert required in banner, required
+    assert banner == (
+        f"并列账簿（A 的否决，纸面）/ parallel veto book {config_id[:16]}: "
+        "不是基础账簿的清单 / not the base book's list; "
+        f"否决规则 entry veto {env.VETO_RULE} 是候选，未经检验 / is an untested candidate"
+    )
+    assert daily.with_parallel({"a": 1}, None) == {"a": 1}
+    assert daily.with_parallel({"a": 1}, book) == {
+        "a": 1,
+        "parallel": {
+            "config_id": config_id,
+            "entry_veto": env.VETO_RULE,
+            "banner": banner,
+        },
+    }
+    assert daily.parallel_bannered(["a"], None) == ["a"]
+    assert daily.parallel_bannered(["a"], book) == [banner, "a", banner]
+    # The two wrappers compose: a registration that is both a smoke and a parallel book loses
+    # neither banner (the smoke wrapper is the outer one).
+    assert daily.bannered(daily.parallel_bannered(["a"], book), daily.SMOKE_BANNER) == [
+        daily.SMOKE_BANNER,
+        banner,
+        "a",
+        banner,
+        daily.SMOKE_BANNER,
+    ]
+
+
+def test_a_registration_is_a_parallel_book_only_when_the_marker_and_its_config_data_read(
+    tmp_path: Path,
+) -> None:
+    """Read at the print boundary like `smoke_banner`: a missing, unreadable or unparsable file,
+    a body without the marker, and a marker without the book's own data all fail **off**
+    (`None`), so admission and its refusals keep deciding and no print path traces back."""
+    good = _parallel_body()
+    cases: list[tuple[Any, daily.ParallelBook | None]] = [
+        (good, daily.ParallelBook(config_id=good["config_id"], entry_veto=env.VETO_RULE)),
+        ({"settings": {}}, None),
+        ({"settings": {daily.SURVIVOR_PARALLEL_OF_KEY: {}}}, None),
+        (
+            {"settings": {daily.SURVIVOR_PARALLEL_OF_KEY: {}}, "config_id": "a" * 64},
+            None,
+        ),
+        (
+            {
+                **_parallel_body(),
+                "config": {"survivor_book": {}},
+            },
+            None,
+        ),
+        ({**_parallel_body(), "config": "not an object"}, None),
+        ({**_parallel_body(), "config_id": ""}, None),
+        ({**_parallel_body(), "config_id": 7}, None),
+        ({**_parallel_body(), "config": {"survivor_book": {"entry_veto": ""}}}, None),
+        ({"config_id": "a" * 64, "settings": {"random_seed": 1}}, None),
+        ([1, 2], None),
+    ]
+    for body, expected in cases:
+        path = tmp_path / "registration.json"
+        path.write_text(json.dumps(body), encoding="utf-8")
+        assert daily.parallel_book(path) == expected, body
+
+    broken = tmp_path / "broken.json"
+    broken.write_bytes(b"\xff not json")
+    assert daily.parallel_book(tmp_path / "missing.json") is None
+    assert daily.parallel_book(broken) is None
+
+
+def test_the_parallel_banner_is_never_in_a_file_the_day_writes(parallel_evening: Evening) -> None:
+    """Printed only, as the smoke banner is: the journal and the morning file hold no banner."""
+    text = survivor_day._journal_path(parallel_evening.world).read_text(encoding="utf-8")
+    assert "并列账簿" not in text
+    assert daily.PARALLEL_DOCUMENT_KEY not in json.loads(text).get("result", {})
+
+
+def test_a_parallel_evening_in_json_names_the_book_its_rule_and_the_banner(
+    parallel_evening: Evening,
+) -> None:
+    assert parallel_evening.code == 0, parallel_evening.err
+    book = _identity(parallel_evening.world)
+    shown = json.loads(parallel_evening.out)
+    assert book.entry_veto == env.VETO_RULE
+    assert shown["parallel"] == {
+        "config_id": book.config_id,
+        "entry_veto": env.VETO_RULE,
+        "banner": book.banner,
+    }
+    assert shown["paper"]["outcome"] == "created"
+
+
+def test_a_parallel_evening_printed_again_as_text_is_bannered_first_and_last(
+    parallel_world: tds.World,
+) -> None:
+    """The completed day printed again (no request): the same print path as the evening's, and
+    the parallel book's list says which book it is on its first and its last line."""
+    book = _identity(parallel_world)
+
+    code, out, err = _invoke(
+        daily.main,
+        _day_arguments(parallel_world, survivor_day.DAY_AS_OF),
+        clock=lambda: survivor_day.RUN_CLOCK,
+    )
+
+    lines = out.splitlines()
+    assert code == 0, err
+    assert lines[0] == lines[-1] == book.banner
+    assert env.VETO_RULE in lines[0]
+    assert book.config_id[:16] in lines[0]
+    assert any("ORDERS FOR THE OPEN OF D+1" in line for line in lines[1:-1])
+    # The smoke wrapper is not this registration's: only the parallel banner is printed.
+    assert daily.SMOKE_BANNER not in out
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_a_parallel_morning_recheck_is_bannered(
+    parallel_world: tds.World, json_output: bool
+) -> None:
+    parallel_world.market.today = MORNING_AS_OF.date()
+    book = _identity(parallel_world)
+    flags = ["--morning-recheck", *(["--json"] if json_output else [])]
+
+    code, out, err = _invoke(
+        daily.main,
+        _day_arguments(parallel_world, MORNING_AS_OF, *flags),
+        clock=lambda: MORNING_AS_OF + timedelta(minutes=5),
+    )
+
+    assert code == 0, err
+    if json_output:
+        assert json.loads(out)["parallel"]["entry_veto"] == env.VETO_RULE
+        assert json.loads(out)["parallel"]["config_id"] == book.config_id
+    else:
+        lines = out.splitlines()
+        assert lines[0] == lines[-1] == book.banner
+        assert lines[1].startswith("morning re-check")
+    morning = survivor_day._journal_path(parallel_world).with_name("2026-04-06.morning.json")
+    assert "parallel" not in json.loads(morning.read_text(encoding="utf-8"))
+
+
+def test_a_base_evening_and_morning_carry_no_parallel_key(
+    smoke_evening: Evening, world: tds.World
+) -> None:
+    """The smoke world is a base book (a v1 survivor book, no `survivor_parallel_of`): its
+    documents keep their shape -- the smoke wrapper's key alone, never the parallel book's."""
+    assert smoke_evening.code == 0, smoke_evening.err
+    assert "parallel" not in json.loads(smoke_evening.out)
+    world.market.today = MORNING_AS_OF.date()
+
+    code, out, err = _invoke(
+        daily.main,
+        _day_arguments(world, MORNING_AS_OF, "--morning-recheck", "--json"),
+        clock=lambda: MORNING_AS_OF + timedelta(minutes=5),
+    )
+
+    assert code == 0, err
+    assert "parallel" not in json.loads(out)
+
+
+def test_a_refused_parallel_evening_is_bannered_around_the_list_it_still_prints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seeded: Path,  # noqa: F811
+) -> None:
+    """Step 8 refused: the day's document as far as it got is printed as the parallel book's list,
+    so the refusal path is bannered too -- the user reading it knows which book's list this is."""
+    world = _parallel_world(tmp_path, seeded)
+    tds._bind(monkeypatch, world.repo, world.market)
+    monkeypatch.setattr(strategy_survivor_book, "evening", survivor_day._refused_evening)
+    world.market.today = survivor_day.DAY
+    book = _identity(world)
+
+    code, out, err = _invoke(
+        daily.main,
+        _day_arguments(world, survivor_day.DAY_AS_OF),
+        clock=lambda: survivor_day.RUN_CLOCK,
+    )
+
+    lines = out.splitlines()
+    assert code == 1
+    assert lines[0] == lines[-1] == book.banner
+    assert any("NONE PLANNED tonight" in line for line in lines)
+    assert err[0] == survivor_day.INJECTED
+    assert survivor_day.NO_NEW_ORDERS in err[1:]
