@@ -37,7 +37,8 @@ import test_forward_report_survivor as survivor_report
 from research_repo import commit_file, git
 from test_daily_selection_survivor_day import seeded  # noqa: F401  (a module fixture, reused)
 
-from openalpha_cn import strategy_survivor_book
+from openalpha_cn import cli, strategy_survivor_book
+from openalpha_cn.panel_ingest import session_publication_instant
 
 daily = tds.daily
 forward_report = survivor_report.forward_report
@@ -493,36 +494,134 @@ PARALLEL_SETTINGS: Final[dict[str, Any]] = {
 """A parallel registration's settings: the day's measurement settings and the base it names."""
 
 
-def _parallel_world(root: Path, seeded_runtime: Path) -> tds.World:
+def _parallel_world(root: Path) -> tds.World:
     """A committed parallel registration (a v2 book carrying plan A's rule beside a base it names)
-    and a copy of the seeded panel."""
+    and its own, empty runtime directory.
+
+    From `V2-P7-027`'s shared-panel plan on, a parallel book keeps no panel of its own: it reads
+    the base book's through `--panel-runtime-dir` (R-S1/R-S2), so this world starts with no
+    `panel/` at all and each run is handed `base_panel` below."""
     repo, registration = survivor_report._repository(
         root, PARALLEL_CONFIG, settings=PARALLEL_SETTINGS
     )
     runtime = root / "runtime"
-    shutil.copytree(seeded_runtime, runtime)
     market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
     return tds.World(repo=repo, registration=registration, runtime=runtime, market=market)
+
+
+def _seed_base_panel(seeded_runtime: Path, root: Path) -> Path:
+    """The base book's panel as its 6 April evening leaves it (R-S3): the seeded panel (3 April)
+    fetched through the session for every target the survivor evening reads, and the four
+    composite factors built at the session's 16:30."""
+    runtime = root / "base-runtime"
+    shutil.copytree(seeded_runtime, runtime)
+    market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
+    targets = daily.targets_for_survivor(daily.survivor_builds(survivor_day._survivor()))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("TUSHARE_TOKEN", tds.SECRET_TOKEN)
+        patch.setattr(cli, "_panel_transport", lambda: market)
+        patch.setattr(cli, "_panel_clock", lambda: tds.WALL_CLOCK)
+        market.today = survivor_day.DAY
+        arguments = ["panel", "build", "--runtime-dir", str(runtime), "--year", "2026"]
+        arguments += [
+            "--as-of",
+            survivor_day.DAY_AS_OF.isoformat(),
+            "--exchange",
+            "SSE",
+            "--incremental",
+            "--json",
+        ]
+        for target in targets:
+            arguments += ["--dataset", target]
+        built = daily.invoke(arguments)
+        assert built.exit_code == 0, built.reason()
+        arguments = ["factor", "build", "--runtime-dir", str(runtime)]
+        for factor in survivor_day.BOOK.composite_factors:
+            arguments += ["--factor", factor]
+        arguments += [
+            "--tier",
+            "processed",
+            "--transform",
+            str(survivor_day.CONFIG["adapter"]["transform"]),
+            "--year",
+            "2026",
+            "--exchange",
+            "SSE",
+            "--max-staleness-days",
+            "30",
+            "--as-of",
+            session_publication_instant(survivor_day.DAY).isoformat(),
+            "--json",
+        ]
+        built = daily.invoke(arguments)
+        assert built.exit_code == 0, built.reason()
+    return runtime
+
+
+@pytest.fixture(scope="module")
+def base_panel(
+    tmp_path_factory: pytest.TempPathFactory,
+    seeded: Path,  # noqa: F811
+) -> Path:
+    """The base book's completed panel for 6 April, built once: every parallel book in this file
+    reads it read-only (`--panel-runtime-dir`) instead of keeping a clone (R-S3)."""
+    return _seed_base_panel(seeded, tmp_path_factory.mktemp("smoke-base"))
+
+
+@pytest.fixture(scope="module")
+def base_morning(base_panel: Path) -> Path:
+    """The base book's morning re-check for 6 April's evening: its one `namechange` fetch, at
+    08:30 Shanghai -- the `fetched_at` a parallel book's morning requires (R-S4)."""
+    market = survivor_day.SurvivorMarket(open_days=tds.OPEN_2026)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("TUSHARE_TOKEN", tds.SECRET_TOKEN)
+        patch.setattr(cli, "_panel_transport", lambda: market)
+        patch.setattr(cli, "_panel_clock", lambda: tds.WALL_CLOCK)
+        market.today = MORNING_AS_OF.date()
+        arguments = ["panel", "build", "--runtime-dir", str(base_panel), "--year", "2026"]
+        arguments += [
+            "--as-of",
+            MORNING_AS_OF.isoformat(),
+            "--exchange",
+            "SSE",
+            "--incremental",
+            "--json",
+            "--dataset",
+            "namechange",
+        ]
+        built = daily.invoke(arguments)
+    assert built.exit_code == 0, built.reason()
+    return base_panel
 
 
 @pytest.fixture(scope="module")
 def parallel_evening(
     tmp_path_factory: pytest.TempPathFactory,
-    seeded: Path,  # noqa: F811
+    base_panel: Path,
 ) -> Evening:
     """A parallel book's first evening (6 April), run once through `main` with `--json`.
 
-    The real entry-veto window is read: the seeded panel holds the five sessions before 6 April,
-    so the v2 book's rule answers with its own set (the seeded market's up-limit rows) and the
-    day completes. Nothing here stubs the veto -- the banner is a print-boundary fact, and the
-    day behind it is the parallel book's own."""
-    world = _parallel_world(tmp_path_factory.mktemp("parallel-evening"), seeded)
+    The panel is the base book's (`base_panel`), read read-only through `--panel-runtime-dir`
+    since the shared-panel plan: the parallel runtime directory holds no panel of its own, so
+    the list printed here is the same list, from the same data, on the base book's panel.
+
+    The real entry-veto window is read from that panel: it holds the five sessions before 6
+    April, so the v2 book's rule answers with its own set (the scripted market's up-limit rows)
+    and the day completes. Nothing here stubs the veto -- the banner is a print-boundary fact,
+    and the day behind it is the parallel book's own."""
+    world = _parallel_world(tmp_path_factory.mktemp("parallel-evening"))
     with pytest.MonkeyPatch.context() as patch:
         tds._bind(patch, world.repo, world.market)
         world.market.today = survivor_day.DAY
         code, out, err = _invoke(
             daily.main,
-            _day_arguments(world, survivor_day.DAY_AS_OF, "--json"),
+            _day_arguments(
+                world,
+                survivor_day.DAY_AS_OF,
+                "--json",
+                "--panel-runtime-dir",
+                str(base_panel),
+            ),
             clock=lambda: survivor_day.RUN_CLOCK,
         )
     return Evening(world=world, code=code, out=out, err=err)
@@ -673,15 +772,23 @@ def test_a_parallel_evening_in_json_names_the_book_its_rule_and_the_banner(
 
 
 def test_a_parallel_evening_printed_again_as_text_is_bannered_first_and_last(
-    parallel_world: tds.World,
+    parallel_world: tds.World, base_panel: Path
 ) -> None:
     """The completed day printed again (no request): the same print path as the evening's, and
-    the parallel book's list says which book it is on its first and its last line."""
+    the parallel book's list says which book it is on its first and its last line.
+
+    The calendar the reprint reads comes from the base book's panel (R-S3), passed the same
+    read-only way the evening passed it: the book keeps no panel in its own runtime directory."""
     book = _identity(parallel_world)
 
     code, out, err = _invoke(
         daily.main,
-        _day_arguments(parallel_world, survivor_day.DAY_AS_OF),
+        _day_arguments(
+            parallel_world,
+            survivor_day.DAY_AS_OF,
+            "--panel-runtime-dir",
+            str(base_panel),
+        ),
         clock=lambda: survivor_day.RUN_CLOCK,
     )
 
@@ -697,15 +804,25 @@ def test_a_parallel_evening_printed_again_as_text_is_bannered_first_and_last(
 
 @pytest.mark.parametrize("json_output", [False, True])
 def test_a_parallel_morning_recheck_is_bannered(
-    parallel_world: tds.World, json_output: bool
+    parallel_world: tds.World, base_morning: Path, json_output: bool
 ) -> None:
+    """The morning re-check prints the book's advice, bannered first and last (or under the JSON
+    `parallel` key). Its one fetch is the base book's: it reads that `namechange` corpus from the
+    base panel (`base_morning` has stored today's, R-S4) through `--panel-runtime-dir`, and the
+    advice it prints is the same advice, on the same data, as on a book with a panel of its own."""
     parallel_world.market.today = MORNING_AS_OF.date()
     book = _identity(parallel_world)
     flags = ["--morning-recheck", *(["--json"] if json_output else [])]
 
     code, out, err = _invoke(
         daily.main,
-        _day_arguments(parallel_world, MORNING_AS_OF, *flags),
+        _day_arguments(
+            parallel_world,
+            MORNING_AS_OF,
+            *flags,
+            "--panel-runtime-dir",
+            str(base_morning),
+        ),
         clock=lambda: MORNING_AS_OF + timedelta(minutes=5),
     )
 
@@ -743,11 +860,14 @@ def test_a_base_evening_and_morning_carry_no_parallel_key(
 def test_a_refused_parallel_evening_is_bannered_around_the_list_it_still_prints(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    seeded: Path,  # noqa: F811
+    base_panel: Path,
 ) -> None:
     """Step 8 refused: the day's document as far as it got is printed as the parallel book's list,
-    so the refusal path is bannered too -- the user reading it knows which book's list this is."""
-    world = _parallel_world(tmp_path, seeded)
+    so the refusal path is bannered too -- the user reading it knows which book's list this is.
+
+    The day before the refusal is the parallel book's own on the base book's panel (R-S3): the
+    scripts are the same ones, read read-only through `--panel-runtime-dir`."""
+    world = _parallel_world(tmp_path)
     tds._bind(monkeypatch, world.repo, world.market)
     monkeypatch.setattr(strategy_survivor_book, "evening", survivor_day._refused_evening)
     world.market.today = survivor_day.DAY
@@ -755,7 +875,12 @@ def test_a_refused_parallel_evening_is_bannered_around_the_list_it_still_prints(
 
     code, out, err = _invoke(
         daily.main,
-        _day_arguments(world, survivor_day.DAY_AS_OF),
+        _day_arguments(
+            world,
+            survivor_day.DAY_AS_OF,
+            "--panel-runtime-dir",
+            str(base_panel),
+        ),
         clock=lambda: survivor_day.RUN_CLOCK,
     )
 
